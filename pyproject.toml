@@ -49,10 +49,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Kairatzh/cida"
-Repository = "https://github.com/Kairatzh/cida.git"
-Documentation = "https://github.com/Kairatzh/cida#readme"
-Issues = "https://github.com/Kairatzh/cida/issues"
+Homepage = "https://github.com/Kairatzh/CIDA-plugin"
+Repository = "https://github.com/Kairatzh/CIDA-plugin.git"
+Documentation = "https://github.com/Kairatzh/CIDA-plugin#readme"
+Issues = "https://github.com/Kairatzh/CIDA-plugin/issues"
 
 [tool.setuptools]
 packages = ["cida_plugin"]
