@@ -1,12 +1,5 @@
 """
-CIDAPlugin v2 — Universal Evidence-Grounded Multi-Agent Deliberation Layer.
-
-Что нового в v2:
-  1. TransformerAgentUpdater: GRU заменён на cross-attention + gated evidence fusion.
-  2. EMA Reliability Tracker: rho обновляется автоматически на основе согласованности
-     агентов с консенсусом. Больше не нужно передавать rho снаружи.
-  3. Learnable D-Schedule: расписание разногласий обучается внутри OmegaLossSystem.
-  4. Все параметры управляются через CIDAPluginConfig.
+CIDAPlugin — Universal Evidence-Grounded Multi-Agent Deliberation Layer.
 """
 import os
 import torch
@@ -20,13 +13,15 @@ from .deliberation import (
     MessageFormulator,
     CounterargumentCommunication,
     AgentUpdater,
+    PerspectiveProjector,
+    AdaptiveDSchedule,
 )
-from .consensus import ConsensusAggregator, HaltingPredictor
+from .consensus import ConsensusAggregator, HaltingPredictor, ReliabilityTracker
 
 
 class CIDAPlugin(nn.Module):
     """
-    Универсальный CIDA-Plugin v2.
+    Универсальный CIDA-Plugin.
 
     Принимает pooled_output от ЛЮБОГО энкодера через input_proj,
     запускает многоагентный deliberation, возвращает калиброванное
@@ -73,10 +68,14 @@ class CIDAPlugin(nn.Module):
 
         # [v2] TransformerAgentUpdater с num_attn_heads из конфига
         self.updater = AgentUpdater(
-            cfg.d_hidden, cfg.num_classes, num_heads=cfg.num_attn_heads
+            cfg.d_hidden, cfg.num_classes, num_heads=cfg.num_attn_heads,
+            multi_label=cfg.multi_label
         )
 
-        self.consensus = ConsensusAggregator()
+        # [v3+] Передаём normalize_components из конфига
+        self.consensus = ConsensusAggregator(
+            normalize_components=cfg.normalize_components
+        )
         self.halter = HaltingPredictor(cfg.d_hidden, cfg.num_agents)
 
         # Gated communication warm-up
@@ -86,14 +85,18 @@ class CIDAPlugin(nn.Module):
         )
         nn.init.constant_(self.comm_gate[0].bias, -2.0)
 
-        # ── [v2] EMA Reliability Tracker ─────────────────────────────────────
-        # rho_ema хранит надёжность каждого агента как скользящее среднее.
-        # Обновляется автоматически на основе согласия с консенсусом.
-        # register_buffer: сохраняется в state_dict, но НЕ обучается через grad.
-        self.register_buffer(
-            "rho_ema",
-            torch.ones(1, cfg.num_agents, 1)  # начинаем с единицы (равные агенты)
-        )
+        # ── [v3] Perspective Projector ────────────────────────────────────────
+        if cfg.use_perspective_projector:
+            self.perspective_projector = PerspectiveProjector(
+                cfg.num_agents, cfg.d_input, cfg.d_hidden
+            )
+
+        # ── [v3+] Adaptive D-Schedule (PI-controller) ─────────────────────────
+        if cfg.use_adaptive_d_schedule:
+            self.adaptive_d_schedule = AdaptiveDSchedule(cfg.d_hidden)
+
+        # ── [v3] Non-circular Reliability Tracker ─────────────────────────────
+        self.reliability_tracker = ReliabilityTracker(cfg.num_agents, cfg.rho_decay)
 
     # ── Hugging Face Serialization ────────────────────────────────────────────
 
@@ -130,31 +133,10 @@ class CIDAPlugin(nn.Module):
         model.load_state_dict(state_dict)
         return model
 
-    # ── EMA Reliability Update ────────────────────────────────────────────────
-
-    @torch.no_grad()
-    def _update_rho(self, b_all: list, p_final: torch.Tensor):
-        """
-        Обновляет EMA надёжности агентов после каждого forward pass.
-
-        Логика: агент надёжен, если его финальное верование близко к
-        групповому консенсусу (p_final). Надёжность = 1 - L1(b_i, p_final).
-
-        Обновление происходит только во время обучения (self.training).
-        """
-        b_final = b_all[-1]                                    # (B, M, K)
-        p_expanded = p_final.unsqueeze(1).expand_as(b_final)  # (B, M, K)
-
-        # agreement ∈ [0, 1]: 1 = полное согласие с консенсусом
-        agreement = 1.0 - torch.norm(b_final - p_expanded, p=1, dim=-1, keepdim=True)
-        agreement = agreement.clamp(min=0.0)   # (B, M, 1)
-
-        # EMA по батчу: берём среднее по примерам
-        batch_rho = agreement.mean(dim=0, keepdim=True)  # (1, M, 1)
-
-        # Экспоненциальное скользящее среднее
-        decay = self.config.rho_decay
-        self.rho_ema = decay * self.rho_ema + (1.0 - decay) * batch_rho
+    # NOTE: _update_rho (legacy v2 EMA) удалён.
+    # Причина: circular dependency — надёжность считалась от согласия с
+    # консенсусом, который сам зависит от надёжности. Заменён на
+    # ReliabilityTracker (v3), который оценивает надёжность по accuracy.
 
     # ── Forward ───────────────────────────────────────────────────────────────
 
@@ -165,6 +147,7 @@ class CIDAPlugin(nn.Module):
         mask: torch.Tensor = None,
         rho: torch.Tensor = None,
         epoch_fraction: float = 0.0,
+        y_true: torch.Tensor = None,
     ) -> dict:
         """
         Параметры
@@ -174,6 +157,7 @@ class CIDAPlugin(nn.Module):
         mask        : (B, seq_len)              маска паддинга
         rho         : (B, M, 1) or None        переопределить EMA rho (для тестов)
         epoch_fraction : float                 прогресс обучения [0, 1]
+        y_true      : (B,) or (B, K)           метки для обновления reliability
 
         Возвращает dict:
             p_final     : (B, K)      — финальное калиброванное распределение
@@ -184,9 +168,11 @@ class CIDAPlugin(nn.Module):
             h_all       : list        — история сигналов halting
             L_dom       : scalar      — штраф за доминирование
             L_role      : scalar      — штраф за несовместимость ролей
+            L_orth      : scalar      — [v4] штраф за коллинеарность проекций
             state_final : AgentState  — финальное состояние
             w_final     : (B, M)      — веса агентов в консенсусе
             rounds_used : int         — фактическое число раундов
+            ponder_cost : (B,)        — [v4] ожидаемое число раундов (ACT)
             rho_snapshot: (M,)        — текущие EMA надёжности агентов
         """
         cfg = self.config
@@ -202,18 +188,29 @@ class CIDAPlugin(nn.Module):
 
         # ── Инициализация агентов ─────────────────────────────────────────────
         roles = self.role_embeddings()   # (M, d_hidden)
-        s_t = (
-            h_cls.unsqueeze(1).expand(B, M, cfg.d_hidden)
-            + roles.unsqueeze(0).expand(B, M, cfg.d_hidden)
-        )
+        
+        if cfg.use_perspective_projector:
+            # Каждому агенту своя проекция
+            s_t = self.perspective_projector(pooled) + roles.unsqueeze(0)
+        else:
+            # Все агенты получают один и тот же pooled_output + свои роли
+            s_t = (
+                h_cls.unsqueeze(1).expand(B, M, cfg.d_hidden)
+                + roles.unsqueeze(0).expand(B, M, cfg.d_hidden)
+            )
 
         seq_len = H.size(1) if H is not None else 1
         e_init = torch.zeros_like(s_t)
         r_init = torch.zeros_like(s_t)
 
+        if cfg.multi_label:
+            b_init = torch.full((B, M, cfg.num_classes), 0.5, device=pooled.device)
+        else:
+            b_init = torch.zeros(B, M, cfg.num_classes, device=pooled.device)
+
         state_t = AgentState(
             s=s_t,
-            b=torch.zeros(B, M, cfg.num_classes, device=pooled.device),
+            b=b_init,
             u=torch.ones(B, M, 1, device=pooled.device),
             p=torch.zeros(B, M, seq_len, device=pooled.device),
             e=e_init,
@@ -221,18 +218,27 @@ class CIDAPlugin(nn.Module):
         )
         state_t = self.updater(state_t, r_init, e_init)
 
-        # rho: используем EMA или переданное значение
+        # rho: используем v3 ReliabilityTracker или переданное значение
         if rho is None:
-            rho = self.rho_ema.expand(B, M, 1)
+            rho = self.reliability_tracker.rho.expand(B, M, 1)
         else:
             rho = rho.to(pooled.device)
 
         # ── Deliberation Loop ─────────────────────────────────────────────────
-        b_all, u_all, h_all, m_all, p_ptr_all = [], [], [], [], []
-        b_all.append(state_t.b)
-        u_all.append(state_t.u)
+        b_all, u_all, h_all, m_all, p_ptr_all, d_schedule = [], [], [], [], [], []
 
         rounds_used = 0
+
+        # [v3+] Интегральный аккумулятор для PI-контроллера d-schedule
+        pi_integral_acc = torch.zeros(B, 1, device=pooled.device)
+
+        # [v4] ACT: аккумуляторы для взвешенного консенсуса
+        if cfg.use_act_halting:
+            act_remainder = torch.ones(B, 1, device=pooled.device)
+            act_p_accum = torch.zeros(B, cfg.num_classes, device=pooled.device)
+            act_w_accum = torch.zeros(B, M, device=pooled.device)
+            act_L_dom_accum = torch.tensor(0.0, device=pooled.device)
+            ponder_cost = torch.zeros(B, device=pooled.device)
 
         for t in range(cfg.max_rounds):
             rounds_used = t + 1
@@ -270,7 +276,7 @@ class CIDAPlugin(nn.Module):
                     r_t = F.dropout(r_t, p=cfg.comm_dropout, training=True)
 
             # Halting signal
-            h_t = self.halter(state_t.s)
+            h_t = self.halter(state_t.s)   # (B, 1)
             h_all.append(h_t)
 
             # [v2] TransformerAgentUpdater: cross-attn + gated evidence + FFN
@@ -278,30 +284,83 @@ class CIDAPlugin(nn.Module):
             b_all.append(state_t.b)
             u_all.append(state_t.u)
 
-            # ── Confidence-based Early Stopping ──────────────────────────────
-            if not self.training and cfg.early_stop_threshold is not None:
-                with torch.no_grad():
-                    tmp_p, _, _ = self.consensus(
-                        state_t.b, state_t.u, rho, epoch_fraction=epoch_fraction
-                    )
-                    if tmp_p.max(dim=-1).values.mean().item() >= cfg.early_stop_threshold:
-                        break
+            # [v4] ACT: накапливаем взвешенный консенсус
+            if cfg.use_act_halting:
+                # Промежуточный консенсус этого раунда
+                p_t, w_t, L_dom_t = self.consensus(
+                    state_t.b, state_t.u, rho,
+                    epoch_fraction=epoch_fraction,
+                    multi_label=cfg.multi_label,
+                )
+
+                if t < cfg.max_rounds - 1:
+                    # Вес раунда = min(h_t, remainder) — не можем потратить больше остатка
+                    w_round = torch.min(h_t, act_remainder)     # (B, 1)
+                    act_remainder = act_remainder - w_round
+                else:
+                    # Последний раунд забирает весь остаток
+                    w_round = act_remainder                      # (B, 1)
+
+                act_p_accum = act_p_accum + w_round * p_t       # (B, K)
+                act_w_accum = act_w_accum + w_round * w_t       # (B, M)
+                act_L_dom_accum = act_L_dom_accum + w_round.mean() * L_dom_t
+                ponder_cost = ponder_cost + w_round.squeeze(-1) * (t + 1)  # ожидаемый раунд
+
+            # [v3+] Adaptive D-Schedule с PI-контроллером
+            if cfg.use_adaptive_d_schedule:
+                b_i = state_t.b.unsqueeze(2)
+                b_j = state_t.b.unsqueeze(1)
+                disag = torch.norm(b_i - b_j, p=1, dim=-1).mean(dim=(1, 2))  # (B,)
+                disag = disag.unsqueeze(-1)  # (B, 1)
+
+                d_t, error = self.adaptive_d_schedule(
+                    h_cls, disag, integral_acc=pi_integral_acc
+                )
+                pi_integral_acc = pi_integral_acc + error
+                d_schedule.append(d_t)
+
+            # ── Confidence-based Early Stopping (inference only, non-ACT) ─────
+            if not self.training and not cfg.use_act_halting:
+                if cfg.early_stop_threshold is not None:
+                    with torch.no_grad():
+                        tmp_p, _, _ = self.consensus(
+                            state_t.b, state_t.u, rho, epoch_fraction=epoch_fraction
+                        )
+                        if tmp_p.max(dim=-1).values.mean().item() >= cfg.early_stop_threshold:
+                            break
 
         # ── Финальный консенсус ───────────────────────────────────────────────
-        if cfg.abl_no_poe:
+        if cfg.use_act_halting:
+            # [v4] ACT: p_final = взвешенная сумма консенсусов всех раундов
+            p_final = act_p_accum
+            w_final = act_w_accum
+            L_dom = act_L_dom_accum
+        elif cfg.abl_no_poe:
             w_final = torch.ones(B, M, device=pooled.device) / M
             p_final = state_t.b.mean(dim=1)
             L_dom = torch.tensor(0.0, device=pooled.device)
         else:
             p_final, w_final, L_dom = self.consensus(
-                state_t.b, state_t.u, rho, epoch_fraction=epoch_fraction
+                state_t.b, state_t.u, rho, epoch_fraction=epoch_fraction,
+                multi_label=cfg.multi_label
             )
 
         L_role = self.role_embeddings.get_role_loss()
+        
+        # [v3] Специализированный ролевой лосс
+        L_role_spec = torch.tensor(0.0, device=pooled.device)
+        if cfg.use_explicit_roles and y_true is not None:
+            L_role_spec = self.role_embeddings.get_role_specialization_loss(b_all, y_true)
+            L_role_spec = L_role_spec * cfg.lambda_role_spec
 
-        # ── [v2] Обновление EMA надёжности ───────────────────────────────────
-        if self.training:
-            self._update_rho(b_all, p_final.detach())
+        # [v4] Orthogonality loss
+        L_orth = torch.tensor(0.0, device=pooled.device)
+        if cfg.use_perspective_projector:
+            L_orth = self.perspective_projector.orthogonality_loss() * cfg.lambda_orth
+
+        # ── [v3] Обновление надёжности (нециклическое) ────────────────────────
+        if self.training and y_true is not None:
+            self.reliability_tracker.update(state_t.b, state_t.u, y_true)
 
         return {
             "p_final":      p_final,
@@ -312,9 +371,13 @@ class CIDAPlugin(nn.Module):
             "h_all":        h_all,
             "L_dom":        L_dom,
             "L_role":       L_role,
+            "L_role_spec":  L_role_spec,
+            "L_orth":       L_orth,
             "state_final":  state_t,
             "w_final":      w_final,
             "rounds_used":  rounds_used,
-            # EMA snapshot для мониторинга специализации агентов
-            "rho_snapshot": self.rho_ema.squeeze().detach().cpu(),
+            "d_schedule":   torch.cat(d_schedule, dim=1) if d_schedule else None,
+            "ponder_cost":  ponder_cost if cfg.use_act_halting else None,
+            "rho_snapshot": self.reliability_tracker.rho.squeeze().detach().cpu(),
         }
+
