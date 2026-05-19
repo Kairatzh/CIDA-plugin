@@ -9,11 +9,34 @@ class DebateDiagnostics:
     @staticmethod
     def expected_calibration_error(p_final: torch.Tensor, y: torch.Tensor, n_bins: int = 10):
         """Computes Expected Calibration Error (ECE) for final probability vector."""
+        if y.dim() == 2: # Multi-label
+            # If p_final contains logits (values > 1 or < 0 possible), apply sigmoid
+            if p_final.max() > 1.0 or p_final.min() < 0.0:
+                probs = torch.sigmoid(p_final)
+            else:
+                probs = p_final
+            
+            K = probs.size(1)
+            total_ece = 0.0
+            for k in range(K):
+                total_ece += DebateDiagnostics._binary_ece(probs[:, k], y[:, k], n_bins)
+            return total_ece / K
+            
+        # Single-label (original logic)
         confidences, predictions = torch.max(p_final, dim=1)
         accuracies = (predictions == y)
-        
-        ece = torch.zeros(1, device=p_final.device)
-        bin_boundaries = torch.linspace(0, 1, n_bins + 1, device=p_final.device)
+        return DebateDiagnostics._calculate_ece_from_bins(confidences, accuracies, n_bins, p_final.device)
+
+    @staticmethod
+    def _binary_ece(probs: torch.Tensor, targets: torch.Tensor, n_bins: int):
+        """Binary ECE for a single class."""
+        accuracies = (probs > 0.5) == targets
+        return DebateDiagnostics._calculate_ece_from_bins(probs, accuracies, n_bins, probs.device)
+
+    @staticmethod
+    def _calculate_ece_from_bins(confidences: torch.Tensor, accuracies: torch.Tensor, n_bins: int, device: torch.device):
+        ece = torch.zeros(1, device=device)
+        bin_boundaries = torch.linspace(0, 1, n_bins + 1, device=device)
         
         for bin_idx in range(n_bins):
             in_bin = (confidences > bin_boundaries[bin_idx]) & (confidences <= bin_boundaries[bin_idx + 1])
