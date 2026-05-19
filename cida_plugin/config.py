@@ -1,10 +1,5 @@
 """
 CIDAPluginConfig — единая точка конфигурации для CIDA-Plugin.
-
-v2: добавлены параметры для:
-  - TransformerAgentUpdater (num_attn_heads)
-  - EMA Reliability Tracker (rho_decay)
-  - Learnable D-Schedule (learnable_d_schedule)
 """
 from dataclasses import dataclass, asdict
 import json
@@ -56,10 +51,18 @@ class CIDAPluginConfig:
 
     Ablation Flags
     --------------
-    abl_no_pointers : bool      Отключить evidence pointers.
-    abl_no_messages : bool      Отключить структурированные сообщения.
-    abl_no_poe : bool           Отключить Product-of-Experts агрегацию.
     abl_no_communication : bool Полностью отключить коммуникацию.
+
+    Параметры v3
+    ------------
+    use_perspective_projector : bool
+        Если True — каждый агент имеет свою уникальную проекцию входа.
+    use_adaptive_d_schedule : bool
+        Если True — расписание разногласий адаптируется к сложности примера.
+    use_explicit_roles : bool
+        Если True — агенты получают фиксированные роли (Прокурор, Защитник и т.д.).
+    lambda_role_spec : float
+        Вес лосса за специализацию ролей.
     """
     # ─── Размерности ────────────────────────────────────────────────────────────
     d_input: int = 128
@@ -88,6 +91,27 @@ class CIDAPluginConfig:
     abl_no_messages: bool = False
     abl_no_poe: bool = False
     abl_no_communication: bool = False
+
+    # ─── Параметры v3 ──────────────────────────────────────────────────────────
+    use_perspective_projector: bool = True
+    use_adaptive_d_schedule: bool = True
+    use_explicit_roles: bool = True
+    lambda_role_spec: float = 0.2
+    multi_label: bool = False
+
+    # ─── Параметры v4 (ортогональность + ACT) ─────────────────────────────────
+    lambda_orth: float = 0.1
+    # Вес штрафа за коллинеарность проекций агентов.
+    # Заставляет PerspectiveProjector создавать ортогональные представления.
+    use_act_halting: bool = True
+    # Если True — HaltingPredictor работает как ACT (Adaptive Computation Time):
+    # каждый раунд получает вес h_t, финальный ответ = взвешенная сумма консенсусов.
+    # Простые примеры решаются за 1 раунд, сложные — за max_rounds.
+
+    # ─── Консенсус ──────────────────────────────────────────────────────────────
+    normalize_components: bool = True
+    # Если True — u и rho нормализуются к [0,1] перед вычислением весов.
+    # Гарантирует инвариантность к аффинным преобразованиям шкал (см. ConsensusAggregator).
 
     def __post_init__(self):
         assert self.d_input > 0, "d_input должен быть положительным"
