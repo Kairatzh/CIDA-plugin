@@ -18,8 +18,10 @@
 
 ### Ячейка 1: Установка зависимостей
 ```python
-# Установка Unsloth (оптимизированные ядра для ускорения 2-5x)
-!pip install unsloth torchdiffeq bitsandbytes accelerate peft datasets -q
+# Установка свежих версий библиотек прямо из GitHub (так как DiffusionGemma — сверхновая модель)
+!pip install git+https://github.com/huggingface/transformers.git -q
+!pip install git+https://github.com/unslothai/unsloth.git -q
+!pip install torchdiffeq bitsandbytes accelerate peft datasets -q
 
 # Проверка GPU
 import torch

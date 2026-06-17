@@ -320,6 +320,7 @@ def load_model_and_tokenizer(cfg: KairosConfig, dry_run: bool = False):
         max_seq_length=cfg.max_seq_length,
         dtype=None,  # Авто-определение
         load_in_4bit=True,
+        trust_remote_code=True, # Обязательно для новых архитектур как DiffusionGemma
     )
 
     log.info(f"Применяем LoRA (r={cfg.lora_r}, alpha={cfg.lora_alpha})...")
