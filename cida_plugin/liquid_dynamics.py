@@ -20,7 +20,15 @@ Liquid Neural ODE Dynamics для CIDA-Plugin.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchdiffeq import odeint
+
+try:
+    from torchdiffeq import odeint_adjoint as odeint_adj
+    from torchdiffeq import odeint
+    _HAS_ADJOINT = True
+except ImportError:
+    from torchdiffeq import odeint
+    odeint_adj = odeint
+    _HAS_ADJOINT = False
 
 from .agent import AgentState
 from .deliberation import (
@@ -193,6 +201,9 @@ class LiquidDeliberationDynamics(nn.Module):
 class LiquidDeliberationSolver(nn.Module):
     """
     Запускает ODE решатель для deliberation.
+    
+    При use_adjoint=True использует adjoint method для экономии VRAM:
+    градиенты считаются без хранения промежуточных состояний.
     """
 
     def __init__(
@@ -207,6 +218,7 @@ class LiquidDeliberationSolver(nn.Module):
         rtol: float = 1e-3,
         T: float = 4.0,
         trajectory_save_every: int = 10,
+        use_adjoint: bool = False,
     ):
         super().__init__()
         self.dynamics = LiquidDeliberationDynamics(
@@ -221,6 +233,8 @@ class LiquidDeliberationSolver(nn.Module):
         self.atol = atol
         self.rtol = rtol
         self.T = T
+        self.use_adjoint = use_adjoint and _HAS_ADJOINT
+        self._integrate = odeint_adj if self.use_adjoint else odeint
 
     def forward(
         self,
@@ -242,7 +256,7 @@ class LiquidDeliberationSolver(nn.Module):
 
         t = torch.tensor([0.0, self.T], device=device)
 
-        states = odeint(
+        states = self._integrate(
             self.dynamics,
             s_init,
             t,
@@ -265,3 +279,4 @@ class LiquidDeliberationSolver(nn.Module):
         self.dynamics.clear_context()
 
         return s_final, trajectory
+
