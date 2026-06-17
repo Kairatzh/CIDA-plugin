@@ -310,14 +310,9 @@ def load_model_and_tokenizer(cfg: KairosConfig, dry_run: bool = False):
         log.info("=== DRY RUN: создаём фейковую модель ===")
         return _create_dummy_model(cfg)
 
-    try:
-        from unsloth import FastLanguageModel
-    except ImportError:
-        log.error(
-            "Unsloth не установлен! Установите: pip install unsloth\n"
-            "Или используйте --dry_run для тестирования без GPU."
-        )
-        sys.exit(1)
+    # Убрал try-except, чтобы мы увидели реальную ошибку импорта,
+    # а не заглушку "Unsloth не установлен"
+    from unsloth import FastLanguageModel
 
     log.info(f"Загружаем {cfg.model_id} через Unsloth (4-bit)...")
     model, tokenizer = FastLanguageModel.from_pretrained(
