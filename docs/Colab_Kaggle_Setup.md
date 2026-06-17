@@ -23,6 +23,9 @@
 !pip install git+https://github.com/unslothai/unsloth.git -q
 !pip install torchdiffeq bitsandbytes accelerate peft datasets -q
 
+# Удаляем torchaudio, так как он ломает загрузку из-за конфликта версий в Colab
+!pip uninstall torchaudio -y
+
 # Проверка GPU
 import torch
 print(f"GPU: {torch.cuda.get_device_name(0)}")

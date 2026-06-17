@@ -32,6 +32,11 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 
+try:
+    import unsloth
+except ImportError:
+    pass  # Handle gracefully for dry-run on CPU
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
