@@ -213,3 +213,10 @@ __marimo__/
 # Local results and IDE
 results/
 .idea/
+
+# CIDA Results
+*.json
+cida_chestxray_results/
+cida_results/
+.gemini/
+
