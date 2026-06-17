@@ -79,3 +79,46 @@ class DebateDiagnostics:
             dist = torch.norm(b_i - b_j, p=1, dim=-1).mean()
             divergence.append(dist.item())
         return divergence
+
+    # ─── [v5] TTT Diagnostics ────────────────────────────────────────────────
+
+    @staticmethod
+    def ttt_adaptation_magnitude(ttt_info: dict) -> float:
+        """
+        Насколько сильно TTT изменил веса агентов (L2 norm of param shift).
+        
+        Полезно для мониторинга: слишком маленький сдвиг = TTT бесполезен,
+        слишком большой = риск catastrophic forgetting.
+        Хороший диапазон: 0.01 — 1.0.
+        """
+        if ttt_info is None:
+            return 0.0
+        return ttt_info.get("param_shift", 0.0)
+
+    @staticmethod
+    def ttt_loss_curve(ttt_info: dict) -> list:
+        """
+        Кривая self-supervised loss по шагам TTT.
+        
+        Должна убывать: loss[0] > loss[1] > ... > loss[K-1].
+        Если не убывает — lr слишком большой или K слишком маленький.
+        """
+        if ttt_info is None:
+            return []
+        return ttt_info.get("losses", [])
+
+    @staticmethod
+    def ttt_convergence_ratio(ttt_info: dict) -> float:
+        """
+        Отношение финального loss к начальному: loss[-1] / loss[0].
+        
+        < 0.5 = хорошая адаптация (loss уменьшился вдвое+).
+        ≈ 1.0 = TTT не помогает, стоит увеличить K или lr.
+        > 1.0 = расходимость, уменьшить lr.
+        """
+        if ttt_info is None:
+            return 1.0
+        losses = ttt_info.get("losses", [])
+        if len(losses) < 2:
+            return 1.0
+        return losses[-1] / max(losses[0], 1e-9)

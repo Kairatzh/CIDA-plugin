@@ -1,5 +1,5 @@
 """
-CIDA-Plugin: Universal Evidence-Grounded Multi-Agent Deliberation Layer.
+CIDA-Plugin: Universal Evidence-Grounded Multi-Agent Deliberation Layer (v3).
 
 Использование (минимальное):
     from cida_plugin import CIDAPlugin, CIDAPluginConfig
@@ -15,7 +15,12 @@ CIDA-Plugin: Universal Evidence-Grounded Multi-Agent Deliberation Layer.
 
 from .config import CIDAPluginConfig
 from .core import CIDAPlugin
-from .agent import AgentState, RoleEmbeddings
+from .agent import (
+    AgentState,
+    apply_role_prior,
+    compute_role_orthogonality_loss,
+    RoleNames,
+)
 from .deliberation import (
     AgentEvidenceExtractor,
     MessageFormulator,
@@ -23,19 +28,30 @@ from .deliberation import (
     AgentUpdater,
 )
 from .consensus import ConsensusAggregator, HaltingPredictor
-from .losses import OmegaLossSystem
+from .losses import CIDALoss
 from .diagnostics import DebateDiagnostics
+from .ttt import TestTimeTrainer
+from .liquid_dynamics import LiquidDeliberationSolver
+from .hf import wrap_hf_model, HFModelWithCIDA
 
 __all__ = [
     # Главный интерфейс
     "CIDAPlugin",
     "CIDAPluginConfig",
+    "wrap_hf_model",
+    "HFModelWithCIDA",
     # Потери и диагностика
-    "OmegaLossSystem",
+    "CIDALoss",
     "DebateDiagnostics",
+    # [v5] Test-Time Training
+    "TestTimeTrainer",
+    # [v5] Liquid Neural ODE Dynamics
+    "LiquidDeliberationSolver",
     # Компоненты (для кастомных архитектур)
     "AgentState",
-    "RoleEmbeddings",
+    "apply_role_prior",
+    "compute_role_orthogonality_loss",
+    "RoleNames",
     "AgentEvidenceExtractor",
     "MessageFormulator",
     "CounterargumentCommunication",
@@ -43,3 +59,4 @@ __all__ = [
     "ConsensusAggregator",
     "HaltingPredictor",
 ]
+

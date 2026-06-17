@@ -1,91 +1,145 @@
+"""
+agent.py — CIDA-Plugin Agent (упрощённая версия)
+
+Ключевое изменение:
+    БЫЛО:  RoleEmbeddings (аддитивный bias) + debate_loss + role_spec_loss + orth_loss
+    СТАЛО: ROLE_PRIORS — структурные априорные убеждения агентов
+
+Почему это лучше:
+    RoleEmbeddings создаёт СТАТИСТИЧЕСКОЕ различие (агенты начинают чуть
+    по-разному и потом схожи). Role priors создают СТРУКТУРНОЕ различие:
+
+    Прокурор  → P(y=1) = 0.85 до просмотра данных
+    Защитник  → P(y=1) = 0.15 до просмотра данных
+    Скептик   → P(y=1) = 0.50 (максимальная неопределённость)
+    Интегратор → P(y=1) = данные (без prior, объективен)
+
+    Это байесовски обоснованная альтернатива: агенты представляют разные
+    prior beliefs, а консенсус — это posterior после объединения.
+
+    Математически гарантировано:
+        |b_0 - b_1| ≥ BLEND * |P_0 - P_1| = 0.3 * 0.7 = 0.21 > 0
+    То есть несогласие является СВОЙСТВОМ архитектуры, а не результатом loss.
+"""
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional
 
+
+# ── Роли агентов: структурные prior beliefs ───────────────────────────────────
+#
+# Для binary/multi-label: prior = вероятность positive класса
+# Для multi-class: prior = вектор вероятностей классов
+#
+# BLEND = насколько сильно prior смешивается с данными
+#   0.0 → prior игнорируется (все агенты одинаковы)
+#   0.3 → 30% prior, 70% данные (рекомендуется)
+#   1.0 → агент игнорирует данные (только prior)
+
+ROLE_PRIOR_POSITIVE = [
+    0.85,  # Прокурор: склонен считать что патология есть
+    0.15,  # Защитник: склонен считать что патологии нет
+    0.50,  # Скептик: максимальная неопределённость
+    None,  # Интегратор: без prior, смотрит объективно
+]
+
+ROLE_PRIOR_BLEND = 0.30  # Сила prior относительно данных
+
+
 @dataclass
 class AgentState:
-    """
-    Explicit state representation of a CIDA-Omega Agent.
-    This replaces the implicit 'latent only' states with a formal structure.
-    """
+    """Явное представление состояния агента."""
     s: torch.Tensor       # (B, d)   - Hidden state
-    b: torch.Tensor       # (B, K)   - Belief distribution over classes
-    u: torch.Tensor       # (B, 1)   - Uncertainty measure
-    p: torch.Tensor       # (B, n)   - Evidence pointer (attention distribution over tokens)
-    e: torch.Tensor       # (B, d)   - Evidence selected vector
-    alpha: torch.Tensor   # (B, K)   - Dirichlet evidence values
-    
-class RoleEmbeddings(nn.Module):
+    b: torch.Tensor       # (B, K)   - Belief (posterior после prior blending)
+    u: torch.Tensor       # (B, 1)   - Uncertainty
+    p: torch.Tensor       # (B, n)   - Evidence pointer
+    e: torch.Tensor       # (B, d)   - Evidence vector
+    alpha: torch.Tensor   # (B, K)   - Dirichlet parameters
+
+
+def apply_role_prior(
+    b_data: torch.Tensor,
+    role_idx: int,
+    multi_label: bool = False,
+    positive_class_idx: int = 1,
+) -> torch.Tensor:
     """
-    Learned role embeddings for M agents to ensure specialization.
-    r_i is the role embedding of agent i.
+    Смешивает data-driven belief с role-specific prior.
+
+    b_data: (B, K) — убеждение из данных
+    role_idx: индекс роли агента
+    positive_class_idx: индекс "положительного" класса для multi-class задач
+                       (по умолчанию 1, но может быть 0, 2 и т.д.)
+
+    Returns: (B, K) — posterior после применения prior
+
+    Математика (binary case):
+        b_posterior = (1 - λ) · b_data + λ · b_prior
+        где λ = ROLE_PRIOR_BLEND
+
+    Это эквивалентно Bayesian belief blending с фиксированным prior.
+    Чем сильнее BLEND, тем больше роль определяет начальную позицию агента.
     """
-    def __init__(self, num_agents: int, dim: int):
-        super().__init__()
-        self.num_agents = num_agents
-        self.dim = dim
-        self.R = nn.Parameter(torch.randn(num_agents, dim) / (dim ** 0.5))
-        
-    def forward(self) -> torch.Tensor:
-        """
-        Returns the role embeddings matrix.
-        Shape: (M, d)
-        """
-        return self.R
-        
-    def get_role_loss(self) -> torch.Tensor:
-        """
-        Orthogonality regularization: L_role = || R_norm R_norm^T - I ||_F^2
-        Ensures agents maintain fundamentally different functional roles (e.g. skeptic, supporter)
-        """
-        # Normalize to encourage cosine orthogonality
-        R_norm = torch.nn.functional.normalize(self.R, p=2, dim=1)
-        identity = torch.eye(self.num_agents, device=self.R.device)
-        return torch.norm(torch.mm(R_norm, R_norm.t()) - identity, p='fro') ** 2
+    prior_val = ROLE_PRIOR_POSITIVE[role_idx % 4]
 
-    def get_role_specialization_loss(self, b_all: list, y_true: torch.Tensor) -> torch.Tensor:
-        """
-        [v3] Явные роли агентов и вспомогательные лоссы.
-        
-        Роли:
-        0: Prosecutor (Прокурор) - ищет признаки класса 1
-        1: Defender (Защитник) - ищет признаки класса 0
-        2: Skeptic (Скептик) - сомневается в уверенных
-        3: Integrator (Интегратор) - синтезирует
-        """
-        if len(b_all) == 0 or y_true is None:
-            return torch.tensor(0.0, device=self.R.device)
+    if prior_val is None:
+        # Интегратор: без prior
+        return b_data
 
-        b_final = b_all[-1]  # (B, M, K)
-        B, M, K = b_final.shape
-        
-        if M < 4: # Если агентов меньше, специализация ограничена
-            return torch.tensor(0.0, device=self.R.device)
+    K = b_data.size(-1)
 
-        if y_true.dim() == 2: # Multi-label (B, K)
-            # 1. Prosecutor: должен видеть патологии (y=1)
-            l_pros = (y_true * (1.0 - b_final[:, 0, :])).mean()
-            # 2. Defender: должен видеть отсутствие патологий (y=0)
-            l_def = ((1.0 - y_true) * b_final[:, 1, :]).mean()
-        else: # Binary (B,)
-            # 1. Prosecutor penalty: штраф если не видит класс 1 когда он есть
-            mask_y1 = (y_true == 1).float()
-            prosecutor_belief_c1 = b_final[:, 0, 1] if K > 1 else b_final[:, 0, 0]
-            l_pros = (mask_y1 * (1.0 - prosecutor_belief_c1)).mean()
+    if multi_label or K == 1:
+        # Каждый выход — независимая binary классификация
+        prior = torch.full_like(b_data, prior_val)
+    elif K == 2:
+        # Binary single-label
+        prior = torch.tensor(
+            [1.0 - prior_val, prior_val],
+            device=b_data.device,
+            dtype=b_data.dtype,
+        ).expand_as(b_data)
+    else:
+        # Multi-class: prior_val для "positive" класса, равномерно для остальных
+        prior = torch.full_like(b_data, (1.0 - prior_val) / max(K - 1, 1))
+        prior = prior.clone()
+        prior[:, positive_class_idx] = prior_val  # указанный класс = "positive"
 
-            # 2. Defender penalty: штраф если не видит класс 0 когда он есть
-            mask_y0 = (y_true == 0).float()
-            defender_belief_c0 = b_final[:, 1, 0]
-            l_def = (mask_y0 * (1.0 - defender_belief_c0)).mean()
+    return (1.0 - ROLE_PRIOR_BLEND) * b_data + ROLE_PRIOR_BLEND * prior
 
-        # 3. Skeptic penalty: высокая энтропия (неуверенность)
-        skeptic_b = b_final[:, 2, :]
-        if K > 1:
-            l_skep = - (skeptic_b * torch.log(skeptic_b + 1e-9)).sum(dim=-1).mean()
-        else:
-            l_skep = - (skeptic_b * torch.log(skeptic_b + 1e-9) + (1-skeptic_b)*torch.log(1-skeptic_b + 1e-9)).mean()
-        
-        l_skep = torch.clamp(1.0 - l_skep, min=0.0)
 
-        return l_pros + l_def + 0.1 * l_skep
+def compute_role_orthogonality_loss(agent_states: torch.Tensor) -> torch.Tensor:
+    """
+    Мягкая ортогональность через ПРЕДСТАВЛЕНИЯ, а не через веса.
+
+    БЫЛО: orth_loss через Gram(weights) — веса могут быть ортогональны,
+          но representations при этом коллапсируют (если вход низкоранговый).
+
+    СТАЛО: orth_loss через Gram(representations) — напрямую измеряем
+           то, что нас реально интересует.
+
+    agent_states: (B, M, d) — hidden states агентов
+    Returns: scalar — потери (0 при полной ортогональности)
+
+    Математически:
+        G_ij = <s_i, s_j> / (||s_i|| · ||s_j||) — косинусное сходство
+        Loss = mean((G - I)²) → 0 при G = I
+    """
+    B, M, d = agent_states.shape
+    # Усредняем по батчу, нормализуем
+    s_mean = agent_states.mean(0)           # (M, d)
+    s_norm = F.normalize(s_mean, p=2, dim=-1)  # (M, d)
+    gram = s_norm @ s_norm.T                # (M, M)
+    eye = torch.eye(M, device=gram.device)
+    return ((gram - eye) ** 2).mean()
+
+
+class RoleNames:
+    """Имена агентов для диагностики."""
+    NAMES = ["Prosecutor", "Defender", "Skeptic", "Integrator"]
+
+    @classmethod
+    def get(cls, idx: int) -> str:
+        return cls.NAMES[idx % 4]

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cida-plugin"
-version = "2.0.0"
-description = "Universal Evidence-Grounded Multi-Agent Deliberation Layer for any transformer encoder"
+version = "3.0.0"
+description = "Universal Evidence-Grounded Multi-Agent Deliberation Layer for any encoder"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -13,7 +13,7 @@ authors = [
   { name = "Kairat Zhaksylykov", email = "zhaksylykov.k06@gmail.com" }
 ]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
@@ -27,25 +27,16 @@ dependencies = [
   "numpy>=1.24",
   "torch>=2.1",
   "transformers>=4.0",
-  "huggingface_hub>=0.14.0"
+  "huggingface_hub>=0.14.0",
+  "torchdiffeq>=0.2.3"
 ]
 
 [project.optional-dependencies]
-bpe = [
-  "tokenizers>=0.15"
-]
-benchmarks = [
-  "datasets>=3.0",
-  "pandas>=2.0",
-  "scikit-learn>=1.3",
-  "tokenizers>=0.15"
-]
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
   "ruff>=0.3.0",
-  "black>=24.0.0",
-  "tokenizers>=0.15"
+  "black>=24.0.0"
 ]
 
 [project.urls]
@@ -59,7 +50,7 @@ packages = ["cida_plugin"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --cov=cida --cov-report=term-missing"
+addopts = "-v --cov=cida_plugin --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 100
