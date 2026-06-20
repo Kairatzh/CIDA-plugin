@@ -404,7 +404,7 @@ def train_cida_model(csv_path, images_dir, max_samples=2000):
                         
                         with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == 'cuda')):
                             out = model(imgs_224, imgs_448)
-                            loss = F.binary_cross_entropy(out["p_final"], labels)
+                            loss = F.binary_cross_entropy(out["p_final"].float(), labels.float())
                             
                         loss.backward()
                         optimizer.step()
