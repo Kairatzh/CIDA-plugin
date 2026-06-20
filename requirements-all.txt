@@ -1,5 +1,0 @@
-# Include all requirement files
--r requirements.txt
--r requirements-bpe.txt
--r requirements-benchmarks.txt
--r requirements-dev.txt

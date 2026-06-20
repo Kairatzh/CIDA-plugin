@@ -627,7 +627,7 @@ def upload_weights_to_cloud(hf_token=None):
     print("=" * 60)
     
     checkpoints_dir = Path("./checkpoints")
-    archive_name = "kairos_h100_weights.zip"
+    archive_name = "kairos_weights.zip"
     
     # 1. ВСЕГДА сохраняем локально
     print(f"  Создание архива весов {archive_name}...")
@@ -647,8 +647,8 @@ def upload_weights_to_cloud(hf_token=None):
         try:
             print("  [INFO] Загрузка на Hugging Face Hub (приоритет №1)...")
             api = HfApi(token=hf_token)
-            username = api.whoami()["name"]
-            repo_id = f"{username}/cida-kairosmm-h100"
+            username = api.whoami()["kirtzh"]
+            repo_id = f"{username}/cida-kairosmm-1.1"
             api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
             api.upload_file(
                 path_or_fileobj=archive_name,
@@ -684,7 +684,7 @@ def upload_weights_to_cloud(hf_token=None):
 
 def main():
     parser = argparse.ArgumentParser(description="CIDA KairosMM H100 Autotrain Pipeline")
-    parser.add_argument("--hf_token", type=str, default=None, help="Hugging Face API token")
+    parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"), help="Hugging Face API token")
     parser.add_argument("--max_samples", type=int, default=0, help="Max samples (0=all)")
     parser.add_argument("--epochs", type=int, default=15, help="CIDA training epochs")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size (auto-halves on OOM)")

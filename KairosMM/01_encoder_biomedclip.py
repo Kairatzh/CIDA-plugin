@@ -120,21 +120,32 @@ class BiomedCLIPEncoder(nn.Module):
         spatial_size: ожидаемое количество патчей (196 для 224x224, 784 для 448x448).
         """
         if self._has_biomedclip:
-            features = self.visual(x)
             trunk = self.visual.trunk if hasattr(self.visual, 'trunk') else self.visual
-
-            if hasattr(trunk, 'forward_features'):
-                spatial_out = trunk.forward_features(x)
-                if isinstance(spatial_out, dict):
-                    spatial = spatial_out.get('x', spatial_out.get('last_hidden_state', None))
+            has_patch_embed = hasattr(trunk, 'patch_embed')
+            
+            try:
+                if has_patch_embed:
+                    orig_img_size = trunk.patch_embed.img_size
+                    # Динамически выставляем текущий размер изображения, чтобы пройти проверку в timm
+                    trunk.patch_embed.img_size = (x.shape[-2], x.shape[-1])
+                
+                if hasattr(trunk, 'forward_features'):
+                    # Передаем напрямую в trunk.forward_features.
+                    # Новые версии timm автоматически интерполируют позиционные эмбеддинги.
+                    spatial_out = trunk.forward_features(x)
+                    if isinstance(spatial_out, dict):
+                        spatial = spatial_out.get('x', spatial_out.get('last_hidden_state', None))
+                    else:
+                        spatial = spatial_out
                 else:
-                    spatial = spatial_out
-            else:
-                spatial = None
+                    spatial = None
+            finally:
+                if has_patch_embed:
+                    trunk.patch_embed.img_size = orig_img_size
 
             if spatial is None or spatial.dim() != 3:
                 B = x.size(0)
-                pooled = features if features.dim() == 2 else features.mean(dim=1)
+                pooled = torch.zeros(B, self.d_output, device=x.device)
                 spatial = pooled.unsqueeze(1).expand(B, spatial_size, -1)
                 return pooled, spatial
 
