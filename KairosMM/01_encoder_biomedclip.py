@@ -122,16 +122,31 @@ class BiomedCLIPEncoder(nn.Module):
         if self._has_biomedclip:
             trunk = self.visual.trunk if hasattr(self.visual, 'trunk') else self.visual
             has_patch_embed = hasattr(trunk, 'patch_embed')
+            has_pos_embed = hasattr(trunk, 'pos_embed') and trunk.pos_embed is not None
             
+            orig_img_size = trunk.patch_embed.img_size if has_patch_embed else (224, 224)
+            orig_pos_embed = trunk.pos_embed if has_pos_embed else None
+
             try:
                 if has_patch_embed:
-                    orig_img_size = trunk.patch_embed.img_size
                     # Динамически выставляем текущий размер изображения, чтобы пройти проверку в timm
                     trunk.patch_embed.img_size = (x.shape[-2], x.shape[-1])
                 
+                if has_pos_embed and x.shape[-2:] != orig_img_size:
+                    # Интерполяция позиционных эмбеддингов (pos_embed) для поддержки нестандартных сеток (например 448x448)
+                    grid_h_orig, grid_w_orig = orig_img_size[0] // 16, orig_img_size[1] // 16
+                    grid_h_new, grid_w_new = x.shape[-2] // 16, x.shape[-1] // 16
+                    
+                    cls_pos = orig_pos_embed[:, :1]
+                    spatial_pos = orig_pos_embed[:, 1:].reshape(1, grid_h_orig, grid_w_orig, -1).permute(0, 3, 1, 2)
+                    
+                    spatial_pos_resized = F.interpolate(spatial_pos, size=(grid_h_new, grid_w_new), mode='bilinear', align_corners=False)
+                    spatial_pos_resized = spatial_pos_resized.permute(0, 2, 3, 1).reshape(1, grid_h_new * grid_w_new, -1)
+                    
+                    trunk.pos_embed = torch.nn.Parameter(torch.cat([cls_pos, spatial_pos_resized], dim=1).to(x.device))
+
                 if hasattr(trunk, 'forward_features'):
                     # Передаем напрямую в trunk.forward_features.
-                    # Новые версии timm автоматически интерполируют позиционные эмбеддинги.
                     spatial_out = trunk.forward_features(x)
                     if isinstance(spatial_out, dict):
                         spatial = spatial_out.get('x', spatial_out.get('last_hidden_state', None))
@@ -142,6 +157,8 @@ class BiomedCLIPEncoder(nn.Module):
             finally:
                 if has_patch_embed:
                     trunk.patch_embed.img_size = orig_img_size
+                if has_pos_embed:
+                    trunk.pos_embed = orig_pos_embed
 
             if spatial is None or spatial.dim() != 3:
                 B = x.size(0)
