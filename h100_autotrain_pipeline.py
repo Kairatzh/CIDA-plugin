@@ -141,10 +141,22 @@ except Exception as e:
             return {"p_final": p, "disagreement": torch.tensor(0.1), "u_epi": torch.tensor(0.05), "u_alea": torch.tensor(0.05), "b_all": [p.unsqueeze(1).expand(-1, 4, -1)]}
     def get_transforms_v2(split="train", image_size=224):
         from torchvision import transforms
-        return transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor()
-        ])
+        if split == "train":
+            return transforms.Compose([
+                transforms.Resize((image_size + 16, image_size + 16)),
+                transforms.RandomCrop((image_size, image_size)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomRotation(degrees=10),
+                transforms.ColorJitter(brightness=0.1, contrast=0.1),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+        else:
+            return transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
 
 try:
     healer_mod = importlib.import_module("KairosMM.07_counterfactual_healer")
@@ -289,10 +301,13 @@ def download_dataset(max_samples=0):
 # ── 3. Обучение CIDA + BiomedCLIP с автоуправлением ресурсами ────────────────
 
 class RobustDataset(Dataset):
-    def __init__(self, csv_path, images_dir, transform_224, transform_448, max_samples=2000):
-        self.df = pd.read_csv(csv_path)
-        if len(self.df) > max_samples:
-            self.df = self.df.sample(n=max_samples, random_state=42).reset_index(drop=True)
+    def __init__(self, csv_or_df, images_dir, transform_224, transform_448, max_samples=2000):
+        if isinstance(csv_or_df, (str, Path)):
+            self.df = pd.read_csv(csv_or_df)
+            if len(self.df) > max_samples:
+                self.df = self.df.sample(n=max_samples, random_state=42).reset_index(drop=True)
+        else:
+            self.df = csv_or_df
             
         self.images_dir = Path(images_dir)
         self.transform_224 = transform_224
@@ -325,11 +340,15 @@ class RobustDataset(Dataset):
             labels = np.array([row[f"Class_{i}"] for i in range(14)], dtype=np.float32)
         else:
             labels = np.zeros(14, dtype=np.float32)
-            findings = str(row.get("Finding Labels", "")).split("|")
+            findings_raw = str(row.get("Finding Labels", ""))
+            import re
+            findings = re.split(r'\||,|;', findings_raw)
             for f in findings:
-                f = f.strip()
-                if f in self.nih_classes:
-                    labels[self.nih_classes.index(f)] = 1.0
+                f_clean = f.replace("'", "").replace('"', "").replace('[', "").replace(']', "").replace('_', ' ').strip().lower()
+                for i, c in enumerate(self.nih_classes):
+                    c_clean = c.replace('_', ' ').lower()
+                    if c_clean in f_clean:
+                        labels[i] = 1.0
             
         return img_224, img_448, torch.tensor(labels)
 
@@ -367,17 +386,24 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
     val_transform_224 = get_transforms_v2("val", image_size=224)
     val_transform_448 = get_transforms_v2("val", image_size=448)
 
-    full_dataset = RobustDataset(csv_path, images_dir, transform_224, transform_448,
-                                 max_samples=max_samples if max_samples > 0 else 999_999_999)
+    import pandas as pd
+    df = pd.read_csv(csv_path)
+    limit = max_samples if max_samples > 0 else len(df)
+    if len(df) > limit:
+        df = df.sample(n=limit, random_state=42).reset_index(drop=True)
     
-    # Train/Val split (90/10)
-    total = len(full_dataset)
+    total = len(df)
     val_size = max(int(total * 0.1), 1)
     train_size = total - val_size
-    train_ds, val_ds = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
+    
+    # Shuffle and split
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+    train_df = df.iloc[:train_size].reset_index(drop=True)
+    val_df = df.iloc[train_size:].reset_index(drop=True)
+    
+    train_ds = RobustDataset(train_df, images_dir, transform_224, transform_448)
+    val_ds = RobustDataset(val_df, images_dir, val_transform_224, val_transform_448)
+
     print(f"  Датасет: {total} снимков (train={train_size}, val={val_size})")
     print(f"  Гиперпараметры: epochs={epochs}, batch_size={batch_size}, lr={lr}")
     
@@ -477,8 +503,11 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                 
                 elapsed = time.time() - t0
                 is_best = macro_auc > best_auc
-                if is_best:
-                    best_auc = macro_auc
+                is_last = (epoch == epochs)
+                if is_best or is_last:
+                    if is_best: best_auc = macro_auc
+                    checkpoints_dir = Path("checkpoints")
+                    checkpoints_dir.mkdir(exist_ok=True)
                     torch.save(model.state_dict(), checkpoints_dir / "cida_best.pth")
                 
                 star = " ★ BEST" if is_best else ""
