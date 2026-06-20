@@ -198,26 +198,8 @@ def download_dataset(max_samples=0):
     print("[STEP 2/6] Поиск или загрузка медицинского датасета рентген-снимков...")
     print("=" * 60)
     
-    # 1. Поиск оригинального NIH ChestX-ray14 в ./data
-    base_data_path = Path("./data")
-    if base_data_path.exists():
-        csv_candidates = list(base_data_path.rglob("Data_Entry_2017.csv"))
-        if csv_candidates:
-            csv_path = csv_candidates[0]
-            data_dir = csv_path.parent
-            # Ищем папку images
-            images_dir = data_dir / "images"
-            if not images_dir.exists():
-                img_dirs = list(data_dir.rglob("images"))
-                if img_dirs:
-                    images_dir = img_dirs[0]
-            
-            if images_dir.exists():
-                print(f"  [OK] Найден оригинальный локальный датасет NIH ChestX-ray14!")
-                print(f"       Путь к CSV: {csv_path}")
-                print(f"       Путь к изображениям: {images_dir}")
-                return csv_path, images_dir
-                
+    # 1. Поиск оригинального NIH ChestX-ray14 отключен.
+    # Мы принудительно используем Hugging Face загрузчик для генерации правильного CSV.
     # 2. Скачивание 14-классовой версии с Hugging Face
     images_dir = DATA_DIR / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
