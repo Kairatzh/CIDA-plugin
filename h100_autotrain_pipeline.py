@@ -338,7 +338,7 @@ class RobustDataset(Dataset):
         return img_224, img_448, torch.tensor(labels)
 
 
-def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=128, lr=3e-4):
+def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=128, lr=3e-4, unfreeze_encoder=False):
     """
     Production-grade CIDA trainer with AUC validation, best checkpoint,
     cosine LR scheduler, gradient clipping, and OOM auto-recovery.
@@ -413,7 +413,7 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
             )
             
             print(f"  Инициализация BiomedCLIPCIDA (batch_size={batch_size})...")
-            model = BiomedCLIPCIDA(num_classes=14, d_hidden=768, freeze_encoder=True)
+            model = BiomedCLIPCIDA(num_classes=14, d_hidden=768, freeze_encoder=not unfreeze_encoder)
             model.to(device)
             
             optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -704,6 +704,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size (auto-halves on OOM)")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--healer_epochs", type=int, default=20, help="Healer Flow Matching epochs")
+    parser.add_argument("--unfreeze_encoder", action="store_true", help="Unfreeze BiomedCLIP ViT encoder for end-to-end training")
     args = parser.parse_args()
     
     t_start = time.time()
@@ -718,7 +719,8 @@ def main():
                                   max_samples=args.max_samples,
                                   epochs=args.epochs,
                                   batch_size=args.batch_size,
-                                  lr=args.lr)
+                                  lr=args.lr,
+                                  unfreeze_encoder=args.unfreeze_encoder)
     train_latent_healer(cida_model, csv_path, images_dir, healer_epochs=args.healer_epochs)
     configure_qolda_vlm()
     upload_weights_to_cloud(hf_token=args.hf_token)
