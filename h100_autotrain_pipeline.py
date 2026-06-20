@@ -333,11 +333,13 @@ class RobustDataset(Dataset):
                 for i, c in enumerate(self.nih_classes):
                     c_clean = c.replace('_', ' ').lower()
                     if c_clean in f_clean:
-                        labels[i] = 1.0
-            
         return img_224, img_448, torch.tensor(labels)
 
-
+def focal_loss(probs, targets, alpha=0.25, gamma=2.0):
+    bce_loss = F.binary_cross_entropy(probs, targets, reduction='none')
+    pt = torch.exp(-bce_loss)
+    focal_loss = alpha * (1 - pt) ** gamma * bce_loss
+    return focal_loss.mean()
 def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=128, lr=3e-4, unfreeze_encoder=False):
     """
     Production-grade CIDA trainer with AUC validation, best checkpoint,
@@ -444,7 +446,8 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                     optimizer.zero_grad(set_to_none=True)
                     with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == "cuda")):
                         out = model(imgs_224, imgs_448)
-                    loss = F.binary_cross_entropy(out["p_final"].float(), labels.float())
+                    # СЕКРЕТНОЕ ОРУЖИЕ: Focal Loss вместо обычного BCE
+                    loss = focal_loss(out["p_final"].float(), labels.float(), alpha=0.25, gamma=2.0)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
@@ -466,7 +469,7 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                         labels = labels.to(device, non_blocking=True)
                         with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == "cuda")):
                             out = model(imgs_224, imgs_448)
-                        vloss = F.binary_cross_entropy(out["p_final"].float(), labels.float())
+                        vloss = focal_loss(out["p_final"].float(), labels.float(), alpha=0.25, gamma=2.0)
                         val_loss += vloss.item()
                         all_preds.append(out["p_final"].float().cpu().numpy())
                         all_labels.append(labels.cpu().numpy())
@@ -569,6 +572,8 @@ def train_latent_healer(cida_model, csv_path, images_dir, healer_epochs=20):
             try:
                 img = Image.open(img_path).convert("RGB")
                 img_t = healer.preprocess(img).unsqueeze(0).to(device)
+                if device.type == "cuda":
+                    img_t = img_t.half()  # ИСПРАВЛЕНИЕ БАГА: VAE ждет float16 на CUDA!
                 if hasattr(healer.vae, 'encode'):
                     z = healer.vae.encode(img_t)
                     if hasattr(z, 'latent_dist'):
@@ -604,6 +609,7 @@ def train_latent_healer(cida_model, csv_path, images_dir, healer_epochs=20):
         
         loss = F.mse_loss(v_pred, v_target)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(healer.flow_v.parameters(), 1.0) # Клиппинг для стабильности
         optimizer.step()
         scheduler.step()
         
