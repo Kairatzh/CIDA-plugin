@@ -236,7 +236,7 @@ class H100Trainer:
 
                 with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype, enabled=(self.device.type == 'cuda')):
                     out = self.model(imgs_224, imgs_448)
-                    loss = F.binary_cross_entropy(out["p_final"].float(), labels.float())
+                loss = F.binary_cross_entropy(out["p_final"].float(), labels.float())
 
                 loss.backward()
                 self.optimizer.step()
