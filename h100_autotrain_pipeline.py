@@ -223,15 +223,12 @@ def download_dataset(max_samples=0):
     images_dir.mkdir(parents=True, exist_ok=True)
     csv_path = DATA_DIR / "Data_Entry_2017.csv"
     
-    # Если на диске уже скачано нужное количество картинок
     target_count = max_samples if max_samples > 0 else 1000
     existing_imgs = list(images_dir.glob("*.png"))
-    if csv_path.exists() and len(existing_imgs) >= max(target_count, 100):
-        print(f"  [OK] 14-классовый датасет уже загружен локально в {DATA_DIR} ({len(existing_imgs)} снимков).")
-        return csv_path, images_dir
+    # Убрали early return чтобы всегда пересоздавать CSV с правильными метками, 
+    # так как раньше метки сохранились ошибочно из-за неверного ключа.
         
     try:
-        print("  [INFO] Локальный NIH ChestX-ray14 не обнаружен в ./data.")
         print("  [INFO] Подключение к Hugging Face Hub (BahaaEldin0/NIH-Chest-Xray-14)...")
         from datasets import load_dataset
         
@@ -242,8 +239,8 @@ def download_dataset(max_samples=0):
         counter = 0
         limit = max_samples if max_samples > 0 else 50000
         
-        print(f"  [INFO] Начало скачивания снимков (максимум {limit})...")
-        pbar = tqdm(desc="Скачивание из HF", unit="img")
+        print(f"  [INFO] Синхронизация {limit} снимков и меток...")
+        pbar = tqdm(desc="Проверка и скачивание из HF", unit="img", total=limit)
         for item in ds:
             if counter >= limit:
                 break
@@ -251,12 +248,18 @@ def download_dataset(max_samples=0):
             img_index = item.get("Image Index", f"img_{counter}.png")
             img_path = images_dir / img_index
             
-            # Сохраняем изображение
+            # Сохраняем изображение только если его нет
             if not img_path.exists():
                 pil_img = item["image"]
                 pil_img.convert("RGB").save(img_path)
                 
-            findings = item.get("Finding Labels", "No Finding")
+            # ИСПРАВЛЕНИЕ: В датасете HF ключ называется 'label' и это список
+            raw_labels = item.get("label", ["No Finding"])
+            if isinstance(raw_labels, list):
+                findings = "|".join([str(l) for l in raw_labels])
+            else:
+                findings = str(raw_labels)
+                
             metadata_records.append({
                 "Image Index": img_index,
                 "Finding Labels": findings
