@@ -315,8 +315,13 @@ def build_ui():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--share", action="store_true", default=False, help="Generate a public link")
+    args = parser.parse_args()
+
     demo = build_ui()
     if demo:
         print("Запуск сервера Gradio...")
-        # Запускаем локальный веб-сервер
-        demo.launch(share=False, inbrowser=True)
+        # Запускаем локальный веб-сервер, опционально создавая публичную ссылку
+        demo.launch(share=args.share, inbrowser=not args.share)
