@@ -76,7 +76,8 @@ class CIDAPlugin(nn.Module):
         # ── Deliberation components ───────────────────────────────────────────
         self.evidence_extractor = AgentEvidenceExtractor(cfg.d_hidden)
         self.message_formulator = MessageFormulator(
-            cfg.d_hidden, cfg.num_classes, cfg.d_message
+            cfg.d_hidden, cfg.num_classes, cfg.d_message,
+            anonymous=cfg.anonymous_messages,
         )
         self.communication = CounterargumentCommunication(
             cfg.d_hidden, cfg.d_message
@@ -92,6 +93,8 @@ class CIDAPlugin(nn.Module):
         self.consensus = ConsensusAggregator(
             num_agents=cfg.num_agents,
             multi_label=cfg.multi_label,
+            use_dynamic_trust=cfg.use_dynamic_trust,
+            trust_ema_gamma=cfg.trust_ema_gamma,
         )
         self.halter = HaltingPredictor()
 
@@ -363,7 +366,8 @@ class CIDAPlugin(nn.Module):
                     r_t = torch.zeros_like(state_t.s)
                 else:
                     r_t = self.communication(
-                        state_t.s, m_t, state_t.b, state_t.e
+                        state_t.s, m_t, state_t.b, state_t.e,
+                        sparse_k=cfg.sparse_comm_k,
                     )
                     gate = self.comm_gate(state_t.s)
                     r_t = gate * r_t
@@ -424,6 +428,8 @@ class CIDAPlugin(nn.Module):
             "p_ptr_all": p_ptr_all,
             "uncertainty": uncertainty,
             "disagreement": disagreement,
+            "u_epi": state_t.u_epi,
+            "u_alea": state_t.u_alea,
             "L_orth": L_orth,
             "state_final": state_t,
             "rounds_used": rounds_used,

@@ -78,6 +78,7 @@ class LiquidDeliberationDynamics(nn.Module):
         updater: AgentUpdater,
         d_hidden: int,
         trajectory_save_every: int = 10,
+        T: float = 4.0,
     ):
         super().__init__()
         self.extractor = extractor
@@ -86,6 +87,9 @@ class LiquidDeliberationDynamics(nn.Module):
         self.updater = updater
         self.tau_net = LiquidTimeConstant(d_hidden)
         self.trajectory_save_every = trajectory_save_every
+        self.T = T
+        # Временные точки для сохранения (корректно для adaptive solvers)
+        self._save_timepoints = {0.25, 0.50, 0.75, 1.0}
 
         # Кэшируемый контекст (чтобы не прокидывать через ODE)
         self.memory = None
@@ -113,17 +117,16 @@ class LiquidDeliberationDynamics(nn.Module):
         """
         self.memory = memory
         self.mask = mask
-        self.tau = self.tau_net(s_init)  # (B, M, 1)
         self.nfe = 0
-        self.b_trajectory.clear()
-        self.u_trajectory.clear()
-        self.p_ptr_trajectory.clear()
-        self.m_trajectory.clear()
+        # FIX v4: del [:] вместо clear() для явного освобождения памяти
+        del self.b_trajectory[:]
+        del self.u_trajectory[:]
+        del self.p_ptr_trajectory[:]
+        del self.m_trajectory[:]
 
     def clear_context(self):
         self.memory = None
         self.mask = None
-        self.tau = None
 
     def _compute_beliefs(self, s: torch.Tensor):
         """
@@ -183,17 +186,22 @@ class LiquidDeliberationDynamics(nn.Module):
         next_state = self.updater(dummy_state, r_t, e_t)
 
         # Сохраняем промежуточные beliefs для лоссов и консенсуса
-        # Сохраняем только каждое N-е состояние для экономии памяти с адаптивными решателями
+        # FIX v4: 1) detach() — без него ODE граф держится в памяти (сотни МБ)
+        #         2) temporal checkpoints вместо NFE-based (корректно для adaptive solvers)
         if torch.is_grad_enabled() or not self.training:
-            if self.nfe % self.trajectory_save_every == 0:
-                self.b_trajectory.append(next_state.b)
-                self.u_trajectory.append(next_state.u)
-                self.p_ptr_trajectory.append(p_ptr_t)
-                self.m_trajectory.append(s)
+            t_normalized = t.item() / self.T if self.T > 0 else 0
+            should_save = any(abs(t_normalized - sp) < 0.02 for sp in self._save_timepoints)
+            if should_save or self.nfe % self.trajectory_save_every == 0:
+                self.b_trajectory.append(next_state.b.detach())
+                self.u_trajectory.append(next_state.u.detach())
+                self.p_ptr_trajectory.append(p_ptr_t.detach())
+                self.m_trajectory.append(s.detach())
 
-        # Liquid ODE: ds/dt = -s/τ + f(s)
+        # TRUE Liquid ODE v4: τ(s,t) вычисляется на КАЖДОМ шаге из текущего s
+        # (раньше τ фиксировался из s_init в set_context — это не настоящий Liquid NN)
+        tau = self.tau_net(s)  # (B, M, 1) — state-dependent time constant
         f_s = next_state.s - s
-        ds_dt = -s / self.tau + f_s
+        ds_dt = -s / tau + f_s
 
         return ds_dt
 
@@ -228,6 +236,7 @@ class LiquidDeliberationSolver(nn.Module):
             updater=updater,
             d_hidden=d_hidden,
             trajectory_save_every=trajectory_save_every,
+            T=T,
         )
         self.solver = solver
         self.atol = atol

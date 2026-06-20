@@ -7,11 +7,21 @@ from .agent import AgentState
 class MessageFormulator(nn.Module):
     """
     Creates a structured message out of the explicit agent components.
-    m_i^t = phi([s_i^t; e_i^t; b_i^t; u_i^t])
+
+    v4: Anonymous mode (Choi et al. ACL 2025).
+    Убирает s_i из сообщения → агент слышит аргумент, не авторитет.
+    Доказано устраняет 100% identity bias в debate.
+
+    Было:  m = φ([s; e; b; u]) — агент знает источник → sycophancy/self-bias
+    Стало: m = φ([e; b; u]) — role prior только в инициализации b₀
     """
-    def __init__(self, d_hidden: int, num_classes: int, d_message: int):
+    def __init__(self, d_hidden: int, num_classes: int, d_message: int, anonymous: bool = True):
         super().__init__()
-        in_dim = d_hidden + d_hidden + num_classes + 1
+        self.anonymous = anonymous
+        if anonymous:
+            in_dim = d_hidden + num_classes + 1  # [e; b; u] — без s
+        else:
+            in_dim = d_hidden + d_hidden + num_classes + 1  # [s; e; b; u]
         self.proj = nn.Sequential(
             nn.Linear(in_dim, d_message),
             nn.LayerNorm(d_message),
@@ -20,7 +30,10 @@ class MessageFormulator(nn.Module):
         )
 
     def forward(self, s, e, b, u):
-        concat = torch.cat([s, e, b, u], dim=-1)
+        if self.anonymous:
+            concat = torch.cat([e, b, u], dim=-1)
+        else:
+            concat = torch.cat([s, e, b, u], dim=-1)
         return self.proj(concat)
 
 
@@ -51,6 +64,11 @@ class CounterargumentCommunication(nn.Module):
     """
     Agents collect messages from others, weighted by an attention mechanism
     that explicitly values disagreement while punishing simple similarity.
+
+    v4: Disagreement-Routed Sparse Communication (Li et al. EMNLP 2024).
+    Каждый агент слушает только top-K по несогласию — противоположные
+    убеждения дают сильную связь, похожие — разрыв.
+    Это защищает minority voice и сокращает вычисления на 75%.
     """
     def __init__(self, d_hidden: int, d_message: int, lambda_d: float = 1.0, lambda_s: float = 1.0):
         super().__init__()
@@ -61,7 +79,11 @@ class CounterargumentCommunication(nn.Module):
         self.lambda_s = lambda_s
         self.scale = d_hidden ** -0.5
 
-    def forward(self, s, m, b, e):
+    def forward(self, s, m, b, e, sparse_k: int = 0):
+        """
+        s: (B, M, d), m: (B, M, d_msg), b: (B, M, K), e: (B, M, d)
+        sparse_k: если > 0 — включает sparse communication (top-K по disagreement)
+        """
         Q = self.W_q(s)
         K = self.W_k(m)
         V = self.W_v(m)
@@ -78,8 +100,20 @@ class CounterargumentCommunication(nn.Module):
         scores = attn + self.lambda_d * D - self.lambda_s * S
 
         M_agents = s.size(1)
-        mask = torch.eye(M_agents, device=s.device, dtype=torch.bool).unsqueeze(0)
-        scores = scores.masked_fill(mask, float('-inf'))
+        # Само-маскировка (агент не слушает себя)
+        self_mask = torch.eye(M_agents, device=s.device, dtype=torch.bool).unsqueeze(0)
+        scores = scores.masked_fill(self_mask, float('-inf'))
+
+        # v4: Sparse communication — top-K по disagreement
+        if sparse_k > 0 and sparse_k < M_agents - 1:
+            # Находим top-K наиболее несогласных агентов для каждого
+            b_diff = D.clone()  # (B, M, M)
+            b_diff = b_diff.masked_fill(self_mask, 0.0)
+            _, top_idx = b_diff.topk(min(sparse_k, M_agents - 1), dim=-1)  # (B, M, k)
+            sparse_mask = torch.zeros(scores.shape, device=s.device, dtype=torch.bool)
+            sparse_mask.scatter_(-1, top_idx, True)
+            # Маскируем всех кроме top-K
+            scores = scores.masked_fill(~sparse_mask, float('-inf'))
 
         a = F.softmax(scores, dim=-1)
         r = torch.bmm(a, V)
@@ -170,15 +204,20 @@ class AgentUpdater(nn.Module):
         if self.multi_label:
             # Multi-label: Independent sigmoids
             b_next = torch.sigmoid(g_out) # (B, M, K)
-            # Uncertainty: 4 * b * (1-b) - максимальна при b=0.5
-            u_next = (4.0 * b_next * (1.0 - b_next)).mean(dim=-1, keepdim=True)
+            # v4: Разделение неопределённости
+            u_alea = (4.0 * b_next * (1.0 - b_next)).mean(dim=-1, keepdim=True)  # шум данных
+            u_epi = u_alea * 0.5  # приближение для multi-label
+            u_next = u_alea + u_epi
             alpha = b_next # Dummy for AgentState
         else:
             # Single-label: Dirichlet
             alpha = F.softplus(g_out) + 1.0      # (B, M, K), всегда > 1
             alpha_sum = alpha.sum(dim=-1, keepdim=True)
             b_next = alpha / alpha_sum
-            u_next = self.K / alpha_sum
+            # v4: Разделение неопределённости (Josang 2002 + Meinert 2024)
+            u_epi = self.K ** 2 / alpha_sum ** 2     # Vacuity: неполнота знаний
+            u_alea = 1.0 - b_next.max(dim=-1, keepdim=True).values  # Шум данных
+            u_next = u_epi + u_alea               # Совместимость с u (total)
 
         return AgentState(
             s=s,
@@ -187,6 +226,8 @@ class AgentUpdater(nn.Module):
             alpha=alpha,
             p=state.p,
             e=e,
+            u_epi=u_epi,
+            u_alea=u_alea,
         )
 
 

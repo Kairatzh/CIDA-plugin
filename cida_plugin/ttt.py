@@ -21,7 +21,7 @@ Self-supervised loss:
     Это заставляет агента «понять» структуру конкретного входа.
 """
 
-import copy
+import io
 from contextlib import contextmanager
 
 import torch
@@ -206,9 +206,9 @@ class TestTimeTrainer(nn.Module):
         original_states = agent_states.detach()
         device = agent_states.device
 
-        # ── Сохраняем оригинальные параметры ────────────────────────────
-        saved_updater_state = copy.deepcopy(updater.state_dict())
-        saved_head_state = copy.deepcopy(self.reconstruction_head.state_dict())
+        # ── Сохраняем оригинальные параметры (BytesIO вместо deepcopy — быстрее) ──
+        saved_updater_state = self._save_to_buffer(updater)
+        saved_head_state = self._save_to_buffer(self.reconstruction_head)
 
         # ── Создаём маску ───────────────────────────────────────────────
         mask = self._create_mask(agent_states.shape, device)
@@ -232,18 +232,23 @@ class TestTimeTrainer(nn.Module):
                 updater, masked_states, original_states, mask
             )
 
-            loss.backward(retain_graph=(step < self.ttt_steps - 1))
+            # FIX v4: retain_graph убран — каждый шаг пересоздаёт граф заново
+            # (original_states уже detached, mask постоянна → retain не нужен)
+            loss.backward()
             inner_optimizer.step()
             losses.append(loss.item())
 
-        # ── Вычисляем сдвиг параметров ──────────────────────────────────
+        # ── Вычисляем сдвиг параметров ──────────────────────────────
         param_shift = 0.0
         current_state = updater.state_dict()
-        for key in saved_updater_state:
+        saved_updater_state.seek(0)
+        saved_state_dict = torch.load(saved_updater_state, map_location='cpu', weights_only=True)
+        for key in saved_state_dict:
             if key in current_state:
                 param_shift += (
-                    current_state[key].float() - saved_updater_state[key].to(device).float()
+                    current_state[key].float() - saved_state_dict[key].float()
                 ).norm(2).item()
+        saved_updater_state.seek(0)  # reset for potential restore
 
         ttt_info = {
             "losses": losses,
@@ -255,8 +260,8 @@ class TestTimeTrainer(nn.Module):
             yield ttt_info
         finally:
             # ── Восстанавливаем оригинальные веса ───────────────────────
-            updater.load_state_dict(saved_updater_state)
-            self.reconstruction_head.load_state_dict(saved_head_state)
+            self._load_from_buffer(updater, saved_updater_state)
+            self._load_from_buffer(self.reconstruction_head, saved_head_state)
 
     def adapt_and_get_info(
         self,
@@ -276,8 +281,8 @@ class TestTimeTrainer(nn.Module):
         original_states = agent_states.detach()
         device = agent_states.device
 
-        saved_updater_state = copy.deepcopy(updater.state_dict())
-        saved_head_state = copy.deepcopy(self.reconstruction_head.state_dict())
+        saved_updater_state = self._save_to_buffer(updater)
+        saved_head_state = self._save_to_buffer(self.reconstruction_head)
 
         mask = self._create_mask(agent_states.shape, device)
 
@@ -293,17 +298,21 @@ class TestTimeTrainer(nn.Module):
             loss = self.compute_reconstruction_loss(
                 updater, masked_states, original_states, mask
             )
-            loss.backward(retain_graph=(step < self.ttt_steps - 1))
+            # FIX v4: retain_graph убран — пересоздаём граф на каждом шаге
+            loss.backward()
             inner_optimizer.step()
             losses.append(loss.item())
 
         param_shift = 0.0
         current_state = updater.state_dict()
-        for key in saved_updater_state:
+        saved_updater_state.seek(0)
+        saved_state_dict = torch.load(saved_updater_state, map_location='cpu', weights_only=True)
+        for key in saved_state_dict:
             if key in current_state:
                 param_shift += (
-                    current_state[key].float() - saved_updater_state[key].to(device).float()
+                    current_state[key].float() - saved_state_dict[key].float()
                 ).norm(2).item()
+        saved_updater_state.seek(0)  # reset for potential restore
 
         return {
             "losses": losses,
@@ -316,9 +325,24 @@ class TestTimeTrainer(nn.Module):
     def restore_weights(
         self,
         updater: nn.Module,
-        saved_updater_state: dict,
-        saved_head_state: dict,
+        saved_updater_state,
+        saved_head_state,
     ):
         """Восстановить оригинальные веса после TTT-адаптации."""
-        updater.load_state_dict(saved_updater_state)
-        self.reconstruction_head.load_state_dict(saved_head_state)
+        self._load_from_buffer(updater, saved_updater_state)
+        self._load_from_buffer(self.reconstruction_head, saved_head_state)
+
+    @staticmethod
+    def _save_to_buffer(module: nn.Module) -> io.BytesIO:
+        """Сохраняет state_dict в memory buffer (быстрее чем copy.deepcopy)."""
+        buf = io.BytesIO()
+        torch.save(module.state_dict(), buf)
+        buf.seek(0)
+        return buf
+
+    @staticmethod
+    def _load_from_buffer(module: nn.Module, buf: io.BytesIO):
+        """Восстанавливает state_dict из memory buffer."""
+        buf.seek(0)
+        state = torch.load(buf, map_location='cpu', weights_only=True)
+        module.load_state_dict(state)

@@ -3,18 +3,13 @@
 ## Development setup
 
 ```bash
-pip install -e .[dev,bpe,benchmarks]
+pip install -e .[dev]
 pytest
 ```
 
 ## Guidelines
 
-- Keep architecture changes explicit in `cida/config.py`
-- Document ablations for any new CDP component
+- Keep architecture changes explicit in `cida_plugin/config.py`
+- Document changes for any new component
 - Prefer small, isolated changes over sweeping rewrites
-- If you change the deliberation protocol, update the README research notes
-
-## Benchmarks
-
-Benchmark scripts are research-oriented and may require local datasets or optional dependencies.
-Please do not commit generated benchmark outputs by default.
+- If you change the deliberation protocol, update the README

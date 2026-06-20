@@ -1,18 +1,3 @@
-"""
-07_counterfactual_healer.py — Агент-Целитель (Generative Counterfactuals).
-
-Этот скрипт реализует 5-го агента в системе CIDA: "Healer".
-В отличие от обычных классифицирующих агентов, Healer использует 
-Stable Diffusion (или Flow Matching), чтобы сгенерировать контрфактический
-рентгеновский снимок: "Как бы выглядели эти лёгкие, если бы они были здоровы?".
-
-Разница между (Реальный Снимок - Здоровый Контрфакт) является 
-высокоинтерпретируемой картой патологии (Anomaly Map) уровня 3 по Judea Pearl.
-
-Использование:
-    python KairosMM/07_counterfactual_healer.py
-"""
-
 import sys
 
 if sys.stdout.encoding != 'utf-8':
@@ -23,16 +8,54 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from diffusers import StableDiffusionImg2ImgPipeline, AutoencoderKL, UNet2DConditionModel
+    from diffusers import AutoencoderKL
     _HAS_DIFFUSERS = True
 except ImportError:
     _HAS_DIFFUSERS = False
 
 
+class LatentFlowVelocityField(nn.Module):
+    """
+    v_theta(z, t) — векторное поле для Flow Matching в латентном пространстве VAE.
+    Принимает z: (B, 4, 28, 28) и t: скаляр/тензор.
+    Предсказывает направление изменения латентного представления для "исцеления".
+    """
+    def __init__(self, channels=4, height=28, width=28):
+        super().__init__()
+        self.channels = channels
+        self.height = height
+        self.width = width
+        self.d_latent = channels * height * width
+
+        self.time_embed = nn.Sequential(
+            nn.Linear(1, 64),
+            nn.SiLU(),
+            nn.Linear(64, 64)
+        )
+        self.time_proj = nn.Linear(64, 1)
+        # Сверточный предиктор направления скорости
+        self.conv1 = nn.Conv2d(channels + 1, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, channels, kernel_size=3, padding=1)
+        
+    def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = z.shape
+        # Подготовка временного слоя
+        t_val = t.view(1, 1).expand(B, 1) if t.dim() == 0 else t.view(B, 1)
+        t_emb = self.time_proj(self.time_embed(t_val)).view(B, 1, 1, 1).expand(B, 1, H, W)
+        
+        # Объединяем латентное состояние и время
+        x = torch.cat([z, t_emb], dim=1)
+        h = F.silu(self.conv1(x))
+        h = F.silu(self.conv2(h))
+        v = self.conv3(h)
+        return v
+
+
 class CounterfactualHealerAgent(nn.Module):
     """
-    Level 3 Causal Agent: Generates counterfactual "healthy" images
-    from diseased images to provide visual evidence.
+    Level 3 Causal Agent (v4): Generates healthy counterfactuals directly in VAE latent space.
+    Использует AutoencoderKL для кодирования/декодирования и Flow Matching для "исцеления".
     """
     def __init__(self, device="cuda" if torch.cuda.is_available() else "cpu"):
         super().__init__()
@@ -40,91 +63,118 @@ class CounterfactualHealerAgent(nn.Module):
         self._initialized = False
 
     def load_pipeline(self):
-        """Ленивая загрузка SD pipeline для экономии VRAM."""
         if not _HAS_DIFFUSERS:
             raise ImportError("pip install diffusers transformers accelerate")
             
-        print("[HealerAgent] Загрузка Stable Diffusion Pipeline...")
-        # Используем базовый SD 1.5 для демо. В реальном H100 можно использовать SDXL или Med-SD
-        model_id = "runwayml/stable-diffusion-v1-5"
-        self.pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-            model_id, 
-            torch_dtype=torch.float16 if self.device=="cuda" else torch.float32,
-            safety_checker=None
+        print("[HealerAgent] Загрузка VAE и инициализация Flow Matching...")
+        # Загружаем VAE (stabilityai/sd-vae-ft-mse)
+        self.vae = AutoencoderKL.from_pretrained(
+            "stabilityai/sd-vae-ft-mse",
+            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
         ).to(self.device)
+        self.vae.eval()
+
+        # Инициализируем латентное векторное поле
+        self.flow_v = LatentFlowVelocityField(channels=4, height=28, width=28).to(self.device)
         
-        # На H100 обязательно используем xformers / FlashAttention
-        try:
-            self.pipe.enable_xformers_memory_efficient_attention()
-            print("[HealerAgent] xformers memory efficient attention enabled.")
-        except Exception:
-            pass
-            
+        # Загружаем предобученные веса
+        from pathlib import Path
+        weights_path = Path("./checkpoints/latent_flow_healer.pth")
+        if weights_path.exists():
+            print(f"[HealerAgent] Загрузка обученных весов Flow Matching Healer из {weights_path}...")
+            # Приводим веса к нужному типу перед загрузкой
+            state_dict = torch.load(weights_path, map_location=self.device)
+            self.flow_v.load_state_dict(state_dict)
+        else:
+            print("[HealerAgent] [WARN] Файл весов latent_flow_healer.pth не найден. Используем случайную инициализацию.")
+
+        if self.device == "cuda":
+            self.flow_v = self.flow_v.half()
+
         self._initialized = True
+
+    def flow_ode(self, t, z):
+        """Интеграционная функция для ODE решателя."""
+        # z: (B, 4, 28, 28)
+        # Возвращает dz/dt
+        return self.flow_v(z, t)
 
     def generate_counterfactual(
         self, 
         image: torch.Tensor, 
         strength: float = 0.4,
-        guidance_scale: float = 7.5
+        num_steps: int = 15
     ):
         """
-        Генерирует здоровый контрфакт из входного рентгена.
-        image: (B, 3, 224, 224) или PIL Image
-        strength: 0.0 = нет изменений, 1.0 = полная перерисовка. 
-                  0.3-0.5 идеально для сохранения анатомии, но "исцеления" болезни.
+        Генерирует здоровый контрфакт из входного рентгена в латентном пространстве VAE.
+        image: (B, 3, 224, 224)
+        strength: сила исцеления (доля шагов интеграции)
         """
         if not self._initialized:
             self.load_pipeline()
-            
-        # Конвертация tensor -> PIL (требование diffusers img2img)
-        # В продакшене лучше работать прямо в латентном пространстве VAE
+
+        # Превращаем в правильный тензор
         if isinstance(image, torch.Tensor):
-            import torchvision.transforms as T
-            to_pil = T.ToPILImage()
-            pil_image = to_pil(image[0].cpu() if image.dim() == 4 else image.cpu())
+            x = image.to(self.device)
+            if x.dim() == 3:
+                x = x.unsqueeze(0)
         else:
-            pil_image = image
+            # Если это PIL Image
+            from torchvision.transforms import functional as TF
+            x = TF.to_tensor(image).unsqueeze(0).to(self.device)
 
-        # Prompt engineering для "исцеления"
-        prompt = "Healthy clear lungs, normal chest x-ray, no pathology, sharp bone structure, high resolution medical scan"
-        negative_prompt = "pneumonia, opacity, effusion, cardiomegaly, mass, nodule, blurred, artifacts, disease"
+        # Приводим к размеру 224x224
+        x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
+        dtype = torch.float16 if self.device == "cuda" else torch.float32
+        x = x.to(dtype)
 
-        print(f"[HealerAgent] Генерация контрфакта (strength={strength})...")
-        # Для H100 можно использовать 50 шагов за секунду
-        result = self.pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            image=pil_image,
-            strength=strength,
-            guidance_scale=guidance_scale,
-            num_inference_steps=30
-        ).images[0]
+        with torch.no_grad():
+            # 1. Кодируем в латентное пространство
+            # z ∈ R^(B, 4, 28, 28)
+            posterior = self.vae.encode(x)
+            z = posterior.latent_dist.sample() * 0.18215
 
-        return result
+            # 2. Выполняем Flow Matching (интеграция ODE)
+            # Мы интегрируем от t=0 (исходное больное состояние) до t=strength (здоровое состояние)
+            t_span = torch.linspace(0.0, strength, num_steps, device=self.device, dtype=dtype)
+            
+            # Простая Euler-интеграция для скорости на H100
+            dt = t_span[1] - t_span[0]
+            z_healed = z.clone()
+            for step in range(len(t_span) - 1):
+                t_curr = t_span[step]
+                v = self.flow_v(z_healed, t_curr)
+                z_healed = z_healed + v * dt
 
-    def compute_anomaly_map(self, original_pil, counterfactual_pil):
+            # 3. Декодируем обратно в пиксельное пространство
+            x_healed = self.vae.decode(z_healed / 0.18215).sample
+            # Клипаем в диапазон [0, 1]
+            x_healed = torch.clamp((x_healed + 1.0) / 2.0, 0.0, 1.0)
+
+            # Декодируем и оригинальное латентное представление для честного сравнения
+            x_recon = self.vae.decode(z / 0.18215).sample
+            x_recon = torch.clamp((x_recon + 1.0) / 2.0, 0.0, 1.0)
+
+        return x_healed, x_recon
+
+    def compute_anomaly_map(self, original_tensor: torch.Tensor, healed_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Вычисляет карту аномалий как разницу пикселей (простая версия).
-        В реальности вычисляется L2 distance в латентном пространстве VAE.
+        Вычисляет карту аномалий как попиксельную разницу между оригиналом и контрфактом.
         """
-        import numpy as np
-        orig = np.array(original_pil).astype(float)
-        cf = np.array(counterfactual_pil).astype(float)
-        
-        # Абсолютная разница
-        diff = np.abs(orig - cf)
-        
-        # Перевод в heatmap (один канал)
-        heatmap = diff.mean(axis=2)
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
-        
-        return heatmap
+        # Считаем L2 расстояние
+        diff = torch.abs(original_tensor - healed_tensor).mean(dim=1, keepdim=True)
+        # Нормализуем карту аномалий
+        B, C, H, W = diff.shape
+        diff_flat = diff.view(B, -1)
+        d_min = diff_flat.min(dim=-1, keepdim=True).values
+        d_max = diff_flat.max(dim=-1, keepdim=True).values
+        diff_norm = (diff_flat - d_min) / (d_max - d_min + 1e-8)
+        return diff_norm.view(B, 1, H, W)
 
 
 def demo_healer():
     print("="*60)
-    print("🧬 Counterfactual Healer Agent Demo")
+    print("🧬 Latent Flow Matching Counterfactual Healer Demo")
     print("="*60)
     
     if not _HAS_DIFFUSERS:
@@ -132,26 +182,21 @@ def demo_healer():
         return
         
     try:
-        from PIL import Image
-        import numpy as np
-        
-        # Создаем dummy image (шум) для демо, если нет реального рентгена
-        dummy_img = Image.fromarray(np.random.randint(0, 255, (512, 512, 3), dtype=np.uint8))
-        
+        # Создаем dummy image (шум)
+        dummy_img = torch.randn(1, 3, 224, 224)
         healer = CounterfactualHealerAgent()
         
         # Генерируем "исцеленный" снимок
-        cf_image = healer.generate_counterfactual(dummy_img, strength=0.4)
+        x_healed, x_recon = healer.generate_counterfactual(dummy_img, strength=0.4)
         
         # Считаем разницу
-        heatmap = healer.compute_anomaly_map(dummy_img, cf_image)
+        heatmap = healer.compute_anomaly_map(x_recon, x_healed)
         
-        print(f"\n✅ Успех! Контрфакт сгенерирован: {cf_image.size}")
-        print(f"✅ Anomaly Map вычислена: {heatmap.shape}, Max diff: {heatmap.max():.2f}")
+        print(f"\n✅ Успех! Latent Counterfactual сгенерирован: {x_healed.shape}")
+        print(f"✅ Anomaly Map вычислена: {heatmap.shape}, Max diff: {heatmap.max().item():.2f}")
         
     except Exception as e:
         print(f"Ошибка во время демо: {e}")
-        print("Убедитесь, что у вас есть доступ к интернету для загрузки весов SD 1.5.")
 
 if __name__ == "__main__":
     demo_healer()

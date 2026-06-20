@@ -154,6 +154,20 @@ class CIDAPluginConfig:
     liquid_rtol: float = 1e-3
     trajectory_save_every: int = 10
 
+    # ─── CIDA v4: Architectural Improvements ─────────────────────────────────────
+    # Disagreement-Routed Sparse Communication (Li et al. EMNLP 2024)
+    # Каждый агент слушает только top-K по disagreement, не всех.
+    sparse_comm_k: int = 2
+
+    # Anonymous Message Passing (Choi et al. ACL 2025)
+    # Убирает s (identity) из сообщений → агент слышит аргумент, а не авторитет.
+    anonymous_messages: bool = True
+
+    # Dynamic Trust Weights (CortexDebate MDM, ACL 2025)
+    # EMA trust вместо статических ROLE_WEIGHTS.
+    use_dynamic_trust: bool = False
+    trust_ema_gamma: float = 0.9
+
     def __post_init__(self):
         assert self.d_input > 0, "d_input must be positive"
         assert self.num_agents >= 2, "Need at least 2 agents"

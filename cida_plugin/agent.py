@@ -54,10 +54,13 @@ class AgentState:
     """Явное представление состояния агента."""
     s: torch.Tensor       # (B, d)   - Hidden state
     b: torch.Tensor       # (B, K)   - Belief (posterior после prior blending)
-    u: torch.Tensor       # (B, 1)   - Uncertainty
+    u: torch.Tensor       # (B, 1)   - Total uncertainty (backward compat)
     p: torch.Tensor       # (B, n)   - Evidence pointer
     e: torch.Tensor       # (B, d)   - Evidence vector
     alpha: torch.Tensor   # (B, K)   - Dirichlet parameters
+    # v4: Разделение неопределённости (Josang 2002 + Meinert 2024)
+    u_epi: torch.Tensor = None    # (B, 1)   - Epistemic: K²/alpha_sum² (vacuity)
+    u_alea: torch.Tensor = None   # (B, 1)   - Aleatoric: 1 - max(b) (data noise)
 
 
 def apply_role_prior(
@@ -103,9 +106,13 @@ def apply_role_prior(
         ).expand_as(b_data)
     else:
         # Multi-class: prior_val для "positive" класса, равномерно для остальных
-        prior = torch.full_like(b_data, (1.0 - prior_val) / max(K - 1, 1))
+        uniform_val = (1.0 - prior_val) / max(K - 1, 1)
+        prior = torch.full_like(b_data, uniform_val)
         prior = prior.clone()
         prior[:, positive_class_idx] = prior_val  # указанный класс = "positive"
+        # FIX v4: Явная нормализация — без неё при prior_val=0.50, K=14
+        # сумма = ~7.0 вместо 1.0, что ломает blending и обучение на NIH-14
+        prior = prior / prior.sum(dim=-1, keepdim=True)
 
     return (1.0 - ROLE_PRIOR_BLEND) * b_data + ROLE_PRIOR_BLEND * prior
 

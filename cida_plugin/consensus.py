@@ -45,41 +45,69 @@ class ConsensusAggregator(nn.Module):
     """
     Weighted Mean консенсус для КОРРЕЛИРОВАННЫХ агентов.
 
-    Ключевое свойство: uncertainty = f(disagreement) — это наблюдаемая
-    величина из данных, а не выученный параметр.
+    v4: Dynamic Trust Weights (CortexDebate MDM, ACL 2025).
+    Статические веса заменяются на EMA trust — вес агента растёт
+    когда его предсказания совпадают с финальным консенсусом.
 
-    При высоком несогласии агентов: uncertainty высокая → система говорит "не знаю".
-    При низком несогласии: uncertainty низкая → система уверена в ответе.
-
-    Это теоретически правильно: когда эксперты с разными priors приходят
-    к одному мнению, это сильный сигнал. Когда расходятся — слабый сигнал.
+    trust_i += γ·(1[b_i_correct] - trust_i) per batch, detached from main graph
     """
 
-    def __init__(self, num_agents: int = 4, multi_label: bool = False):
+    def __init__(
+        self,
+        num_agents: int = 4,
+        multi_label: bool = False,
+        use_dynamic_trust: bool = False,
+        trust_ema_gamma: float = 0.9,
+    ):
         super().__init__()
         self.multi_label = multi_label
+        self.use_dynamic_trust = use_dynamic_trust
+        self.trust_ema_gamma = trust_ema_gamma
 
         # Статические веса ролей — обучаемые для адаптации к задаче
-        # Инициализация из a priori рассуждений о ролях
         init_weights = ROLE_WEIGHTS[:num_agents].clone()
-        init_weights = init_weights / init_weights.sum()  # нормализуем
+        init_weights = init_weights / init_weights.sum()
         self.role_weights = nn.Parameter(init_weights)
+
+        # v4: Dynamic trust (EMA buffer, не участвует в градиентах)
+        if use_dynamic_trust:
+            self.register_buffer(
+                'trust_scores',
+                torch.ones(num_agents) / num_agents
+            )
 
     @property
     def weights(self) -> torch.Tensor:
         """Нормализованные веса ролей (в simplex)."""
+        if self.use_dynamic_trust and hasattr(self, 'trust_scores'):
+            return self.trust_scores
         return F.softmax(self.role_weights, dim=0)  # (M,)
+
+    def update_trust(self, b: torch.Tensor, p_final: torch.Tensor):
+        """
+        Обновляет trust scores на основе согласованности агента с консенсусом.
+        Вызывается ПОСЛЕ forward(), detached от основного графа.
+
+        b: (B, M, K) — убеждения агентов
+        p_final: (B, K) — финальный консенсус
+        """
+        if not self.use_dynamic_trust:
+            return
+        with torch.no_grad():
+            # Per-agent correctness = 1 - L1(b_i, p_final)
+            correctness = 1.0 - (b - p_final.unsqueeze(1)).abs().mean(dim=(0, 2))  # (M,)
+            gamma = self.trust_ema_gamma
+            self.trust_scores = gamma * self.trust_scores + (1 - gamma) * correctness
+            self.trust_scores = self.trust_scores / self.trust_scores.sum()
 
     def forward(
         self,
         b: torch.Tensor,          # (B, M, K)
-        u: torch.Tensor = None,   # (B, M, 1) — опционально, для совместимости
+        u: torch.Tensor = None,   # (B, M, 1) — опционально
+        u_epi: torch.Tensor = None,   # (B, M, 1) — v4: epistemic
+        u_alea: torch.Tensor = None,  # (B, M, 1) — v4: aleatoric
     ) -> tuple:
         """
-        b: (B, M, K) — убеждения агентов
-        u: (B, M, 1) — неопределённости (не используются в агрегации,
-                        только для совместимости API)
-
         Returns:
             p_final:     (B, K)  — консенсус
             uncertainty: (B,)   — мера неопределённости
@@ -92,23 +120,22 @@ class ConsensusAggregator(nn.Module):
         p_final = (w.view(1, M, 1) * b).sum(dim=1)  # (B, K)
 
         if not self.multi_label:
-            # Нормализуем для single-label (убеждения должны суммироваться в 1)
-            # b уже нормализован из AgentUpdater (Dirichlet), но weighted mean может
-            # немного отклоняться из-за весов. Используем простую нормализацию вместо softmax.
-            p_final = p_final / p_final.sum(dim=-1, keepdim=True)
+            # FIX v4: Нормализация через log-softmax — численно стабильна
+            p_final = F.softmax(p_final.log().clamp(-10, 10), dim=-1)
 
         # ── Несогласие = std убеждений по агентам ─────────────────────────────
-        # std по агентам (dim=1), затем mean по классам
-        # Это наблюдаемая мера: высокая → агенты расходятся → uncertainty
         disagreement = b.std(dim=1).mean(dim=-1)  # (B,)
 
         # ── Неопределённость = несогласие + собственная uncertainty агентов ──
         if u is not None:
-            # Взвешенная средняя uncertainty агентов
             agent_u = (w.view(1, M, 1) * u).sum(dim=1).squeeze(-1)  # (B,)
             uncertainty = 0.5 * disagreement + 0.5 * agent_u
         else:
             uncertainty = disagreement
+
+        # v4: Обновляем dynamic trust (если включён)
+        if self.training and self.use_dynamic_trust:
+            self.update_trust(b, p_final)
 
         return p_final, uncertainty, disagreement
 

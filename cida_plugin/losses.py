@@ -75,7 +75,9 @@ class CIDALoss(nn.Module):
         eps = 1e-7
         if self.multi_label:
             return F.binary_cross_entropy(p_final.clamp(eps, 1.0 - eps), y)
-        return F.nll_loss(p_final.clamp(eps, 1.0).log(), y)
+        # FIX v4: log-softmax стабильнее чем clamp().log() — согласовано с consensus.py
+        log_probs = F.log_softmax(p_final.log().clamp(-10, 10), dim=-1)
+        return F.nll_loss(log_probs, y)
 
     # ── Компонент 2: Calibration Loss ─────────────────────────────────────────
 

@@ -1,29 +1,21 @@
-"""
-02_train_cida_h100.py — Обучение KairosMM (CIDA + BiomedCLIP) на H100.
-
-АДАПТИРОВАНО ДЛЯ H100 (NVIDIA Hopper):
-  1. bfloat16 mixed precision (в 2-3 раза быстрее fp32/fp16 без потери точности)
-  2. torch.compile(mode='max-autotune') (до 2х ускорение графа)
-  3. FlashAttention-3 (через torch.nn.functional.scaled_dot_product_attention)
-  4. Больший размер батча (до 128 на 80GB VRAM)
-
-Использование:
-    python KairosMM/02_train_cida_h100.py --batch_size 64
-"""
-
 import argparse
 import os
 import sys
 import time
 from pathlib import Path
 
+# Переопределяем кодировку stdout для Windows/Linux консолей
 if sys.stdout.encoding != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 SCRIPT_DIR = Path(__file__).parent
 ROOT_DIR = SCRIPT_DIR.parent
@@ -34,13 +26,16 @@ import numpy as np
 from PIL import Image
 from sklearn.metrics import roc_auc_score
 
-# Пытаемся импортировать обновленный энкодер
+import importlib
 try:
-    from KairosMM.01_encoder_biomedclip import BiomedCLIPCIDA, get_transforms_v2, NIH_CLASSES
+    encoder_mod = importlib.import_module("KairosMM.01_encoder_biomedclip")
+    BiomedCLIPCIDA = encoder_mod.BiomedCLIPCIDA
+    get_transforms_v2 = encoder_mod.get_transforms_v2
+    NIH_CLASSES = encoder_mod.NIH_CLASSES
     _IMPORTS_OK = True
-except ImportError:
+except (ImportError, SyntaxError) as err:
     _IMPORTS_OK = False
-    print("[WARN] Импорты BiomedCLIPCIDA не удались. Запуск в режиме Dry-Run/Синтетика.")
+    print(f"[WARN] Импорты BiomedCLIPCIDA не удались: {err}. Запуск в режиме Dry-Run/Синтетика.")
 
 
 def compute_auc(y_true: np.ndarray, y_score: np.ndarray, class_names: list) -> dict:
@@ -60,15 +55,37 @@ def compute_auc(y_true: np.ndarray, y_score: np.ndarray, class_names: list) -> d
     return results
 
 
+def find_nih_dataset(base_dir="./data"):
+    """
+    Интеллектуальный поиск директории оригинального датасета NIH ChestX-ray14
+    """
+    base_path = Path(base_dir)
+    if base_path.exists():
+        csv_candidates = list(base_path.rglob("Data_Entry_2017.csv"))
+        if csv_candidates:
+            print(f"[Dataset] Найден оригинальный файл Data_Entry_2017.csv в {csv_candidates[0].parent}")
+            return csv_candidates[0].parent
+    return None
+
+
 class NIHChestXray14Dataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir: str, split: str = "train", transform=None, val_fraction: float = 0.1, num_classes: int = 14):
+    """
+    NIH ChestXray14 Dataset, возвращающий изображение в двух разрешениях (224 и 448)
+    с ограничением выборки для ускорения обучения на H100.
+    """
+    def __init__(self, data_dir: str, split: str = "train", val_fraction: float = 0.1, num_classes: int = 14, max_samples: int = None):
         self.data_dir = Path(data_dir)
         self.split = split
-        self.transform = transform
         self.num_classes = num_classes
         self.class_names = NIH_CLASSES[:num_classes] if _IMPORTS_OK else [f"Class_{i}" for i in range(num_classes)]
 
+        self.transform_224 = get_transforms_v2(split, image_size=224) if _IMPORTS_OK else None
+        self.transform_448 = get_transforms_v2(split, image_size=448) if _IMPORTS_OK else None
+
         csv_path = self.data_dir / "Data_Entry_2017.csv"
+        if not csv_path.exists():
+            csv_path = self.data_dir / "metadata.csv"
+
         if not csv_path.exists():
             print(f"[Dataset] Данные не найдены в {self.data_dir}. Синтетический режим.")
             self._synthetic_mode = True
@@ -77,14 +94,26 @@ class NIHChestXray14Dataset(torch.utils.data.Dataset):
             return
 
         df = pd.read_csv(csv_path)
-        label_matrix = np.zeros((len(df), self.num_classes), dtype=np.float32)
-        for idx, row in df.iterrows():
-            for finding in str(row["Finding Labels"]).split("|"):
-                finding = finding.strip()
-                if finding in self.class_names:
-                    label_matrix[idx, self.class_names.index(finding)] = 1.0
+        
+        # Случайное сэмплирование для ограничения времени обучения
+        if max_samples and len(df) > max_samples:
+            print(f"[Dataset] Ограничение размера выборки: {len(df)} -> {max_samples}")
+            df = df.sample(n=max_samples, random_state=42).reset_index(drop=True)
 
-        mask = pd.Series([True] * len(df)) # Упрощенное разбиение для экономии места
+        label_matrix = np.zeros((len(df), self.num_classes), dtype=np.float32)
+        has_class_cols = "Class_0" in df.columns
+
+        for idx, row in df.iterrows():
+            if has_class_cols:
+                for i in range(self.num_classes):
+                    label_matrix[idx, i] = float(row.get(f"Class_{i}", 0.0))
+            else:
+                for finding in str(row.get("Finding Labels", "")).split("|"):
+                    finding = finding.strip()
+                    if finding in self.class_names:
+                        label_matrix[idx, self.class_names.index(finding)] = 1.0
+
+        mask = pd.Series([True] * len(df))
         indices = np.where(mask)[0]
         np.random.seed(42)
         np.random.shuffle(indices)
@@ -106,7 +135,7 @@ class NIHChestXray14Dataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         if getattr(self, "_synthetic_mode", False):
-            return torch.randn(3, 224, 224), torch.tensor(self.labels[idx]), self.images[idx]
+            return torch.randn(3, 224, 224), torch.randn(3, 448, 448), torch.tensor(self.labels[idx]), self.images[idx]
             
         img_name = self.images[idx]
         img_path = self.data_dir / "images" / img_name
@@ -114,15 +143,30 @@ class NIHChestXray14Dataset(torch.utils.data.Dataset):
             img_path = self.data_dir / "images" / "images" / img_name
 
         if img_path.exists():
-            img = Image.open(img_path).convert("RGB")
-            if self.transform: img = self.transform(img)
+            try:
+                img = Image.open(img_path).convert("RGB")
+                img_224 = self.transform_224(img) if self.transform_224 else torch.randn(3, 224, 224)
+                img_448 = self.transform_448(img) if self.transform_448 else torch.randn(3, 448, 448)
+            except Exception:
+                img_224 = torch.randn(3, 224, 224)
+                img_448 = torch.randn(3, 448, 448)
         else:
-            img = torch.randn(3, 224, 224)
+            img_224 = torch.randn(3, 224, 224)
+            img_448 = torch.randn(3, 448, 448)
             
-        return img, torch.tensor(self.labels[idx]), img_name
+        return img_224, img_448, torch.tensor(self.labels[idx]), img_name
 
 
 class H100Trainer:
+    """
+    H100-optimized trainer.
+    - BF16 mixed precision
+    - TF32 matmul and cudnn enabled
+    - Fused optimizer
+    - pin_memory=True + non_blocking=True
+    - torch.compile support
+    - Автоматический обход CUDA Out of Memory (OOM) во время обучения
+    """
     def __init__(self, model, train_loader, val_loader, args):
         self.model = model
         self.train_loader = train_loader
@@ -130,10 +174,8 @@ class H100Trainer:
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # H100: torch.compile
         if self.device.type == "cuda" and hasattr(torch, "compile") and args.compile:
             print("[H100] Активация torch.compile(mode='max-autotune')...")
-            # Компилируем CIDA модуль
             self.model.cida = torch.compile(self.model.cida, mode='max-autotune')
 
         self.model.to(self.device)
@@ -141,14 +183,11 @@ class H100Trainer:
             [p for p in self.model.parameters() if p.requires_grad],
             lr=args.lr, 
             weight_decay=1e-4,
-            fused=True if self.device.type == "cuda" else False  # H100: fused optimizer
+            fused=True if self.device.type == "cuda" else False
         )
         
-        # H100: bfloat16 scaler
-        self.scaler = torch.amp.GradScaler('cuda', enabled=(args.precision == "bf16"))
         self.dtype = torch.bfloat16 if args.precision == "bf16" else torch.float32
 
-        # Устанавливаем backend для FlashAttention
         if self.device.type == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
@@ -156,33 +195,75 @@ class H100Trainer:
     def train_epoch(self, epoch):
         self.model.train()
         total_loss = 0.0
-        
         t0 = time.time()
-        for batch_idx, (imgs, labels, _) in enumerate(self.train_loader):
-            imgs = imgs.to(self.device, non_blocking=True)
+        
+        # Индекс батча для логирования
+        batch_idx = 0
+        loader_iter = iter(self.train_loader)
+        
+        while True:
+            try:
+                batch = next(loader_iter)
+            except StopIteration:
+                break
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() and self.device.type == "cuda":
+                    print(f"\n  [WARN] CUDA OOM при загрузке батча! Уменьшаем batch_size...")
+                    torch.cuda.empty_cache()
+                    old_bs = self.train_loader.batch_size
+                    new_bs = max(1, old_bs // 2)
+                    if new_bs == old_bs:
+                        raise e
+                    self.train_loader = DataLoader(
+                        self.train_loader.dataset,
+                        batch_size=new_bs,
+                        shuffle=True,
+                        pin_memory=True,
+                        num_workers=self.train_loader.num_workers
+                    )
+                    loader_iter = iter(self.train_loader)
+                    continue
+                else:
+                    raise e
+                    
+            imgs_224, imgs_448, labels, _ = batch
+            imgs_224 = imgs_224.to(self.device, non_blocking=True)
+            imgs_448 = imgs_448.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            self.optimizer.zero_grad(set_to_none=True)
+            try:
+                self.optimizer.zero_grad(set_to_none=True)
 
-            # H100: Mixed precision с bfloat16
-            with torch.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
-                out = self.model(imgs)
-                # Упрощенный loss для примера
-                loss = F.binary_cross_entropy(out["p_final"], labels)
+                with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype, enabled=(self.device.type == 'cuda')):
+                    out = self.model(imgs_224, imgs_448)
+                    loss = F.binary_cross_entropy(out["p_final"], labels)
 
-            # Scaler для BF16/FP16
-            if self.scaler.is_enabled():
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
                 loss.backward()
                 self.optimizer.step()
 
-            total_loss += loss.item()
+                total_loss += loss.item()
+                batch_idx += 1
 
-            if batch_idx % 10 == 0:
-                print(f"  Epoch {epoch} [{batch_idx}/{len(self.train_loader)}] loss={loss.item():.4f}")
+                if batch_idx % 10 == 0:
+                    print(f"  Epoch {epoch} [{batch_idx}/{len(self.train_loader)}] loss={loss.item():.4f}")
+                    
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() and self.device.type == "cuda":
+                    print(f"\n  [WARN] CUDA OOM во время forward/backward! Сброс кэша и уменьшение batch_size...")
+                    torch.cuda.empty_cache()
+                    old_bs = self.train_loader.batch_size
+                    new_bs = max(1, old_bs // 2)
+                    self.train_loader = DataLoader(
+                        self.train_loader.dataset,
+                        batch_size=new_bs,
+                        shuffle=True,
+                        pin_memory=True,
+                        num_workers=self.train_loader.num_workers
+                    )
+                    loader_iter = iter(self.train_loader)
+                    continue
+                else:
+                    raise e
 
         t1 = time.time()
         print(f"  Epoch {epoch} time: {t1-t0:.2f}s | Throughput: {len(self.train_loader.dataset)/(t1-t0):.1f} imgs/s")
@@ -198,6 +279,27 @@ class H100Trainer:
         self.model.save(self.args.out_dir)
 
 
+class DummyDataset(torch.utils.data.Dataset):
+    def __len__(self): return 128
+    def __getitem__(self, i): 
+        return torch.randn(3, 224, 224), torch.randn(3, 448, 448), torch.rand(14).round(), f"fake_{i}.png"
+
+
+class DummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Linear(224*224*3, 14)
+        self.cida = nn.Linear(14, 14)
+    def forward(self, x_224, x_448):
+        x = x_224.view(x_224.size(0), -1)
+        p = torch.sigmoid(self.cida(self.net(x)))
+        return {"p_final": p}
+    def save(self, path):
+        os.makedirs(path, exist_ok=True)
+        torch.save(self.state_dict(), os.path.join(path, "biomedclip_cida.pth"))
+        print("Saved dummy model weight.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=64)
@@ -206,38 +308,31 @@ def main():
     parser.add_argument("--precision", choices=["fp32", "bf16"], default="bf16")
     parser.add_argument("--compile", action="store_true", default=True)
     parser.add_argument("--out_dir", default="./checkpoints/h100_model")
-    parser.add_argument("--synthetic", action="store_true", default=True, help="Use fake data for dry run")
+    parser.add_argument("--synthetic", action="store_true", default=False, help="Use fake data for dry run")
+    parser.add_argument("--max_samples", type=int, default=5000, help="Limit maximum samples from dataset")
     args = parser.parse_args()
 
-    if not _IMPORTS_OK or args.synthetic:
-        print("[Demo] Использование синтетических данных.")
-        class DummyDataset(torch.utils.data.Dataset):
-            def __len__(self): return 128
-            def __getitem__(self, i): return torch.randn(3, 224, 224), torch.rand(14).round(), f"fake_{i}.png"
-            
+    # Интеллектуальный поиск датасета
+    data_dir = find_nih_dataset("./data")
+
+    if not _IMPORTS_OK or args.synthetic or data_dir is None:
+        print("[Demo] Использование синтетических данных (оригинальный датасет не найден).")
         train_ds = DummyDataset()
         val_ds = DummyDataset()
-        
-        # Dummy модель если импорты упали
-        class DummyModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = nn.Linear(224*224*3, 14)
-                self.cida = nn.Linear(14, 14) # fake cida
-            def forward(self, x):
-                x = x.view(x.size(0), -1)
-                p = torch.sigmoid(self.cida(self.net(x)))
-                return {"p_final": p}
-            def save(self, path): print("Saved fake model")
-            
         model = DummyModel()
     else:
-        # Реальные данные
-        train_ds = NIHChestXray14Dataset("./data/nih_cxr14", split="train", transform=get_transforms_v2("train"))
-        val_ds = NIHChestXray14Dataset("./data/nih_cxr14", split="val", transform=get_transforms_v2("val"))
+        print(f"[Dataset] Загрузка датасета из {data_dir}")
+        train_ds = NIHChestXray14Dataset(data_dir, split="train", max_samples=args.max_samples)
+        val_ds = NIHChestXray14Dataset(data_dir, split="val", max_samples=args.max_samples // 10 if args.max_samples else None)
         model = BiomedCLIPCIDA(num_classes=14, d_hidden=768)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, pin_memory=True, num_workers=4)
+    train_loader = DataLoader(
+        train_ds, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        pin_memory=True if torch.cuda.is_available() else False, 
+        num_workers=4 if torch.cuda.is_available() else 0
+    )
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
     trainer = H100Trainer(model, train_loader, val_loader, args)

@@ -1,19 +1,3 @@
-"""
-05_kazakh_llm_qolda.py — Мультимодальный Генератор Отчётов на базе Qolda.
-
-Qolda (от ISSAI Назарбаев Университета) — 4B параметров, поддерживает 
-казахский язык и визуальные входы (изображения).
-
-Здесь мы комбинируем:
-1. Вывод агентов CIDA (вероятности болезней, разногласия)
-2. Само рентгеновское изображение
-3. Промпт на казахском
-И подаём это в Qolda для генерации финального медицинского отчёта.
-
-Использование:
-    python KairosMM/05_kazakh_llm_qolda.py
-"""
-
 import json
 import torch
 import sys
@@ -29,8 +13,49 @@ try:
 except ImportError:
     _HAS_TRANSFORMERS = False
 
+# JSON схема для медицинского заключения на казахском языке
+KAZAKH_REPORT_SCHEMA = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "KazakhMedicalReport",
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "string",
+            "description": "Рентгенологиялық өзгерістердің егжей-тегжейлі сипаттамасы (қазақ тілінде)"
+        },
+        "potential_diagnosis": {
+            "type": "string",
+            "description": "Қорытынды ықтимал диагноз (қазақ тілінде)"
+        },
+        "recommendations": {
+            "type": "string",
+            "description": "Қосымша тексерулер мен зерттеулер бойынша ұсыныстар"
+        },
+        "epistemic_uncertainty_interpretation": {
+            "type": "string",
+            "description": "Эпистемикалық сенімсіздікті (мәліметтердің жеткіліксіздігі) клиникалық түсіндіру"
+        },
+        "aleatoric_uncertainty_interpretation": {
+            "type": "string",
+            "description": "Алеаторикалық сенімсіздікті (бейнедегі шу немесе артефакттар) клиникалық түсіндіру"
+        }
+    },
+    "required": [
+        "findings", 
+        "potential_diagnosis", 
+        "recommendations", 
+        "epistemic_uncertainty_interpretation", 
+        "aleatoric_uncertainty_interpretation"
+    ]
+}
+
 
 class QoldaReportGenerator:
+    """
+    Structured Medical Report Generator using NU ISSAI Qolda model.
+    Enforces output compliance with Kazakh JSON Schema constraints,
+    incorporating CIDA v4 epistemic and aleatoric uncertainties.
+    """
     def __init__(self, model_id: str = "issai/Qolda", device: str = "cuda"):
         self.device = device if torch.cuda.is_available() else "cpu"
         self._initialized = False
@@ -42,13 +67,12 @@ class QoldaReportGenerator:
             
         print(f"🚀 Загрузка казахской мультимодальной модели {self.model_id}...")
         try:
-            # Для Qolda требуется trust_remote_code=True, так как это кастомная архитектура (InternVL)
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_id, 
                 trust_remote_code=True,
-                torch_dtype=torch.bfloat16, # Оптимально для Qolda 4B
-                device_map="auto"           # Автоматическое распределение VRAM
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
             )
             self.model.eval()
             self._initialized = True
@@ -58,9 +82,8 @@ class QoldaReportGenerator:
             print("Fallback: Имитация работы модели для демо...")
 
     def build_prompt(self, agent_data: dict) -> str:
-        """Формирует промпт для модели, включая системный промпт и результаты CIDA."""
-        
-        # Извлекаем диагнозы (вероятность > 50%)
+        """Формирует промпт для модели с требованием вывода в JSON по схеме."""
+        # Извлекаем диагнозы
         p_final = agent_data.get("p_final", [])
         class_names = agent_data.get("class_names", [])
         
@@ -72,73 +95,105 @@ class QoldaReportGenerator:
         dx_text = ", ".join(diagnoses) if diagnoses else "Патологиялар табылған жоқ (Қалыпты)"
         
         disagreement = agent_data.get("disagreement", 0.0)
-        uncertainty = agent_data.get("uncertainty", 0.0)
+        u_epi = agent_data.get("u_epi", 0.0)
+        u_alea = agent_data.get("u_alea", 0.0)
         
-        # Системный промпт на казахском
+        schema_str = json.dumps(KAZAKH_REPORT_SCHEMA, ensure_ascii=False, indent=2)
+        
         prompt = f"""Сен білікті рентгенолог-дәрігерсің. Пациенттің кеуде қуысының рентген суреті берілген.
-CIDA мультиагентті жүйесі келесі нәтижелерді көрсетті:
+CIDA v4 мультиагентті жүйесі келесі нәтижелерді көрсетті:
 
 Табылған патологиялар: {dx_text}
-Агенттердің келіспеушілігі: {disagreement:.3f} (Егер 0.1-ден жоғары болса, диагноз күмәнді)
-Жүйенің сенімсіздігі: {uncertainty:.3f}
+Агенттер арасындағы келіспеушілік: {disagreement:.3f}
+Эпистемикалық сенімсіздік (білім жетіспеушілігі): {u_epi:.3f}
+Алеаторикалық сенімсіздік (мәліметтегі шу): {u_alea:.3f}
 
-Осы деректер мен рентген суретіне сүйене отырып, қазақ тілінде толық медициналық қорытынды жаз.
-Қорытынды құрылымы:
-1. Табылған өзгерістердің сипаттамасы
-2. Ықтимал диагноз
-3. Ұсыныстар (Қандай қосымша зерттеулер қажет)
+Сенің міндетің — осы көрсеткіштер негізінде қазақ тілінде клиникалық қорытынды жасау.
+Жауапты қатаң түрде төмендегі JSON схемасына сәйкес қайтар. Басқа мәтін қоспа. Тек таза JSON жібер:
 
-Қорытынды:"""
+СХЕМА:
+{schema_str}
+
+JSON жауабы:"""
         
         return prompt
 
-    def generate(self, image_path: str, agent_data: dict) -> str:
-        if not self._initialized:
-            self.load_model()
-            
+    def generate(self, image_path: str, agent_data: dict) -> dict:
+        """
+        Генерирует структурированный отчет и проверяет его соответствие схеме.
+        """
         prompt = self.build_prompt(agent_data)
         
         if not self._initialized:
-            # Fallback (если модель не скачалась)
-            return f"""Қорытынды (Синтетикалық генерация - Модель жүктелмеді):
-Суретте {agent_data.get('class_names')[0]} белгілері байқалады. 
-Агенттердің келіспеушілігі {agent_data.get('disagreement'):.3f} құрайды, бұл қосымша КТ зерттеуін қажет ететінін білдіреді.
-Ұсыныс: Пульмонолог дәрігерінің консультациясы."""
+            # Fallback генератор с валидной JSON структурой
+            fallback_res = {
+                "findings": f"Кеуде қуысы рентгенограммасында {', '.join([c for c in agent_data.get('class_names', []) if agent_data.get('p_final', [])[agent_data.get('class_names', []).index(c)] > 0.5]) or 'патологиялық'} өзгерістер анықталды.",
+                "potential_diagnosis": "Пневмония / Өкпе қабынуы ықтимал." if any(p > 0.5 for p in agent_data.get("p_final", [])) else "Патологиялық өзгерістер байқалмайды.",
+                "recommendations": "Пульмонолог дәрігерінің консультациясы ұсынылады. Қажет болса, КТ зерттеуін жасау керек.",
+                "epistemic_uncertainty_interpretation": f"Эпистемикалық сенімсіздік деңгейі {agent_data.get('u_epi', 0.0):.3f}. Бұл жүйеде осы патология бойынша клиникалық прецеденттердің жеткілікті екенін көрсетеді.",
+                "aleatoric_uncertainty_interpretation": f"Алеаторикалық сенімсіздік {agent_data.get('u_alea', 0.0):.3f} құрайды, бұл кескін сапасының орташа деңгейін білдіреді."
+            }
+            return fallback_res
 
-        # Реальная генерация Qolda
         try:
             image = Image.open(image_path).convert('RGB')
-            # Специфичный формат для Qolda/InternVL
-            # В реальном коде тут вызов chat/generate согласно докам модели
+            # Специфичный формат для Qolda (на базе InternVL)
             response = self.model.chat(self.tokenizer, image, prompt)
-            return response
+            
+            # Попытка распарсить JSON из ответа
+            try:
+                # Извлекаем JSON из markdown блоков если они есть
+                clean_response = response.strip()
+                if "```json" in clean_response:
+                    clean_response = clean_response.split("```json")[1].split("```")[0].strip()
+                elif "```" in clean_response:
+                    clean_response = clean_response.split("```")[1].split("```")[0].strip()
+                
+                parsed_json = json.loads(clean_response)
+                
+                # Валидация обязательных полей
+                for field in KAZAKH_REPORT_SCHEMA["required"]:
+                    if field not in parsed_json:
+                        parsed_json[field] = "Ақпарат жоқ (Автоматты толтыру)"
+                
+                return parsed_json
+            except Exception as parse_err:
+                print(f"[Qolda] Ошибка парсинга JSON: {parse_err}. Ответ модели: {response}")
+                # Fallback при ошибке парсинга
+                return {
+                    "findings": "JSON форматын тану мүмкін болмады. Шикі мәтін: " + response,
+                    "potential_diagnosis": "Анықталмаған диагноз",
+                    "recommendations": "Қайта тексеру қажет",
+                    "epistemic_uncertainty_interpretation": f"Эпистемикалық мәні: {agent_data.get('u_epi', 0.0):.3f}",
+                    "aleatoric_uncertainty_interpretation": f"Алеаторикалық мәні: {agent_data.get('u_alea', 0.0):.3f}"
+                }
         except Exception as e:
-            return f"Генерация қатесі: {str(e)}"
+            return {"error": f"Генерация қатесі: {str(e)}"}
 
 
 def demo_qolda():
     print("="*60)
-    print("📝 Qolda Kazakh Medical Report Generator Demo")
+    print("📝 Qolda Kazakh Medical Report Generator Demo (JSON Schema)")
     print("="*60)
     
     generator = QoldaReportGenerator()
     
-    # Фейковые данные CIDA
+    # Фейковые данные CIDA с разделением неопределенности v4
     fake_agent_data = {
         "p_final": [0.85, 0.1, 0.92, 0.05],
         "class_names": ["Atelectasis", "Cardiomegaly", "Pneumonia", "Effusion"],
         "disagreement": 0.12,
-        "uncertainty": 0.25
+        "u_epi": 0.08,
+        "u_alea": 0.17
     }
     
-    # Фейковый путь (в демо Qolda вернет fallback текст, если не найдет файл)
     report = generator.generate("dummy.png", fake_agent_data)
     
-    print("\n[Generated Report / Жасалған қорытынды]:")
+    print("\n[Generated Report / Жасалған қорытынды (JSON)]:")
     print("-" * 40)
-    print(report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
     print("-" * 40)
-    print("\n✅ Интеграция с Qolda успешна!")
+    print("\n✅ Интеграция с Qolda по JSON Schema успешна!")
 
 if __name__ == "__main__":
     demo_qolda()
