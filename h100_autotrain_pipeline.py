@@ -11,6 +11,7 @@ h100_autotrain_pipeline.py — Автономный конвейер обуче�
 6. Упаковывает все веса и автоматически загружает их в облако (на transfer.sh или в Hugging Face Hub), возвращая прямую ссылку на скачивание.
 """
 
+import argparse
 import os
 import sys
 import time
@@ -19,6 +20,11 @@ import shutil
 import zipfile
 import subprocess
 import importlib
+from pathlib import Path
+
+# Гарантируем корень проекта в sys.path
+_SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SCRIPT_DIR))
 
 # Переопределяем кодировку stdout для Windows/Linux консолей
 if sys.stdout.encoding != 'utf-8':
@@ -42,6 +48,8 @@ REQUIRED_PACKAGES = {
     "huggingface_hub": "huggingface_hub",
     "requests": "requests",
     "tqdm": "tqdm",
+    "sklearn": "scikit-learn",
+    "datasets": "datasets",
 }
 
 def install_dependencies():
@@ -76,6 +84,15 @@ def install_dependencies():
         print("  [OK] torchdiffeq успешно установлен!")
         installed_any = True
 
+    # Устанавливаем cida_plugin из корня проекта (pyproject.toml)
+    try:
+        import cida_plugin
+        print("  [OK] cida_plugin уже установлен.")
+    except ImportError:
+        print("  [MISSING] cida_plugin не найден. Установка из pyproject.toml...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-e", str(_SCRIPT_DIR)], check=False)
+        installed_any = True
+
     if installed_any:
         print("  [INFO] Перезапуск импортов...")
         importlib.invalidate_caches()
@@ -98,13 +115,20 @@ from huggingface_hub import hf_hub_download, HfApi
 from pathlib import Path
 
 # Динамический импорт компонентов проекта с заглушками на случай запуска в чистом окружении
+_USING_REAL_CIDA = False
 try:
     encoder_mod = importlib.import_module("KairosMM.01_encoder_biomedclip")
     BiomedCLIPCIDA = encoder_mod.BiomedCLIPCIDA
     get_transforms_v2 = encoder_mod.get_transforms_v2
     NIH_CLASSES = encoder_mod.NIH_CLASSES
+    _USING_REAL_CIDA = True
+    print("  [OK] BiomedCLIPCIDA импортирован успешно (РЕАЛЬНАЯ CIDA).")
 except Exception as e:
-    print(f"  [WARN] Ошибка импорта BiomedCLIPCIDA: {e}. Используем заглушку.")
+    print(f"\n{'!'*60}")
+    print(f"  [CRITICAL WARNING] BiomedCLIPCIDA НЕ ЗАГРУЖЕН: {e}")
+    print(f"  ИСПОЛЬЗУЕТСЯ ЗАГЛУШКА DummyModel (Linear 768->14).")
+    print(f"  Обучение будет БЕСПОЛЕЗНЫМ! Проверьте cida_plugin и KairosMM.")
+    print(f"{'!'*60}\n")
     NIH_CLASSES = [f"Class_{i}" for i in range(14)]
     class BiomedCLIPCIDA(nn.Module):
         def __init__(self, num_classes=14, d_hidden=768, freeze_encoder=True):
@@ -155,9 +179,9 @@ except Exception as e:
 
 # ── 2. Автоматическая загрузка датасета ───────────────────────────────────────
 
-DATA_DIR = Path("./data/chest_xray_subset")
+DATA_DIR = Path("./data/nih_chest_xray_hf")
 
-def download_dataset():
+def download_dataset(max_samples=0):
     print("=" * 60)
     print("[STEP 2/6] Поиск или загрузка медицинского датасета рентген-снимков...")
     print("=" * 60)
@@ -172,94 +196,92 @@ def download_dataset():
             # Ищем папку images
             images_dir = data_dir / "images"
             if not images_dir.exists():
-                # Пробуем найти images во вложенных папках
                 img_dirs = list(data_dir.rglob("images"))
                 if img_dirs:
                     images_dir = img_dirs[0]
             
             if images_dir.exists():
-                print(f"  [OK] Найден оригинальный датасет NIH ChestX-ray14!")
+                print(f"  [OK] Найден оригинальный локальный датасет NIH ChestX-ray14!")
                 print(f"       Путь к CSV: {csv_path}")
                 print(f"       Путь к изображениям: {images_dir}")
                 return csv_path, images_dir
                 
-    # 2. Скачивание легкого подмножества с Hugging Face
+    # 2. Скачивание 14-классовой версии с Hugging Face
     images_dir = DATA_DIR / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = DATA_DIR / "metadata.csv"
+    csv_path = DATA_DIR / "Data_Entry_2017.csv"
     
-    if csv_path.exists() and len(list(images_dir.glob("*.jpg"))) > 10:
-        print("  [OK] Датасет-подмножество уже загружен локально.")
+    # Если на диске уже скачано нужное количество картинок
+    target_count = max_samples if max_samples > 0 else 1000
+    existing_imgs = list(images_dir.glob("*.png"))
+    if csv_path.exists() and len(existing_imgs) >= max(target_count, 100):
+        print(f"  [OK] 14-классовый датасет уже загружен локально в {DATA_DIR} ({len(existing_imgs)} снимков).")
         return csv_path, images_dir
         
     try:
         print("  [INFO] Локальный NIH ChestX-ray14 не обнаружен в ./data.")
-        print("  [INFO] Скачивание официального ZIP-архива с Hugging Face...")
-        local_zip_str = hf_hub_download(
-            repo_id="prajnasb/chest-xray-pneumonia",
-            filename="chest_xray.zip",
-            repo_type="dataset"
-        )
-        local_zip = Path(local_zip_str)
+        print("  [INFO] Подключение к Hugging Face Hub (BahaaEldin0/NIH-Chest-Xray-14)...")
+        from datasets import load_dataset
         
-        print("  [INFO] Распаковка архива...")
-        with zipfile.ZipFile(local_zip, 'r') as zip_ref:
-            zip_ref.extractall(DATA_DIR)
-        print("  [OK] Архив успешно распакован!")
+        # Стриминг датасета
+        ds = load_dataset("BahaaEldin0/NIH-Chest-Xray-14", split="train", streaming=True)
         
-        extracted_dir = DATA_DIR / "chest_xray"
         metadata_records = []
-        
         counter = 0
-        for split in ["train", "test"]:
-            split_dir = extracted_dir / split
-            if not split_dir.exists():
-                continue
-            for class_name in ["NORMAL", "PNEUMONIA"]:
-                class_dir = split_dir / class_name
-                if not class_dir.exists():
-                    continue
-                for img_path in class_dir.glob("*.*"):
-                    if counter >= 500: # Ограничиваем 500 изображениями для быстрого обучения за 15 минут
-                        break
-                    new_name = f"img_{counter}.jpg"
-                    shutil.copy(img_path, images_dir / new_name)
-                    
-                    labels = [0.0] * 14
-                    labels[6] = 1.0 if class_name == "PNEUMONIA" else 0.0
-                    
-                    metadata_records.append({
-                        "Image Index": new_name,
-                        "Finding Labels": "Pneumonia" if labels[6] == 1.0 else "No Finding",
-                        **{f"Class_{i}": val for i, val in enumerate(labels)}
-                    })
-                    counter += 1
-                    
+        limit = max_samples if max_samples > 0 else 50000
+        
+        print(f"  [INFO] Начало скачивания снимков (максимум {limit})...")
+        pbar = tqdm(desc="Скачивание из HF", unit="img")
+        for item in ds:
+            if counter >= limit:
+                break
+                
+            img_index = item.get("Image Index", f"img_{counter}.png")
+            img_path = images_dir / img_index
+            
+            # Сохраняем изображение
+            if not img_path.exists():
+                pil_img = item["image"]
+                pil_img.convert("RGB").save(img_path)
+                
+            findings = item.get("Finding Labels", "No Finding")
+            metadata_records.append({
+                "Image Index": img_index,
+                "Finding Labels": findings
+            })
+            
+            counter += 1
+            pbar.update(1)
+            
+        pbar.close()
+        
         df = pd.DataFrame(metadata_records)
         df.to_csv(csv_path, index=False)
-        print(f"  [OK] Успешно собрано {counter} реальных снимков рентгена.")
+        print(f"  [OK] Успешно загружено {counter} снимков с 14-классовой разметкой!")
+        return csv_path, images_dir
         
-        if extracted_dir.exists():
-            shutil.rmtree(extracted_dir)
-            
     except Exception as e:
-        print(f"  [WARN] Ошибка автоматической загрузки: {e}.")
-        print("  [INFO] Fallback: Генерация качественных реалистичных медицинских паттернов...")
+        print(f"  [WARN] Ошибка загрузки с Hugging Face: {e}")
+        print("  [INFO] Fallback: Генерация качественных реалистичных медицинских паттернов с 14 классами...")
         metadata_records = []
         for i in range(100):
-            new_name = f"img_{i}.jpg"
+            new_name = f"img_{i}.png"
             img = Image.fromarray((np.random.randn(256, 256, 3) * 128 + 128).clip(0, 255).astype(np.uint8))
             img.save(images_dir / new_name)
-            labels = [0.0] * 14
-            labels[6] = 1.0 if i % 2 == 0 else 0.0
+            
+            # Создаем случайные патологии
+            classes = ['Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration', 'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax']
+            active_findings = [c for c in classes if np.random.rand() > 0.85]
+            finding_str = "|".join(active_findings) if active_findings else "No Finding"
+            
             metadata_records.append({
                 "Image Index": new_name,
-                "Finding Labels": "Pneumonia" if i % 2 == 0 else "No Finding",
-                **{f"Class_{i}": val for i, val in enumerate(labels)}
+                "Finding Labels": finding_str
             })
         df = pd.DataFrame(metadata_records)
         df.to_csv(csv_path, index=False)
-        print("  [OK] Сгенерирован резервный набор медицинских имитаций.")
+        print("  [OK] Сгенерирован резервный набор медицинских имитаций (14 классов).")
+        return csv_path, images_dir
 
     return csv_path, images_dir
 
@@ -312,128 +334,181 @@ class RobustDataset(Dataset):
         return img_224, img_448, torch.tensor(labels)
 
 
-def train_cida_model(csv_path, images_dir, max_samples=2000):
+def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=128, lr=3e-4):
+    """
+    Production-grade CIDA trainer with AUC validation, best checkpoint,
+    cosine LR scheduler, gradient clipping, and OOM auto-recovery.
+    max_samples=0 means use the entire dataset.
+    """
     print("=" * 60)
-    print("[STEP 3/6] Запуск отказоустойчивого обучения CIDA...")
+    print("[STEP 3/6] Запуск боевого обучения CIDA...")
     print("=" * 60)
+    
+    if not _USING_REAL_CIDA:
+        print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print("  !! ВНИМАНИЕ: Обучается ЗАГЛУШКА, а не реальная CIDA  !!")
+        print("  !! Результаты будут БЕСПОЛЕЗНЫ. Проверьте импорты!   !!")
+        print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    else:
+        print("  [OK] Обучается РЕАЛЬНАЯ BiomedCLIPCIDA v4.")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"  Устройство: {device}")
+    if device.type == "cuda":
+        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        print(f"  VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+    # ── Подготовка данных ──
+    transform_224 = get_transforms_v2("train", image_size=224)
+    transform_448 = get_transforms_v2("train", image_size=448)
+    val_transform_224 = get_transforms_v2("val", image_size=224)
+    val_transform_448 = get_transforms_v2("val", image_size=448)
+
+    full_dataset = RobustDataset(csv_path, images_dir, transform_224, transform_448,
+                                 max_samples=max_samples if max_samples > 0 else 999_999_999)
     
-    try:
-        # Пробуем импортировать и запустить оригинальный трейнер
-        print("  [INFO] Попытка запуска оригинального H100Trainer...")
-        train_mod = importlib.import_module("KairosMM.02_train_cida_h100")
-        NIHChestXray14Dataset = train_mod.NIHChestXray14Dataset
-        H100Trainer = train_mod.H100Trainer
-        
-        class Args:
-            batch_size = 64 if device.type == "cuda" else 2
-            epochs = 2
-            lr = 3e-4
-            precision = "bf16" if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else "fp32"
-            compile = True if device.type == "cuda" else False
-            out_dir = "./checkpoints"
-            synthetic = False
+    # Train/Val split (90/10)
+    total = len(full_dataset)
+    val_size = max(int(total * 0.1), 1)
+    train_size = total - val_size
+    train_ds, val_ds = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    print(f"  Датасет: {total} снимков (train={train_size}, val={val_size})")
+    print(f"  Гиперпараметры: epochs={epochs}, batch_size={batch_size}, lr={lr}")
+    
+    # Расчёт ожидаемого времени
+    if device.type == "cuda":
+        steps_per_epoch = max(train_size // batch_size, 1)
+        est_minutes = (steps_per_epoch * epochs * 0.15) / 60  # ~0.15s per step on H100
+        print(f"  Ожидаемое время: ~{est_minutes:.0f} мин ({steps_per_epoch} шагов/эпоху)")
+
+    # ── OOM-safe training loop ──
+    while batch_size >= 1:
+        try:
+            num_workers = min(4, os.cpu_count() or 1) if device.type == "cuda" else 0
+            train_loader = DataLoader(
+                train_ds, batch_size=batch_size, shuffle=True,
+                pin_memory=(device.type == "cuda"), num_workers=num_workers,
+                drop_last=True, persistent_workers=(num_workers > 0)
+            )
+            val_loader = DataLoader(
+                val_ds, batch_size=batch_size, shuffle=False,
+                pin_memory=(device.type == "cuda"), num_workers=num_workers
+            )
             
-        args = Args()
-        args.max_samples = max_samples
-        data_dir = csv_path.parent
-        
-        train_ds = NIHChestXray14Dataset(data_dir, split="train", max_samples=args.max_samples)
-        val_ds = NIHChestXray14Dataset(data_dir, split="val", max_samples=args.max_samples // 10)
-        
-        train_loader = DataLoader(
-            train_ds, 
-            batch_size=args.batch_size, 
-            shuffle=True, 
-            pin_memory=True if device.type == "cuda" else False, 
-            num_workers=4 if device.type == "cuda" else 0
-        )
-        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
-        
-        model = BiomedCLIPCIDA(num_classes=14, d_hidden=768)
-        trainer = H100Trainer(model, train_loader, val_loader, args)
-        trainer.run()
-        
-        # Переносим веса в cida_best.pth для совместимости с инференсом Healer
-        shutil.copy("./checkpoints/biomedclip_cida.pth", "./checkpoints/cida_best.pth")
-        print("  [OK] Оригинальный трейнер завершил обучение!")
-        return model
-        
-    except Exception as e:
-        print(f"  [WARN] Оригинальный трейнер не запустился ({e}). Используем резервный...")
-        
-        # Резервный отказоустойчивый трейнер
-        transform_224 = get_transforms_v2("train", image_size=224)
-        transform_448 = get_transforms_v2("train", image_size=448)
-        dataset = RobustDataset(csv_path, images_dir, transform_224, transform_448, max_samples=max_samples)
-        
-        epochs = 2
-        batch_size = 16 if device.type == "cuda" else 2
-        
-        while batch_size >= 1:
-            try:
-                train_loader = DataLoader(
-                    dataset, 
-                    batch_size=batch_size, 
-                    shuffle=True, 
-                    pin_memory=True if device.type == "cuda" else False,
-                    num_workers=2 if device.type == "cuda" else 0
-                )
+            print(f"  Инициализация BiomedCLIPCIDA (batch_size={batch_size})...")
+            model = BiomedCLIPCIDA(num_classes=14, d_hidden=768, freeze_encoder=True)
+            model.to(device)
+            
+            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
+            dtype = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
+            
+            checkpoints_dir = Path("./checkpoints")
+            checkpoints_dir.mkdir(exist_ok=True)
+            best_auc = 0.0
+            
+            print(f"\n  {'='*50}")
+            print(f"  СТАРТ ОБУЧЕНИЯ: {epochs} эпох, {len(train_loader)} батчей/эпоху")
+            print(f"  {'='*50}\n")
+            
+            for epoch in range(1, epochs + 1):
+                # ── Train ──
+                model.train()
+                t0 = time.time()
+                epoch_loss = 0.0
                 
-                print(f"  Инициализация BiomedCLIPCIDA (batch_size={batch_size})...")
-                model = BiomedCLIPCIDA(num_classes=14, d_hidden=768, freeze_encoder=True)
-                model.to(device)
-                
-                optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
-                dtype = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
-                
-                print("  Старт эпох обучения...")
-                for epoch in range(1, epochs + 1):
-                    model.train()
-                    t0 = time.time()
-                    epoch_loss = 0.0
+                pbar = tqdm(train_loader, desc=f"  Эпоха {epoch}/{epochs} [TRAIN]",
+                           leave=True, ncols=100)
+                for imgs_224, imgs_448, labels in pbar:
+                    imgs_224 = imgs_224.to(device, non_blocking=True)
+                    imgs_448 = imgs_448.to(device, non_blocking=True)
+                    labels = labels.to(device, non_blocking=True)
                     
-                    for idx, (imgs_224, imgs_448, labels) in enumerate(train_loader):
+                    optimizer.zero_grad(set_to_none=True)
+                    with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == "cuda")):
+                        out = model(imgs_224, imgs_448)
+                    loss = F.binary_cross_entropy(out["p_final"].float(), labels.float())
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    
+                    epoch_loss += loss.item()
+                    pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{scheduler.get_last_lr()[0]:.2e}")
+                
+                scheduler.step()
+                avg_loss = epoch_loss / len(train_loader)
+                
+                # ── Validation with AUC ──
+                model.eval()
+                all_preds, all_labels = [], []
+                val_loss = 0.0
+                with torch.no_grad():
+                    for imgs_224, imgs_448, labels in val_loader:
                         imgs_224 = imgs_224.to(device, non_blocking=True)
                         imgs_448 = imgs_448.to(device, non_blocking=True)
                         labels = labels.to(device, non_blocking=True)
-                        
-                        optimizer.zero_grad(set_to_none=True)
-                        
-                        with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == 'cuda')):
+                        with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == "cuda")):
                             out = model(imgs_224, imgs_448)
-                        loss = F.binary_cross_entropy(out["p_final"].float(), labels.float())
-                            
-                        loss.backward()
-                        optimizer.step()
-                        epoch_loss += loss.item()
-                        
-                    print(f"    Эпоха {epoch}/{epochs} | Loss: {epoch_loss/len(train_loader):.4f} | Время: {time.time()-t0:.1f}с")
-                    
-                print("  [OK] Резервное обучение CIDA завершено успешно!")
-                checkpoints_dir = Path("./checkpoints")
-                checkpoints_dir.mkdir(exist_ok=True)
-                torch.save(model.state_dict(), checkpoints_dir / "cida_best.pth")
-                return model
+                        vloss = F.binary_cross_entropy(out["p_final"].float(), labels.float())
+                        val_loss += vloss.item()
+                        all_preds.append(out["p_final"].float().cpu().numpy())
+                        all_labels.append(labels.cpu().numpy())
                 
-            except RuntimeError as err:
-                if "out of memory" in str(err).lower() and device.type == "cuda":
-                    print(f"  [WARN] CUDA Out of Memory! Уменьшаем размер батча: {batch_size} -> {batch_size // 2}")
-                    batch_size = batch_size // 2
-                    torch.cuda.empty_cache()
-                    if batch_size < 1:
-                        print("  [ERROR] Batch size упал ниже 1. Переключаемся на CPU...")
-                        device = torch.device("cpu")
-                        batch_size = 1
-                else:
-                    raise err
+                val_loss /= max(len(val_loader), 1)
+                all_preds = np.concatenate(all_preds, axis=0)
+                all_labels = np.concatenate(all_labels, axis=0)
+                
+                # Compute macro AUC (skip classes with no positive samples)
+                aucs = []
+                for i in range(14):
+                    if all_labels[:, i].sum() > 0 and all_labels[:, i].sum() < len(all_labels):
+                        try:
+                            from sklearn.metrics import roc_auc_score
+                            aucs.append(roc_auc_score(all_labels[:, i], all_preds[:, i]))
+                        except Exception:
+                            pass
+                macro_auc = np.mean(aucs) if aucs else 0.0
+                
+                elapsed = time.time() - t0
+                is_best = macro_auc > best_auc
+                if is_best:
+                    best_auc = macro_auc
+                    torch.save(model.state_dict(), checkpoints_dir / "cida_best.pth")
+                
+                star = " ★ BEST" if is_best else ""
+                print(f"    Эпоха {epoch}/{epochs} | Train Loss: {avg_loss:.4f} | Val Loss: {val_loss:.4f} "
+                      f"| AUC: {macro_auc:.4f}{star} | {elapsed:.1f}с")
+                    
+            print(f"\n  [OK] Обучение CIDA завершено! Best AUC: {best_auc:.4f}")
+            fsize = (checkpoints_dir / "cida_best.pth").stat().st_size / 1e6
+            print(f"  [BACKUP] Веса сохранены: ./checkpoints/cida_best.pth ({fsize:.1f} MB)")
+            
+            # Загружаем лучшие веса
+            model.load_state_dict(torch.load(checkpoints_dir / "cida_best.pth", map_location=device))
+            return model
+                
+        except RuntimeError as err:
+            if "out of memory" in str(err).lower() and device.type == "cuda":
+                print(f"  [WARN] CUDA OOM! Уменьшаем batch: {batch_size} -> {batch_size // 2}")
+                batch_size = batch_size // 2
+                torch.cuda.empty_cache()
+                if batch_size < 1:
+                    print("  [ERROR] Batch size < 1. Переключаемся на CPU...")
+                    device = torch.device("cpu")
+                    batch_size = 2
+            else:
+                raise err
 
 
 # ── 4. Обучение латентного Healer (Flow Matching) ────────────────────────────
 
-def train_latent_healer(cida_model, csv_path, images_dir):
+def train_latent_healer(cida_model, csv_path, images_dir, healer_epochs=20):
     print("=" * 60)
     print("[STEP 4/6] Обучение латентного Flow Matching Healer...")
     print("=" * 60)
@@ -498,25 +573,28 @@ def train_latent_healer(cida_model, csv_path, images_dir):
         
     latents = torch.cat(latents, dim=0).to(device)
     
-    print("  Обучение векторного поля Flow Matching...")
+    print(f"  Обучение векторного поля Flow Matching ({healer_epochs} эпох)...")
     optimizer = torch.optim.AdamW(healer.flow_v.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=healer_epochs)
     
-    epochs = 5
-    for epoch in range(1, epochs + 1):
+    for epoch in range(1, healer_epochs + 1):
         optimizer.zero_grad()
         
         t = torch.rand(latents.size(0), 1, 1, 1, device=device)
         noise = torch.randn_like(latents)
-        x_t = (1.0 - t) * latents + t * noise
-        v_target = noise - latents
+        # Rectified Flow: x_t = (1-t)*noise + t*data, v = data - noise
+        x_t = (1.0 - t) * noise + t * latents
+        v_target = latents - noise
         
         v_pred = healer.flow_v(x_t, t.squeeze())
         
         loss = F.mse_loss(v_pred, v_target)
         loss.backward()
         optimizer.step()
+        scheduler.step()
         
-        print(f"    Эпоха Healer {epoch}/{epochs} | Loss: {loss.item():.4f}")
+        if epoch % 5 == 0 or epoch == 1:
+            print(f"    Эпоха Healer {epoch}/{healer_epochs} | Loss: {loss.item():.6f}")
         
     print("  [OK] Обучение Healer завершено успешно!")
     torch.save(healer.flow_v.state_dict(), "./checkpoints/latent_flow_healer.pth")
@@ -545,81 +623,97 @@ def configure_qolda_vlm():
 
 def upload_weights_to_cloud(hf_token=None):
     print("=" * 60)
-    print("[STEP 6/6] Упаковка и резервное копирование в облако...")
+    print("[STEP 6/6] Упаковка и резервное копирование...")
     print("=" * 60)
     
     checkpoints_dir = Path("./checkpoints")
     archive_name = "kairos_h100_weights.zip"
     
+    # 1. ВСЕГДА сохраняем локально
     print(f"  Создание архива весов {archive_name}...")
     with zipfile.ZipFile(archive_name, 'w', zipfile.ZIP_DEFLATED) as zip_ref:
         for file_path in checkpoints_dir.glob("*"):
             zip_ref.write(file_path, file_path.name)
+    
+    fsize = Path(archive_name).stat().st_size / 1e6
+    print(f"  [BACKUP] Локальный архив сохранён: ./{archive_name} ({fsize:.1f} MB)")
+    
+    # Перечисляем сохранённые файлы
+    for fp in sorted(checkpoints_dir.glob("*")):
+        print(f"    • {fp.name} ({fp.stat().st_size/1e6:.1f} MB)")
             
+    # 2. HF Hub — ПРИОРИТЕТ №1
     if hf_token:
         try:
-            print("  [INFO] Обнаружен токен Hugging Face. Загрузка в ваш приватный HF репозиторий...")
+            print("  [INFO] Загрузка на Hugging Face Hub (приоритет №1)...")
             api = HfApi(token=hf_token)
-            user_info = api.whoami()
-            username = user_info["name"]
-            
+            username = api.whoami()["name"]
             repo_id = f"{username}/cida-kairosmm-h100"
-            print(f"  Создание репозитория {repo_id}...")
             api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
-            
-            print(f"  Загрузка архива весов...")
             api.upload_file(
                 path_or_fileobj=archive_name,
                 path_in_repo=archive_name,
-                repo_id=repo_id,
-                repo_type="model"
+                repo_id=repo_id, repo_type="model"
             )
-            print(f"  [OK] Веса сохранены на Hugging Face: https://huggingface.co/{repo_id}")
+            print(f"  [OK] ✅ Веса на HF Hub: https://huggingface.co/{repo_id}")
             return
         except Exception as e:
-            print(f"  [WARN] Ошибка загрузки на HF Hub: {e}. Пробуем альтернативный способ...")
+            print(f"  [WARN] HF Hub ошибка: {e}")
 
-    print("  [INFO] Загрузка на анонимное облачное хранилище transfer.sh...")
+    # 3. transfer.sh — fallback (ненадёжен)
+    if not hf_token:
+        print("  [TIP] Для надёжного бэкапа используйте: --hf_token YOUR_TOKEN")
+    print("  [INFO] Попытка загрузки на transfer.sh (fallback)...")
     try:
         with open(archive_name, 'rb') as f:
             response = requests.put(
                 f"https://transfer.sh/{archive_name}",
-                data=f,
-                headers={"Max-Days": "14"},
-                timeout=180
+                data=f, headers={"Max-Days": "14"}, timeout=180
             )
         if response.status_code == 200:
-            download_url = response.text.strip()
-            print(f"\n[OK] ВСЕ ВЕСА УСПЕШНО СОХРАНЕНЫ В ОБЛАКЕ!")
-            print(f"🔗 Ссылка для скачивания: {download_url}")
-            print("  (Ссылка действительна 14 дней. Вы можете использовать её на любом сервере/ноутбуке!)")
+            print(f"  [OK] 🔗 Ссылка: {response.text.strip()} (14 дней)")
         else:
-            print(f"  [ERROR] Ошибка файлообменника (код {response.status_code}).")
-            
+            print(f"  [WARN] transfer.sh вернул код {response.status_code}")
     except Exception as e:
-        print(f"  [ERROR] Ошибка загрузки: {e}")
-        print("  Веса сохранены локально в архиве: ./kairos_h100_weights.zip")
+        print(f"  [WARN] transfer.sh недоступен: {e}")
+    
+    print(f"  Веса гарантированно сохранены локально: ./{archive_name}")
 
 
 # ── Главный конвейер ──────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Autotrain pipeline for H100")
-    parser.add_argument("--hf_token", type=str, default=None, help="Hugging Face API token to save weights")
-    parser.add_argument("--max_samples", type=int, default=2000, help="Maximum samples to use for training")
+    parser = argparse.ArgumentParser(description="CIDA KairosMM H100 Autotrain Pipeline")
+    parser.add_argument("--hf_token", type=str, default=None, help="Hugging Face API token")
+    parser.add_argument("--max_samples", type=int, default=0, help="Max samples (0=all)")
+    parser.add_argument("--epochs", type=int, default=15, help="CIDA training epochs")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size (auto-halves on OOM)")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--healer_epochs", type=int, default=20, help="Healer Flow Matching epochs")
     args = parser.parse_args()
     
     t_start = time.time()
+    print(f"\n{'='*60}")
+    print(f"  CIDA KairosMM H100 Autotrain Pipeline")
+    print(f"  Конфиг: epochs={args.epochs}, batch={args.batch_size}, lr={args.lr}")
+    print(f"  samples={'ALL' if args.max_samples==0 else args.max_samples}, healer_epochs={args.healer_epochs}")
+    print(f"{'='*60}\n")
     
-    csv_path, images_dir = download_dataset()
-    cida_model = train_cida_model(csv_path, images_dir, max_samples=args.max_samples)
-    train_latent_healer(cida_model, csv_path, images_dir)
+    csv_path, images_dir = download_dataset(max_samples=args.max_samples)
+    cida_model = train_cida_model(csv_path, images_dir,
+                                  max_samples=args.max_samples,
+                                  epochs=args.epochs,
+                                  batch_size=args.batch_size,
+                                  lr=args.lr)
+    train_latent_healer(cida_model, csv_path, images_dir, healer_epochs=args.healer_epochs)
     configure_qolda_vlm()
     upload_weights_to_cloud(hf_token=args.hf_token)
     
-    print(f"\n[OK] Конвейер успешно завершен за {time.time()-t_start:.1f} секунд!")
-    print("Вы готовы запустить Gradio Демо в один клик!")
+    elapsed = time.time() - t_start
+    print(f"\n{'='*60}")
+    print(f"  [OK] Конвейер завершен за {elapsed:.1f} сек ({elapsed/60:.1f} мин)!")
+    print(f"  Вы готовы запустить: python KairosMM/08_visual_cot_demo.py")
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
-    import argparse
     main()

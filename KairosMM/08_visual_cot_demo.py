@@ -51,10 +51,28 @@ def init_models():
     if not _HAS_REAL_MODULES:
         return False
     try:
+        from pathlib import Path
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[UI] Инициализация реальных моделей на {device}...")
-        models["cida"] = BiomedCLIPCIDA(num_classes=14, d_hidden=768, freeze_encoder=True).to(device)
-        models["healer"] = CounterfactualHealerAgent(device=device)
+        
+        # 1. Загрузка CIDA
+        cida_model = BiomedCLIPCIDA(num_classes=14, d_hidden=768, freeze_encoder=True).to(device)
+        weights_path = Path("checkpoints/cida_best.pth")
+        if weights_path.exists():
+            print(f"[UI] Загрузка весов CIDA из {weights_path}...")
+            cida_model.load_state_dict(torch.load(weights_path, map_location=device))
+        else:
+            print("[UI] [WARN] checkpoints/cida_best.pth не найден! Демо запустится в режиме симуляции.")
+            return False
+            
+        models["cida"] = cida_model
+        
+        # 2. Инициализация Healer (load_pipeline загружает latent_flow_healer.pth)
+        healer = CounterfactualHealerAgent(device=device)
+        healer.load_pipeline()
+        models["healer"] = healer
+        
+        # 3. Инициализация Qolda
         models["qolda"] = QoldaReportGenerator(device=device)
         return True
     except Exception as e:
