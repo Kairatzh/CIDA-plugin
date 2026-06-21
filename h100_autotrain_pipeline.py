@@ -232,6 +232,19 @@ def download_dataset(max_samples=0, dataset_source="hf"):
             print("  [INFO] Попытка использовать Hugging Face в качестве запасного варианта...")
             dataset_source = "hf"
 
+    if dataset_source == "hf_direct":
+        try:
+            print("  [INFO] Оптимизированная загрузка Hugging Face (Прямо в RAM, без сохранения PNG на диске)...")
+            from datasets import load_dataset
+            limit = max_samples if max_samples > 0 else 50000
+            print(f"  [INFO] Скачивание датасета (первые {limit} снимков) в скрытый кэш HF...")
+            ds = load_dataset("BahaaEldin0/NIH-Chest-Xray-14", split=f"train[:{limit}]")
+            print(f"  [OK] Загружено {len(ds)} снимков в память!")
+            return "hf_direct", ds
+        except Exception as e:
+            print(f"  [WARN] Ошибка hf_direct: {e}. Переход на обычный hf...")
+            dataset_source = "hf"
+
     if dataset_source == "hf":
         try:
             print("  [INFO] Подключение к Hugging Face Hub (BahaaEldin0/NIH-Chest-Xray-14)...")
@@ -303,6 +316,43 @@ def download_dataset(max_samples=0, dataset_source="hf"):
 
 
 # ── 3. Обучение CIDA + BiomedCLIP с автоуправлением ресурсами ────────────────
+
+class HFDirectDataset(Dataset):
+    def __init__(self, hf_ds, transform_224, transform_448):
+        self.hf_ds = hf_ds
+        self.transform_224 = transform_224
+        self.transform_448 = transform_448
+        self.nih_classes = [
+            'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration', 'Mass', 
+            'Nodule', 'Pneumonia', 'Pneumothorax', 'Consolidation', 'Edema', 
+            'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
+        ]
+
+    def __len__(self):
+        return len(self.hf_ds)
+
+    def __getitem__(self, idx):
+        item = self.hf_ds[idx]
+        img = item["image"].convert("RGB")
+        img_224 = self.transform_224(img)
+        img_448 = self.transform_448(img)
+        
+        labels = np.zeros(14, dtype=np.float32)
+        raw_labels = item.get("label", ["No Finding"])
+        if isinstance(raw_labels, list):
+            findings = [str(l) for l in raw_labels]
+        else:
+            findings = [str(raw_labels)]
+            
+        for f in findings:
+            f_clean = f.replace("'", "").replace('"', "").replace('[', "").replace(']', "").replace('_', ' ').strip().lower()
+            for i, c in enumerate(self.nih_classes):
+                c_clean = c.replace('_', ' ').lower()
+                if c_clean in f_clean:
+                    labels[i] = 1.0
+                    
+        return img_224, img_448, torch.tensor(labels)
+
 
 class RobustDataset(Dataset):
     def __init__(self, csv_or_df, images_dir, transform_224, transform_448, max_samples=2000):
@@ -408,22 +458,35 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
     val_transform_448 = get_transforms_v2("val", image_size=448)
 
     import pandas as pd
-    df = pd.read_csv(csv_path)
-    limit = max_samples if max_samples > 0 else len(df)
-    if len(df) > limit:
-        df = df.sample(n=limit, random_state=42).reset_index(drop=True)
-    
-    total = len(df)
-    val_size = max(int(total * 0.1), 1)
-    train_size = total - val_size
-    
-    # Shuffle and split
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-    train_df = df.iloc[:train_size].reset_index(drop=True)
-    val_df = df.iloc[train_size:].reset_index(drop=True)
-    
-    train_ds = RobustDataset(train_df, images_dir, transform_224, transform_448)
-    val_ds = RobustDataset(val_df, images_dir, val_transform_224, val_transform_448)
+    if csv_path == "hf_direct":
+        total = len(images_dir) # ds object is passed via images_dir
+        val_size = max(int(total * 0.1), 1)
+        train_size = total - val_size
+        
+        print("  [INFO] Подготовка оптимизированных HF датасетов...")
+        ds = images_dir.shuffle(seed=42)
+        train_hf = ds.select(range(train_size))
+        val_hf = ds.select(range(train_size, total))
+        
+        train_ds = HFDirectDataset(train_hf, transform_224, transform_448)
+        val_ds = HFDirectDataset(val_hf, val_transform_224, val_transform_448)
+    else:
+        df = pd.read_csv(csv_path)
+        limit = max_samples if max_samples > 0 else len(df)
+        if len(df) > limit:
+            df = df.sample(n=limit, random_state=42).reset_index(drop=True)
+        
+        total = len(df)
+        val_size = max(int(total * 0.1), 1)
+        train_size = total - val_size
+        
+        # Shuffle and split
+        df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+        train_df = df.iloc[:train_size].reset_index(drop=True)
+        val_df = df.iloc[train_size:].reset_index(drop=True)
+        
+        train_ds = RobustDataset(train_df, images_dir, transform_224, transform_448)
+        val_ds = RobustDataset(val_df, images_dir, val_transform_224, val_transform_448)
 
     print(f"  Датасет: {total} снимков (train={train_size}, val={val_size})")
     print(f"  Гиперпараметры: epochs={epochs}, batch_size={batch_size}, lr={lr}")
@@ -593,25 +656,44 @@ def train_latent_healer(cida_model, csv_path, images_dir, healer_epochs=20):
             transforms.ToTensor()
         ])
         
-    df = pd.read_csv(csv_path)
-    if "Class_6" in df.columns:
-        healthy_images = df[df["Class_6"] == 0.0]["Image Index"].tolist()[:100]
-    elif "Finding Labels" in df.columns:
-        healthy_images = df[df["Finding Labels"].str.contains("No Finding", na=False, case=False)]["Image Index"].tolist()[:100]
+    if csv_path == "hf_direct":
+        healthy_images = []
+        for item in images_dir:
+            raw_labels = item.get("label", ["No Finding"])
+            if isinstance(raw_labels, list):
+                findings = [str(l) for l in raw_labels]
+            else:
+                findings = [str(raw_labels)]
+            if any("No Finding" in f for f in findings):
+                healthy_images.append(item)
+                if len(healthy_images) >= 100:
+                    break
     else:
-        healthy_images = df["Image Index"].tolist()[:100]
-        
-    if not healthy_images:
-        healthy_images = df["Image Index"].tolist()[:50]
-        
+        df = pd.read_csv(csv_path)
+        if "Class_6" in df.columns:
+            healthy_images = df[df["Class_6"] == 0.0]["Image Index"].tolist()[:100]
+        elif "Finding Labels" in df.columns:
+            healthy_images = df[df["Finding Labels"].str.contains("No Finding", na=False, case=False)]["Image Index"].tolist()[:100]
+        else:
+            healthy_images = df["Image Index"].tolist()[:100]
+            
+        if not healthy_images:
+            healthy_images = df["Image Index"].tolist()[:50]
+            
     print(f"  Кодирование {len(healthy_images)} снимков легких в латентное пространство VAE...")
     
     latents = []
     with torch.no_grad():
-        for img_name in healthy_images:
-            img_path = Path(images_dir) / img_name
+        for img_data in healthy_images:
+            if csv_path == "hf_direct":
+                img = img_data["image"].convert("RGB")
+            else:
+                img_path = Path(images_dir) / img_data
+                try:
+                    img = Image.open(img_path).convert("RGB")
+                except Exception:
+                    continue
             try:
-                img = Image.open(img_path).convert("RGB")
                 img_t = healer.preprocess(img).unsqueeze(0).to(device)
                 if device.type == "cuda":
                     img_t = img_t.half()  # ИСПРАВЛЕНИЕ БАГА: VAE ждет float16 на CUDA!
@@ -746,7 +828,7 @@ def upload_weights_to_cloud(hf_token=None):
 def main():
     parser = argparse.ArgumentParser(description="CIDA KairosMM H100 Autotrain Pipeline")
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"), help="Hugging Face API token")
-    parser.add_argument("--dataset_source", type=str, default="hf", choices=["hf", "kaggle_sample", "kaggle_full"], help="Источник датасета: hf (HuggingFace), kaggle_sample (2GB), kaggle_full (42GB)")
+    parser.add_argument("--dataset_source", type=str, default="hf_direct", choices=["hf_direct", "hf", "kaggle_sample", "kaggle_full"], help="Источник датасета: hf_direct (в память, без диска), hf (классический), kaggle_sample (2GB), kaggle_full (42GB)")
     parser.add_argument("--max_samples", type=int, default=0, help="Max samples (0=all)")
     parser.add_argument("--epochs", type=int, default=15, help="CIDA training epochs")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size (auto-halves on OOM)")
