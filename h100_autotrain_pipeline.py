@@ -216,15 +216,54 @@ def download_dataset(max_samples=0, dataset_source="hf"):
                 print("  Переход в резервный режим...")
                 raise ValueError("No Kaggle credentials")
                 
-            subprocess.run(["kaggle", "datasets", "download", "-d", dataset_id, "--unzip", "-p", str(DATA_DIR)], check=True)
-            
             if dataset_source == "kaggle_sample":
+                subprocess.run(["kaggle", "datasets", "download", "-d", dataset_id, "--unzip", "-p", str(DATA_DIR)], check=True)
                 sample_csv = DATA_DIR / "sample_labels.csv"
                 if sample_csv.exists():
                     df = pd.read_csv(sample_csv)
                     df.to_csv(csv_path, index=False)
+            else:
+                import concurrent.futures
+                print(f"  [INFO] Скачивание архива с Kaggle (без авто-распаковки)...")
+                subprocess.run(["kaggle", "datasets", "download", "-d", dataset_id, "-p", str(DATA_DIR)], check=True)
+                
+                zip_files = list(DATA_DIR.glob("*.zip"))
+                if zip_files:
+                    zip_path = zip_files[0]
+                    with zipfile.ZipFile(zip_path, 'r') as z:
+                        all_files = z.namelist()
+                        png_files = [f for f in all_files if f.endswith('.png')]
+                        csv_files = [f for f in all_files if f.endswith('Data_Entry_2017.csv')]
+                        
+                        limit = max_samples if max_samples > 0 else len(png_files)
+                        print(f"  [INFO] Извлечение {limit} снимков из {zip_path.name} в 8 потоков...")
+                        
+                        if csv_files:
+                            with z.open(csv_files[0]) as source, open(csv_path, "wb") as target:
+                                target.write(source.read())
+                                
+                        selected_pngs = png_files[:limit]
+                        
+                        def extract_file(member):
+                            filename = Path(member).name
+                            target_path = images_dir / filename
+                            if not target_path.exists():
+                                with z.open(member) as source, open(target_path, "wb") as target:
+                                    target.write(source.read())
+                                    
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                            list(tqdm(executor.map(extract_file, selected_pngs), total=len(selected_pngs), desc="Извлечение PNG"))
+                            
+                    print("  [INFO] Удаление 42-гигабайтного ZIP архива для освобождения места...")
+                    zip_path.unlink()
+                    
+                    if csv_path.exists():
+                        df = pd.read_csv(csv_path)
+                        extracted_names = {Path(p).name for p in selected_pngs}
+                        df = df[df['Image Index'].isin(extracted_names)]
+                        df.to_csv(csv_path, index=False)
             
-            print(f"  [OK] Датасет {dataset_id} успешно скачан с Kaggle!")
+            print(f"  [OK] Датасет {dataset_id} успешно подготовлен!")
             return csv_path, images_dir
             
         except Exception as e:
