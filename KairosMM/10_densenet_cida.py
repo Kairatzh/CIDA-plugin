@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import densenet121, DenseNet121_Weights
-from cida_plugin import CIDAReasoningEngine, CIDAPluginConfig
+from cida_plugin import CIDAPlugin, CIDAPluginConfig
 
 NIH_CLASSES = [
     'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration', 'Mass', 
@@ -73,7 +73,7 @@ class DenseNetCIDA(nn.Module):
             num_agents=num_agents
         )
         
-        self.cida = CIDAReasoningEngine(cida_config)
+        self.cida = CIDAPlugin(cida_config)
         self.num_classes = num_classes
         
     def forward_scale(self, x: torch.Tensor, target_spatial_size: int = None):
@@ -114,7 +114,7 @@ class DenseNetCIDA(nn.Module):
             
         # Run CIDA reasoning
         out = self.cida(
-            x_global=pooled,
-            x_spatial=spatial
+            pooled,
+            seq_output=spatial
         )
         return out
