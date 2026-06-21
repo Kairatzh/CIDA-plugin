@@ -136,7 +136,7 @@ except Exception as e:
             super().__init__()
             self.class_names = NIH_CLASSES
             self.cida = nn.Linear(768, num_classes)
-        def forward(self, x_224, x_448):
+        def forward(self, x_224, x_448, warmup=False):
             B = x_224.size(0)
             p = torch.sigmoid(torch.randn(B, 14, device=x_224.device))
             return {"p_final": p, "disagreement": torch.tensor(0.1), "u_epi": torch.tensor(0.05), "u_alea": torch.tensor(0.05), "b_all": [p.unsqueeze(1).expand(-1, 4, -1)]}
@@ -575,7 +575,9 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                 t0 = time.time()
                 epoch_loss = 0.0
                 
-                pbar = tqdm(train_loader, desc=f"  Эпоха {epoch}/{epochs} [TRAIN]",
+                is_warmup = (epoch <= 3)
+                desc = f"  Эпоха {epoch}/{epochs} [WARMUP (No Debates)]" if is_warmup else f"  Эпоха {epoch}/{epochs} [DEBATE (Active)]"
+                pbar = tqdm(train_loader, desc=desc,
                            leave=True, ncols=100)
                 for imgs_224, imgs_448, labels in pbar:
                     imgs_224 = imgs_224.to(device, non_blocking=True)
@@ -584,7 +586,7 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                     
                     optimizer.zero_grad(set_to_none=True)
                     with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == "cuda")):
-                        out = model(imgs_224, imgs_448)
+                        out = model(imgs_224, imgs_448, warmup=is_warmup)
                     
                     loss = focal_loss(out["p_final"].float(), labels.float(), alpha=0.25, gamma=2.0)
                     loss.backward()
@@ -608,7 +610,7 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                         imgs_448 = imgs_448.to(device, non_blocking=True)
                         labels = labels.to(device, non_blocking=True)
                         with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == "cuda")):
-                            out = ema_model(imgs_224, imgs_448)
+                            out = ema_model(imgs_224, imgs_448, warmup=False)
                         vloss = focal_loss(out["p_final"].float(), labels.float(), alpha=0.25, gamma=2.0)
                         val_loss += vloss.item()
                         all_preds.append(out["p_final"].float().cpu().numpy())

@@ -97,7 +97,7 @@ class DenseNetCIDA(nn.Module):
             
         return pooled, spatial
 
-    def forward(self, x_224: torch.Tensor, x_448: torch.Tensor = None):
+    def forward(self, x_224: torch.Tensor, x_448: torch.Tensor = None, warmup: bool = False):
         """
         Multi-Scale DenseNet encoding.
         If x_448 is None, uses only x_224 (for faster inference/training).
@@ -112,9 +112,17 @@ class DenseNetCIDA(nn.Module):
             pooled = pooled_224
             spatial = spatial_224
             
+        old_rounds = self.cida.config.max_rounds
+        if warmup:
+            self.cida.config.max_rounds = 0
+            
         # Run CIDA reasoning
         out = self.cida(
             pooled,
             seq_output=spatial
         )
+        
+        if warmup:
+            self.cida.config.max_rounds = old_rounds
+            
         return out
