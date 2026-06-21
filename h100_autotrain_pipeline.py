@@ -268,8 +268,8 @@ def download_dataset(max_samples=0, dataset_source="hf"):
             
         except Exception as e:
             print(f"  [WARN] Ошибка скачивания с Kaggle: {e}")
-            print("  [INFO] Попытка использовать Hugging Face в качестве запасного варианта...")
-            dataset_source = "hf"
+            print("  [INFO] Попытка использовать Hugging Face (hf_direct) в качестве запасного варианта...")
+            dataset_source = "hf_direct"
 
     if dataset_source == "hf_direct":
         try:
