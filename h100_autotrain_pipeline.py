@@ -194,92 +194,110 @@ except Exception as e:
 
 DATA_DIR = Path("./data/nih_chest_xray_hf")
 
-def download_dataset(max_samples=0):
+def download_dataset(max_samples=0, dataset_source="hf"):
     print("=" * 60)
-    print("[STEP 2/6] Поиск или загрузка медицинского датасета рентген-снимков...")
+    print(f"[STEP 2/6] Поиск или загрузка медицинского датасета ({dataset_source})...")
     print("=" * 60)
     
-    # 1. Поиск оригинального NIH ChestX-ray14 отключен.
-    # Мы принудительно используем Hugging Face загрузчик для генерации правильного CSV.
-    # 2. Скачивание 14-классовой версии с Hugging Face
     images_dir = DATA_DIR / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
     csv_path = DATA_DIR / "Data_Entry_2017.csv"
     
-    target_count = max_samples if max_samples > 0 else 1000
-    existing_imgs = list(images_dir.glob("*.png"))
-    # Убрали early return чтобы всегда пересоздавать CSV с правильными метками, 
-    # так как раньше метки сохранились ошибочно из-за неверного ключа.
-        
-    try:
-        print("  [INFO] Подключение к Hugging Face Hub (BahaaEldin0/NIH-Chest-Xray-14)...")
-        from datasets import load_dataset
-        
-        # Стриминг датасета
-        ds = load_dataset("BahaaEldin0/NIH-Chest-Xray-14", split="train", streaming=True)
-        
-        metadata_records = []
-        counter = 0
-        limit = max_samples if max_samples > 0 else 50000
-        
-        print(f"  [INFO] Синхронизация {limit} снимков и меток...")
-        pbar = tqdm(desc="Проверка и скачивание из HF", unit="img", total=limit)
-        for item in ds:
-            if counter >= limit:
-                break
+    if dataset_source.startswith("kaggle"):
+        try:
+            print("  [INFO] Проверка библиотеки Kaggle...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "kaggle"], check=True)
+            
+            dataset_id = "nih-chest-xrays/sample" if dataset_source == "kaggle_sample" else "nih-chest-xrays/data"
+            print(f"  [INFO] Скачивание датасета с Kaggle: {dataset_id}...")
+            
+            if not os.environ.get("KAGGLE_USERNAME") and not (Path("~").expanduser() / ".kaggle" / "kaggle.json").exists():
+                print("  [ERROR] Нет учетных данных Kaggle! Пожалуйста, укажите KAGGLE_USERNAME и KAGGLE_KEY.")
+                print("  Переход в резервный режим...")
+                raise ValueError("No Kaggle credentials")
                 
-            img_index = item.get("Image Index", f"img_{counter}.png")
-            img_path = images_dir / img_index
+            subprocess.run(["kaggle", "datasets", "download", "-d", dataset_id, "--unzip", "-p", str(DATA_DIR)], check=True)
             
-            # Сохраняем изображение только если его нет
-            if not img_path.exists():
-                pil_img = item["image"]
-                pil_img.convert("RGB").save(img_path)
+            if dataset_source == "kaggle_sample":
+                sample_csv = DATA_DIR / "sample_labels.csv"
+                if sample_csv.exists():
+                    df = pd.read_csv(sample_csv)
+                    df.to_csv(csv_path, index=False)
+            
+            print(f"  [OK] Датасет {dataset_id} успешно скачан с Kaggle!")
+            return csv_path, images_dir
+            
+        except Exception as e:
+            print(f"  [WARN] Ошибка скачивания с Kaggle: {e}")
+            print("  [INFO] Попытка использовать Hugging Face в качестве запасного варианта...")
+            dataset_source = "hf"
+
+    if dataset_source == "hf":
+        try:
+            print("  [INFO] Подключение к Hugging Face Hub (BahaaEldin0/NIH-Chest-Xray-14)...")
+            from datasets import load_dataset
+            
+            ds = load_dataset("BahaaEldin0/NIH-Chest-Xray-14", split="train", streaming=True)
+            
+            metadata_records = []
+            counter = 0
+            limit = max_samples if max_samples > 0 else 50000
+            
+            print(f"  [INFO] Синхронизация {limit} снимков и меток...")
+            pbar = tqdm(desc="Проверка и скачивание из HF", unit="img", total=limit)
+            for item in ds:
+                if counter >= limit:
+                    break
+                    
+                img_index = item.get("Image Index", f"img_{counter}.png")
+                img_path = images_dir / img_index
                 
-            # ИСПРАВЛЕНИЕ: В датасете HF ключ называется 'label' и это список
-            raw_labels = item.get("label", ["No Finding"])
-            if isinstance(raw_labels, list):
-                findings = "|".join([str(l) for l in raw_labels])
-            else:
-                findings = str(raw_labels)
+                if not img_path.exists():
+                    pil_img = item["image"]
+                    pil_img.convert("RGB").save(img_path)
+                    
+                raw_labels = item.get("label", ["No Finding"])
+                if isinstance(raw_labels, list):
+                    findings = "|".join([str(l) for l in raw_labels])
+                else:
+                    findings = str(raw_labels)
+                    
+                metadata_records.append({
+                    "Image Index": img_index,
+                    "Finding Labels": findings
+                })
                 
-            metadata_records.append({
-                "Image Index": img_index,
-                "Finding Labels": findings
-            })
+                counter += 1
+                pbar.update(1)
+                
+            pbar.close()
             
-            counter += 1
-            pbar.update(1)
+            df = pd.DataFrame(metadata_records)
+            df.to_csv(csv_path, index=False)
+            print(f"  [OK] Успешно загружено {counter} снимков с 14-классовой разметкой!")
+            return csv_path, images_dir
             
-        pbar.close()
-        
-        df = pd.DataFrame(metadata_records)
-        df.to_csv(csv_path, index=False)
-        print(f"  [OK] Успешно загружено {counter} снимков с 14-классовой разметкой!")
-        return csv_path, images_dir
-        
-    except Exception as e:
-        print(f"  [WARN] Ошибка загрузки с Hugging Face: {e}")
-        print("  [INFO] Fallback: Генерация качественных реалистичных медицинских паттернов с 14 классами...")
-        metadata_records = []
-        for i in range(100):
-            new_name = f"img_{i}.png"
-            img = Image.fromarray((np.random.randn(256, 256, 3) * 128 + 128).clip(0, 255).astype(np.uint8))
-            img.save(images_dir / new_name)
-            
-            # Создаем случайные патологии
-            classes = ['Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration', 'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax']
-            active_findings = [c for c in classes if np.random.rand() > 0.85]
-            finding_str = "|".join(active_findings) if active_findings else "No Finding"
-            
-            metadata_records.append({
-                "Image Index": new_name,
-                "Finding Labels": finding_str
-            })
-        df = pd.DataFrame(metadata_records)
-        df.to_csv(csv_path, index=False)
-        print("  [OK] Сгенерирован резервный набор медицинских имитаций (14 классов).")
-        return csv_path, images_dir
+        except Exception as e:
+            print(f"  [WARN] Ошибка загрузки с Hugging Face: {e}")
+            print("  [INFO] Fallback: Генерация качественных реалистичных медицинских паттернов с 14 классами...")
+            metadata_records = []
+            for i in range(100):
+                new_name = f"img_{i}.png"
+                img = Image.fromarray((np.random.randn(256, 256, 3) * 128 + 128).clip(0, 255).astype(np.uint8))
+                img.save(images_dir / new_name)
+                
+                classes = ['Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration', 'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax']
+                active_findings = [c for c in classes if np.random.rand() > 0.85]
+                finding_str = "|".join(active_findings) if active_findings else "No Finding"
+                
+                metadata_records.append({
+                    "Image Index": new_name,
+                    "Finding Labels": finding_str
+                })
+            df = pd.DataFrame(metadata_records)
+            df.to_csv(csv_path, index=False)
+            print("  [OK] Сгенерирован резервный набор медицинских имитаций (14 классов).")
+            return csv_path, images_dir
 
     return csv_path, images_dir
 
@@ -728,6 +746,7 @@ def upload_weights_to_cloud(hf_token=None):
 def main():
     parser = argparse.ArgumentParser(description="CIDA KairosMM H100 Autotrain Pipeline")
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"), help="Hugging Face API token")
+    parser.add_argument("--dataset_source", type=str, default="hf", choices=["hf", "kaggle_sample", "kaggle_full"], help="Источник датасета: hf (HuggingFace), kaggle_sample (2GB), kaggle_full (42GB)")
     parser.add_argument("--max_samples", type=int, default=0, help="Max samples (0=all)")
     parser.add_argument("--epochs", type=int, default=15, help="CIDA training epochs")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size (auto-halves on OOM)")
@@ -739,11 +758,11 @@ def main():
     t_start = time.time()
     print(f"\n{'='*60}")
     print(f"  CIDA KairosMM H100 Autotrain Pipeline")
-    print(f"  Конфиг: epochs={args.epochs}, batch={args.batch_size}, lr={args.lr}")
+    print(f"  Конфиг: epochs={args.epochs}, batch={args.batch_size}, lr={args.lr}, dataset={args.dataset_source}")
     print(f"  samples={'ALL' if args.max_samples==0 else args.max_samples}, healer_epochs={args.healer_epochs}")
     print(f"{'='*60}\n")
     
-    csv_path, images_dir = download_dataset(max_samples=args.max_samples)
+    csv_path, images_dir = download_dataset(max_samples=args.max_samples, dataset_source=args.dataset_source)
     cida_model = train_cida_model(csv_path, images_dir,
                                   max_samples=args.max_samples,
                                   epochs=args.epochs,
