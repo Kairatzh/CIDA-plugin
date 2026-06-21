@@ -22,12 +22,25 @@ import importlib
 
 # Импорт модели CIDA через importlib из-за цифр в названии файла
 try:
-    mod = importlib.import_module("KairosMM.01_encoder_biomedclip")
-    BiomedCLIPCIDA = mod.BiomedCLIPCIDA
+    mod = importlib.import_module("KairosMM.10_densenet_cida")
+    DenseNetCIDA = mod.DenseNetCIDA
     NIH_CLASSES = mod.NIH_CLASSES
 except Exception as e:
-    print(f"[ERROR] Не удалось импортировать BiomedCLIPCIDA: {e}")
+    print(f"[ERROR] Не удалось импортировать DenseNetCIDA: {e}")
     sys.exit(1)
+
+def expected_calibration_error(y_true, y_prob, n_bins=10):
+    y_prob = np.clip(y_prob, 0, 1)
+    bin_boundaries = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        in_bin = (y_prob > bin_boundaries[i]) & (y_prob <= bin_boundaries[i+1])
+        prop_in_bin = np.mean(in_bin)
+        if prop_in_bin > 0:
+            accuracy_in_bin = np.mean(y_true[in_bin])
+            avg_confidence_in_bin = np.mean(y_prob[in_bin])
+            ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+    return ece
 
 class BenchmarkDataset(Dataset):
     def __init__(self, csv_path, images_dir, max_samples=2000):
@@ -107,8 +120,8 @@ def main():
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     # 2. Инициализация модели
-    print(f"[*] Инициализация архитектуры BiomedCLIPCIDA...")
-    model = BiomedCLIPCIDA(num_classes=14, freeze_encoder=True, use_compile=False)
+    print(f"[*] Инициализация архитектуры DenseNetCIDA...")
+    model = DenseNetCIDA(num_classes=14, d_hidden=512, freeze_encoder=False)
     
     if Path(args.weights).exists():
         try:
@@ -157,9 +170,9 @@ def main():
 
     # 4. Расчет метрик
     results = []
-    print("\n" + "="*70)
-    print(f"{'Патология (Класс)':<22} | {'ROC-AUC':<8} | {'Precision':<10} | {'Recall':<8} | {'F1-Score':<8}")
-    print("-" * 70)
+    print("\n" + "="*80)
+    print(f"{'Патология (Класс)':<22} | {'ROC-AUC':<8} | {'ECE':<8} | {'Precision':<10} | {'Recall':<8} | {'F1-Score':<8}")
+    print("-" * 80)
 
     for i, class_name in enumerate(NIH_CLASSES):
         y_true = all_labels[:, i]
@@ -169,20 +182,22 @@ def main():
         # Если в тестовой выборке нет ни одного позитивного примера для класса
         if y_true.sum() == 0 or y_true.sum() == len(y_true):
             auc = 0.0
-            p, r, f = 0.0, 0.0, 0.0
+            p, r, f, ece = 0.0, 0.0, 0.0, 0.0
         else:
             auc = roc_auc_score(y_true, y_prob)
             p, r, f, _ = precision_recall_fscore_support(y_true, y_pred, average='binary', zero_division=0)
+            ece = expected_calibration_error(y_true, y_prob)
             
         results.append({
             "Class": class_name,
             "AUC": auc,
+            "ECE": ece,
             "Precision": p,
             "Recall": r,
             "F1": f
         })
         
-        print(f"{class_name:<22} | {auc:.4f}   | {p:.4f}      | {r:.4f}   | {f:.4f}")
+        print(f"{class_name:<22} | {auc:.4f}   | {ece:.4f}   | {p:.4f}      | {r:.4f}   | {f:.4f}")
 
     print("="*70)
     df_res = pd.DataFrame(results)

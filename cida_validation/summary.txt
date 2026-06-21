@@ -1,0 +1,22 @@
+================================================================================
+                  CIDA VALIDATION SUITE - VEIMO Research Team                   
+--------------------------------------------------------------------------------
+  Seeds: 5  |  N_train: 2000  |  D_hidden: 64  |  Rounds: 3  |  Device: cpu
+  Runtime: 1753s
+--------------------------------------------------------------------------------
+  ID   Hypothesis             CIDA                         Baseline                 p-val        OK?
+--------------------------------------------------------------------------------
+  H1   WM ECE < PoE           0.0000+/-0.0000              0.0000+/-0.0000          1.0000ns     NT
+  H2   |b_P-b_D|>=0.21        0.4200+/-0.0000              random mean              mathematical OK
+  H3   CIDA AUC > MCD         nan+/-nan                    nan+/-nan                1.0000ns     NT
+  H4   CIDA ECE < Base        0.0000+/-0.0000              0.0000+/-0.0000          1.0000ns     NT
+  H5   Diversity priors       |G-I|=0.0310                 |G-I|=0.0210             0.0625ns     OK
+  H6   Disag -> over rds      R1=0.1142->R3=0.1128         N/A                      observed     OK
+  H7   OOD routing ->         0.5029+/-0.0123              0.4984+/-0.0078          0.7500ns     OK
+--------------------------------------------------------------------------------
+  Confirmed: 4/7  (Good)
+  Note: NT = directional result or observed trend (not null rejected)
+  (* p<0.05  ** p<0.01  *** p<0.001  ns p>=0.05)
+================================================================================
+  Figures:  ./cida_validation/figures/
+  JSON:     ./cida_validation/results.json

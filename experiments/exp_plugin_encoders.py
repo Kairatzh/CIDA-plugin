@@ -22,14 +22,14 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 import random
 
 # ─── Путь к корню проекта ────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from cida_plugin import CIDAPlugin, CIDAPluginConfig, OmegaLossSystem, DebateDiagnostics
+from cida_plugin import CIDAPlugin, CIDAPluginConfig, CIDALoss, DebateDiagnostics
 
 
 # ─── Конфигурация эксперимента ────────────────────────────────────────────────
@@ -193,15 +193,11 @@ def train_one_epoch(model, loader, optimizer, loss_fn_or_system, device, is_plug
 
         if is_plugin:
             out = model(input_ids, mask)
-            # [v2] d_schedule=None → OmegaLossSystem использует обучаемое расписание
             loss, _ = loss_fn_or_system(
                 p_final=out["p_final"],
                 y=labels,
                 b_all=out["b_all"],
-                u_all=out["u_all"],
-                h_all=out["h_all"],
-                l_dom_val=out["L_dom"],
-                l_role_val=out["L_role"],
+                orth_loss=out["L_orth"],
             )
         else:
             logits = model(input_ids, mask)
@@ -280,10 +276,9 @@ def run_experiment(dry_run: bool = False):
         enc_results["linear"] = metrics
         print(f"    Linear  → ACC: {metrics['accuracy']:.4f} | ECE: {metrics['ece']:.4f}")
 
-        # ── CIDA PLUGIN v2 ───────────────────────────────────────────────────
-        print("    [2/2] Обучение CIDA-Plugin v2 (Transformer Updater + EMA rho + Learnable Schedule)...")
+        # ── CIDA PLUGIN v3 ───────────────────────────────────────────────────
+        print("    [2/2] Обучение CIDA-Plugin v3 (Transformer Updater + Role Priors)...")
         d_hidden = min(128, d_model)
-        # num_attn_heads должен делить d_hidden
         num_heads = 4 if d_hidden % 4 == 0 else (2 if d_hidden % 2 == 0 else 1)
         plugin_cfg = CIDAPluginConfig(
             d_input=d_model,
@@ -294,17 +289,12 @@ def run_experiment(dry_run: bool = False):
             max_rounds=2,
             early_stop_threshold=0.90,
             num_attn_heads=num_heads,
-            rho_decay=0.9,
-            learnable_d_schedule=True,
         )
         plugin = CIDAPlugin(plugin_cfg).to(device)
         plugin_model = EncoderWithPlugin(encoder, plugin).to(device)
-        # [v2] max_rounds и learnable_d_schedule согласованы с плагином
-        loss_system = OmegaLossSystem(
-            lambda_task=1.0, lambda_cal=0.5, lambda_deb=0.5,
-            lambda_prog=0.3, lambda_budget=0.1, lambda_role=0.1, lambda_dom=0.1,
-            max_rounds=plugin_cfg.max_rounds,
-            learnable_d_schedule=plugin_cfg.learnable_d_schedule,
+        loss_system = CIDALoss(
+            lambda_cal=0.4,
+            lambda_ac=0.2,
         )
         optimizer = torch.optim.AdamW(plugin.parameters(), lr=1e-3, weight_decay=0.01)
 
@@ -322,14 +312,10 @@ def run_experiment(dry_run: bool = False):
         delta_ece = metrics["ece"] - enc_results["linear"]["ece"]
         print(f"    DELTA   → ΔACC: {delta_acc:+.4f} | ΔECE: {delta_ece:+.4f}")
 
-        # [v2] Логируем EMA надёжности агентов
-        rho = plugin.rho_ema.squeeze().tolist()
-        rho_str = " | ".join([f"a{i}: {v:.3f}" for i, v in enumerate(rho)])
-        print(f"    EMA rho → [{rho_str}]")
-        # Логируем обученное расписание разногласий
-        sched = loss_system.d_targets.detach().cpu().tolist()
-        sched_str = " → ".join([f"{v:.3f}" for v in sched])
-        print(f"    D-Sched → [{sched_str}]")
+        # Логируем веса ролей консенсуса
+        weights = plugin.consensus.weights.detach().cpu().tolist()
+        weights_str = " | ".join([f"a{i}: {v:.3f}" for i, v in enumerate(weights)])
+        print(f"    Consensus Weights → [{weights_str}]")
 
         results[enc_name] = enc_results
 

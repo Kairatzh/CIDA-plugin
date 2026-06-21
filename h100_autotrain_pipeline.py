@@ -117,12 +117,13 @@ from pathlib import Path
 # Динамический импорт компонентов проекта с заглушками на случай запуска в чистом окружении
 _USING_REAL_CIDA = False
 try:
-    encoder_mod = importlib.import_module("KairosMM.01_encoder_biomedclip")
-    BiomedCLIPCIDA = encoder_mod.BiomedCLIPCIDA
-    get_transforms_v2 = encoder_mod.get_transforms_v2
-    NIH_CLASSES = encoder_mod.NIH_CLASSES
+    densenet_mod = importlib.import_module("KairosMM.10_densenet_cida")
+    DenseNetCIDA = densenet_mod.DenseNetCIDA
+    NIH_CLASSES = densenet_mod.NIH_CLASSES
+    biomed_mod = importlib.import_module("KairosMM.01_encoder_biomedclip")
+    get_transforms_v2 = biomed_mod.get_transforms_v2
     _USING_REAL_CIDA = True
-    print("  [OK] BiomedCLIPCIDA импортирован успешно (РЕАЛЬНАЯ CIDA).")
+    print("  [OK] DenseNetCIDA импортирован успешно (РЕАЛЬНАЯ CIDA).")
 except Exception as e:
     print(f"\n{'!'*60}")
     print(f"  [CRITICAL WARNING] BiomedCLIPCIDA НЕ ЗАГРУЖЕН: {e}")
@@ -333,6 +334,8 @@ class RobustDataset(Dataset):
                 for i, c in enumerate(self.nih_classes):
                     c_clean = c.replace('_', ' ').lower()
                     if c_clean in f_clean:
+                        labels[i] = 1.0
+            
         return img_224, img_448, torch.tensor(labels)
 
 def focal_loss(probs, targets, alpha=0.25, gamma=2.0):
@@ -340,6 +343,19 @@ def focal_loss(probs, targets, alpha=0.25, gamma=2.0):
     pt = torch.exp(-bce_loss)
     focal_loss = alpha * (1 - pt) ** gamma * bce_loss
     return focal_loss.mean()
+
+def expected_calibration_error(y_true, y_prob, n_bins=10):
+    y_prob = np.clip(y_prob, 0, 1)
+    bin_boundaries = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        in_bin = (y_prob > bin_boundaries[i]) & (y_prob <= bin_boundaries[i+1])
+        prop_in_bin = np.mean(in_bin)
+        if prop_in_bin > 0:
+            accuracy_in_bin = np.mean(y_true[in_bin])
+            avg_confidence_in_bin = np.mean(y_prob[in_bin])
+            ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+    return ece
 def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=128, lr=3e-4, unfreeze_encoder=False):
     """
     Production-grade CIDA trainer with AUC validation, best checkpoint,
@@ -414,13 +430,16 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                 pin_memory=(device.type == "cuda"), num_workers=num_workers
             )
             
-            print(f"  Инициализация BiomedCLIPCIDA (batch_size={batch_size})...")
-            model = BiomedCLIPCIDA(num_classes=14, d_hidden=768, freeze_encoder=not unfreeze_encoder)
+            print(f"  Инициализация DenseNetCIDA (batch_size={batch_size})...")
+            model = DenseNetCIDA(num_classes=14, d_hidden=512, freeze_encoder=not unfreeze_encoder)
             model.to(device)
             
+            from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+            ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(0.999)).to(device)
+            
             optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
-            dtype = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
+            scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_loader), epochs=epochs)
+            dtype = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else (torch.float16 if device.type == "cuda" else torch.float32)
             
             checkpoints_dir = Path("./checkpoints")
             checkpoints_dir.mkdir(exist_ok=True)
@@ -446,20 +465,21 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                     optimizer.zero_grad(set_to_none=True)
                     with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == "cuda")):
                         out = model(imgs_224, imgs_448)
-                    # СЕКРЕТНОЕ ОРУЖИЕ: Focal Loss вместо обычного BCE
+                    
                     loss = focal_loss(out["p_final"].float(), labels.float(), alpha=0.25, gamma=2.0)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
+                    scheduler.step()
+                    ema_model.update_parameters(model)
                     
                     epoch_loss += loss.item()
                     pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{scheduler.get_last_lr()[0]:.2e}")
                 
-                scheduler.step()
                 avg_loss = epoch_loss / len(train_loader)
                 
                 # ── Validation with AUC ──
-                model.eval()
+                ema_model.eval()
                 all_preds, all_labels = [], []
                 val_loss = 0.0
                 with torch.no_grad():
@@ -468,7 +488,7 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                         imgs_448 = imgs_448.to(device, non_blocking=True)
                         labels = labels.to(device, non_blocking=True)
                         with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(device.type == "cuda")):
-                            out = model(imgs_224, imgs_448)
+                            out = ema_model(imgs_224, imgs_448)
                         vloss = focal_loss(out["p_final"].float(), labels.float(), alpha=0.25, gamma=2.0)
                         val_loss += vloss.item()
                         all_preds.append(out["p_final"].float().cpu().numpy())
@@ -489,6 +509,9 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                             pass
                 macro_auc = np.mean(aucs) if aucs else 0.0
                 
+                eces = [expected_calibration_error(all_labels[:, i], all_preds[:, i]) for i in range(14) if all_labels[:, i].sum() > 0]
+                macro_ece = np.mean(eces) if eces else 0.0
+
                 elapsed = time.time() - t0
                 is_best = macro_auc > best_auc
                 is_last = (epoch == epochs)
@@ -496,11 +519,11 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                     if is_best: best_auc = macro_auc
                     checkpoints_dir = Path("checkpoints")
                     checkpoints_dir.mkdir(exist_ok=True)
-                    torch.save(model.state_dict(), checkpoints_dir / "cida_best.pth")
+                    torch.save(ema_model.module.state_dict(), checkpoints_dir / "cida_best.pth")
                 
                 star = " ★ BEST" if is_best else ""
                 print(f"    Эпоха {epoch}/{epochs} | Train Loss: {avg_loss:.4f} | Val Loss: {val_loss:.4f} "
-                      f"| AUC: {macro_auc:.4f}{star} | {elapsed:.1f}с")
+                      f"| AUC: {macro_auc:.4f} | ECE: {macro_ece:.4f}{star} | {elapsed:.1f}с")
                     
             print(f"\n  [OK] Обучение CIDA завершено! Best AUC: {best_auc:.4f}")
             fsize = (checkpoints_dir / "cida_best.pth").stat().st_size / 1e6
@@ -709,7 +732,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=15, help="CIDA training epochs")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size (auto-halves on OOM)")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--healer_epochs", type=int, default=20, help="Healer Flow Matching epochs")
+    parser.add_argument("--healer_epochs", type=int, default=50, help="Healer Flow Matching epochs")
     parser.add_argument("--unfreeze_encoder", action="store_true", help="Unfreeze BiomedCLIP ViT encoder for end-to-end training")
     args = parser.parse_args()
     

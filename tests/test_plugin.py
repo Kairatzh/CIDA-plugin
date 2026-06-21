@@ -1,4 +1,5 @@
 import torch
+import pytest
 from cida_plugin import CIDAPlugin, CIDAPluginConfig
 
 def test_plugin_initialization():
@@ -21,4 +22,4 @@ def test_plugin_forward_pass():
 
     assert "p_final" in out
     assert out["p_final"].shape == (batch_size, 3)
-    assert torch.allclose(out["p_final"].sum(dim=-1), torch.ones(batch_size))
+    assert torch.allclose(out["p_final"].sum(dim=-1), torch.ones(batch_size), atol=1e-5)

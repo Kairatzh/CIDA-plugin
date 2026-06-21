@@ -14,42 +14,49 @@ except ImportError:
     _HAS_DIFFUSERS = False
 
 
+class ResBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+    def forward(self, x):
+        return x + F.silu(self.conv2(F.silu(self.conv1(x))))
+
 class LatentFlowVelocityField(nn.Module):
     """
-    v_theta(z, t) — векторное поле для Flow Matching в латентном пространстве VAE.
-    Принимает z: (B, 4, 28, 28) и t: скаляр/тензор.
-    Предсказывает направление изменения латентного представления для "исцеления".
+    v_theta(z, t) — векторное поле для Flow Matching.
+    Глубокая архитектура с ResBlocks для идеального 'исцеления' латентов.
     """
     def __init__(self, channels=4, height=28, width=28):
         super().__init__()
         self.channels = channels
-        self.height = height
-        self.width = width
-        self.d_latent = channels * height * width
-
+        
         self.time_embed = nn.Sequential(
-            nn.Linear(1, 64),
+            nn.Linear(1, 128),
             nn.SiLU(),
-            nn.Linear(64, 64)
+            nn.Linear(128, 128)
         )
-        self.time_proj = nn.Linear(64, 1)
-        # Сверточный предиктор направления скорости
-        self.conv1 = nn.Conv2d(channels + 1, 64, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(64, channels, kernel_size=3, padding=1)
+        self.time_proj = nn.Linear(128, 1)
+        
+        self.conv_in = nn.Conv2d(channels + 1, 128, kernel_size=3, padding=1)
+        self.res1 = ResBlock(128)
+        self.res2 = ResBlock(128)
+        self.res3 = ResBlock(128)
+        self.res4 = ResBlock(128)
+        self.conv_out = nn.Conv2d(128, channels, kernel_size=3, padding=1)
         
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         B, C, H, W = z.shape
-        # Подготовка временного слоя
         t_val = t.view(1, 1).expand(B, 1) if t.dim() == 0 else t.view(B, 1)
         t_emb = self.time_proj(self.time_embed(t_val)).view(B, 1, 1, 1).expand(B, 1, H, W)
         
-        # Объединяем латентное состояние и время
         x = torch.cat([z, t_emb], dim=1)
-        h = F.silu(self.conv1(x))
-        h = F.silu(self.conv2(h))
-        v = self.conv3(h)
-        return v
+        h = F.silu(self.conv_in(x))
+        h = self.res1(h)
+        h = self.res2(h)
+        h = self.res3(h)
+        h = self.res4(h)
+        return self.conv_out(h)
 
 
 class CounterfactualHealerAgent(nn.Module):

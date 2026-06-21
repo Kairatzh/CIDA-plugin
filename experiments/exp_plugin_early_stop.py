@@ -27,7 +27,7 @@ from collections import defaultdict
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from cida_plugin import CIDAPlugin, CIDAPluginConfig, OmegaLossSystem, DebateDiagnostics
+from cida_plugin import CIDAPlugin, CIDAPluginConfig, CIDALoss, DebateDiagnostics
 
 
 # ─── Конфигурация ────────────────────────────────────────────────────────────
@@ -116,15 +116,11 @@ def train_plugin(model, loader, optimizer, loss_system, device, epochs):
             optimizer.zero_grad()
             out = model(input_ids, mask)
 
-            # [v2] d_schedule=None → learnable internal schedule
             loss, _ = loss_system(
                 p_final=out["p_final"],
                 y=labels,
                 b_all=out["b_all"],
-                u_all=out["u_all"],
-                h_all=out["h_all"],
-                l_dom_val=out["L_dom"],
-                l_role_val=out["L_role"],
+                orth_loss=out["L_orth"],
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -233,17 +229,13 @@ def run_experiment(dry_run: bool = False):
         num_classes=NUM_CLASSES,
         max_rounds=MAX_ROUNDS,
         early_stop_threshold=None,   # During training — no early stop
-        num_attn_heads=4,            # [v2] Transformer heads
-        rho_decay=0.9,               # [v2] EMA decay
-        learnable_d_schedule=True,   # [v2] learnable schedule
+        num_attn_heads=4,
     )
     plugin = CIDAPlugin(plugin_cfg).to(device)
     model = EncoderWithPlugin(encoder, plugin).to(device)
-    loss_system = OmegaLossSystem(
-        lambda_task=1.0, lambda_cal=0.5, lambda_deb=0.5,
-        lambda_prog=0.3, lambda_budget=0.1, lambda_role=0.1, lambda_dom=0.1,
-        max_rounds=plugin_cfg.max_rounds,
-        learnable_d_schedule=plugin_cfg.learnable_d_schedule,
+    loss_system = CIDALoss(
+        lambda_cal=0.4,
+        lambda_ac=0.2,
     )
     optimizer = torch.optim.AdamW(plugin.parameters(), lr=1e-3, weight_decay=0.01)
     train_plugin(model, train_loader, optimizer, loss_system, device, epochs)
