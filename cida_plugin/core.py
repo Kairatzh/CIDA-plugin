@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import CIDAPluginConfig
-from .agent import AgentState, apply_role_prior, compute_role_orthogonality_loss
+from .agent import AgentState, apply_role_prior, apply_role_priors_batched, compute_role_orthogonality_loss
 from .deliberation import (
     AgentEvidenceExtractor,
     MessageFormulator,
@@ -235,17 +235,13 @@ class CIDAPlugin(nn.Module):
         # Initial update to get first beliefs from data
         state_t = self.updater(state_t, r_init, e_init)
 
-        # Apply structural role priors to initial beliefs
-        beliefs = []
-        for i in range(M):
-            b_i = apply_role_prior(
-                state_t.b[:, i, :].clone(),
-                role_idx=i,
-                multi_label=cfg.multi_label,
-                positive_class_idx=cfg.positive_class_idx,
-            )
-            beliefs.append(b_i)
-        state_t.b = torch.stack(beliefs, dim=1)
+        # Apply structural role priors to initial beliefs (Batched)
+        state_t.b = apply_role_priors_batched(
+            state_t.b,
+            M,
+            multi_label=cfg.multi_label,
+            positive_class_idx=cfg.positive_class_idx,
+        )
 
         # ── TTT: adapt before deliberation ────────────────────────────────────
         ttt_info = None
@@ -304,17 +300,13 @@ class CIDAPlugin(nn.Module):
                 )
                 state_t = self.updater(dummy_state, r_final, e_final)
 
-                # Apply role priors to final beliefs
-                beliefs = []
-                for i in range(M):
-                    b_i = apply_role_prior(
-                        state_t.b[:, i, :].clone(),
-                        role_idx=i,
-                        multi_label=cfg.multi_label,
-                        positive_class_idx=cfg.positive_class_idx,
-                    )
-                    beliefs.append(b_i)
-                state_t.b = torch.stack(beliefs, dim=1)
+                # Apply role priors to final beliefs (Batched)
+                state_t.b = apply_role_priors_batched(
+                    state_t.b,
+                    M,
+                    multi_label=cfg.multi_label,
+                    positive_class_idx=cfg.positive_class_idx,
+                )
                 b_all[-1] = state_t.b
 
             ponder_cost = torch.full(
@@ -333,64 +325,64 @@ class CIDAPlugin(nn.Module):
                     UserWarning,
                 )
 
+            from torch.utils.checkpoint import checkpoint
+
             for t in range(cfg.max_rounds):
                 rounds_used = t + 1
 
-                # Evidence Pointers
-                if cfg.abl_no_pointers or H is None:
-                    p = (
-                        torch.ones(B, M, seq_len, device=pooled.device)
-                        / seq_len
+                def deliberation_round(s_in, b_in, u_in, p_in, e_in):
+                    state = AgentState(s=s_in, b=b_in, u=u_in, p=p_in, e=e_in, alpha=torch.ones_like(b_in))
+                    
+                    # Evidence Pointers
+                    if cfg.abl_no_pointers or H is None:
+                        p_new = (torch.ones(B, M, seq_len, device=pooled.device) / seq_len)
+                        e_new = state.s
+                    else:
+                        p_new, e_new = self.evidence_extractor(state.s, H, mask)
+                    state.p = p_new
+                    state.e = e_new
+                    
+                    # Message Formulation
+                    if cfg.abl_no_messages:
+                        m_new = torch.zeros(B, M, cfg.d_message, device=pooled.device)
+                    else:
+                        m_new = self.message_formulator(state.s, state.e, state.b, state.u)
+                        
+                    # Communication
+                    if cfg.abl_no_communication:
+                        r_new = torch.zeros_like(state.s)
+                    else:
+                        r_new = self.communication(state.s, m_new, state.b, state.e, sparse_k=cfg.sparse_comm_k)
+                        gate = self.comm_gate(state.s)
+                        r_new = gate * r_new
+                        if self.training and cfg.comm_dropout > 0:
+                            r_new = F.dropout(r_new, p=cfg.comm_dropout, training=True)
+                            
+                    # Agent Update
+                    state = self.updater(state, r_new, e_new)
+                    
+                    # Apply role priors to updated beliefs
+                    state.b = apply_role_priors_batched(
+                        state.b, M, multi_label=cfg.multi_label, positive_class_idx=cfg.positive_class_idx
                     )
-                    e_t = state_t.s
-                else:
-                    p, e_t = self.evidence_extractor(state_t.s, H, mask)
+                    
+                    return state.s, state.b, state.u, state.p, state.e, m_new
 
-                state_t.p = p
-                state_t.e = e_t
-                p_ptr_all.append(p)
-
-                # Message Formulation
-                if cfg.abl_no_messages:
-                    m_t = torch.zeros(
-                        B, M, cfg.d_message, device=pooled.device
+                if self.training and state_t.s.requires_grad:
+                    s_t, b_t, u_t, p_t, e_t, m_t = checkpoint(
+                        deliberation_round, state_t.s, state_t.b, state_t.u, state_t.p, state_t.e,
+                        use_reentrant=False
                     )
                 else:
-                    m_t = self.message_formulator(
-                        state_t.s, state_t.e, state_t.b, state_t.u
+                    s_t, b_t, u_t, p_t, e_t, m_t = deliberation_round(
+                        state_t.s, state_t.b, state_t.u, state_t.p, state_t.e
                     )
+                    
+                # Update main state
+                state_t.s, state_t.b, state_t.u, state_t.p, state_t.e = s_t, b_t, u_t, p_t, e_t
+
+                p_ptr_all.append(state_t.p)
                 m_all.append(m_t)
-
-                # Communication
-                if cfg.abl_no_communication:
-                    r_t = torch.zeros_like(state_t.s)
-                else:
-                    r_t = self.communication(
-                        state_t.s, m_t, state_t.b, state_t.e,
-                        sparse_k=cfg.sparse_comm_k,
-                    )
-                    gate = self.comm_gate(state_t.s)
-                    r_t = gate * r_t
-                    if self.training and cfg.comm_dropout > 0:
-                        r_t = F.dropout(
-                            r_t, p=cfg.comm_dropout, training=True
-                        )
-
-                # Agent Update
-                state_t = self.updater(state_t, r_t, e_t)
-
-                # Apply role priors to updated beliefs
-                beliefs = []
-                for i in range(M):
-                    b_i = apply_role_prior(
-                        state_t.b[:, i, :].clone(),
-                        role_idx=i,
-                        multi_label=cfg.multi_label,
-                        positive_class_idx=cfg.positive_class_idx,
-                    )
-                    beliefs.append(b_i)
-                state_t.b = torch.stack(beliefs, dim=1)
-
                 b_all.append(state_t.b)
                 u_all.append(state_t.u)
 

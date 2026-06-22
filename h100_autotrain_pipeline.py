@@ -489,6 +489,8 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
+            torch.backends.cuda.enable_flash_sdp(True)
 
     # ── Подготовка данных ──
     transform_224 = get_transforms_v2("train", image_size=224)
@@ -543,23 +545,37 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
             train_loader = DataLoader(
                 train_ds, batch_size=batch_size, shuffle=True,
                 pin_memory=(device.type == "cuda"), num_workers=num_workers,
-                drop_last=True, persistent_workers=(num_workers > 0)
+                drop_last=True, persistent_workers=(num_workers > 0),
+                prefetch_factor=4 if num_workers > 0 else None
             )
             val_loader = DataLoader(
                 val_ds, batch_size=batch_size, shuffle=False,
-                pin_memory=(device.type == "cuda"), num_workers=num_workers
+                pin_memory=(device.type == "cuda"), num_workers=num_workers,
+                persistent_workers=(num_workers > 0),
+                prefetch_factor=4 if num_workers > 0 else None
             )
             
             print(f"  Инициализация DenseNetCIDA (batch_size={batch_size})...")
             model = DenseNetCIDA(num_classes=14, d_hidden=512, freeze_encoder=not unfreeze_encoder)
             model.to(device)
             
+            if hasattr(torch, 'compile'):
+                print("  [INFO] Компиляция CIDA-слоя через torch.compile (max-autotune)...")
+                # Игнорируем предупреждения компилятора, чтобы не засорять вывод
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model.cida = torch.compile(model.cida, mode='max-autotune')
+            
             from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
             ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(0.999)).to(device)
             
-            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4, fused=(device.type == "cuda"))
             scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_loader), epochs=epochs)
             dtype = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else (torch.float16 if device.type == "cuda" else torch.float32)
+            
+            # BF16 не нуждается в масштабировании градиентов
+            scaler = torch.amp.GradScaler('cuda', enabled=(dtype == torch.float16))
             
             checkpoints_dir = Path("./checkpoints")
             checkpoints_dir.mkdir(exist_ok=True)
@@ -589,9 +605,13 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
                         out = model(imgs_224, imgs_448, warmup=is_warmup)
                     
                     loss = focal_loss(out["p_final"].float(), labels.float(), alpha=0.25, gamma=2.0)
-                    loss.backward()
+                    scaler.scale(loss).backward()
+                    
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
+                    
+                    scaler.step(optimizer)
+                    scaler.update()
                     scheduler.step()
                     ema_model.update_parameters(model)
                     

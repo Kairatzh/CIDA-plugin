@@ -117,6 +117,47 @@ def apply_role_prior(
     return (1.0 - ROLE_PRIOR_BLEND) * b_data + ROLE_PRIOR_BLEND * prior
 
 
+def apply_role_priors_batched(
+    b_data: torch.Tensor,
+    M: int,
+    multi_label: bool = False,
+    positive_class_idx: int = 1,
+) -> torch.Tensor:
+    """
+    Векторизованная версия apply_role_prior для батча агентов сразу (B, M, K).
+    Избегает цикла по M агентам (сокращает количество CUDA kernel launches).
+    """
+    B, _, K = b_data.shape
+    device = b_data.device
+    dtype = b_data.dtype
+    
+    priors = torch.zeros((M, K), device=device, dtype=dtype)
+    blend_mask = torch.full((M, 1), ROLE_PRIOR_BLEND, device=device, dtype=dtype)
+    
+    for i in range(M):
+        prior_val = ROLE_PRIOR_POSITIVE[i % 4]
+        if prior_val is None:
+            blend_mask[i, 0] = 0.0 # Интегратор: оставляем только данные
+            continue
+            
+        if multi_label or K == 1:
+            priors[i, :] = prior_val
+        elif K == 2:
+            priors[i, 0] = 1.0 - prior_val
+            priors[i, 1] = prior_val
+        else:
+            uniform_val = (1.0 - prior_val) / max(K - 1, 1)
+            priors[i, :] = uniform_val
+            priors[i, positive_class_idx] = prior_val
+            priors[i] = priors[i] / priors[i].sum()
+            
+    priors = priors.unsqueeze(0)        # (1, M, K)
+    blend_mask = blend_mask.unsqueeze(0) # (1, M, 1)
+    
+    return (1.0 - blend_mask) * b_data + blend_mask * priors
+
+
+
 def compute_role_orthogonality_loss(agent_states: torch.Tensor) -> torch.Tensor:
     """
     Мягкая ортогональность через ПРЕДСТАВЛЕНИЯ, а не через веса.

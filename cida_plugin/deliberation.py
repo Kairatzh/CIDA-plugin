@@ -52,12 +52,26 @@ class AgentEvidenceExtractor(nn.Module):
     def forward(self, s, H, mask=None):
         K = self.W_p(H)
         Q = self.W_q(s)
-        scores = torch.bmm(Q, K.transpose(1, 2)) * self.scale
+        V = H
+
+        attn_mask = None
         if mask is not None:
-            scores = scores.masked_fill(mask.unsqueeze(1) == 0, float('-inf'))
-        p = F.softmax(scores, dim=-1)
-        e = torch.bmm(p, H)
-        return p, e
+            # mask: (B, L) -> (B, 1, L) для бродкаста на M агентов
+            attn_mask = mask.bool().unsqueeze(1)
+
+        # F.scaled_dot_product_attention автоматически использует FlashAttention на H100
+        # Масштабирование (scale) также применяется автоматически внутри.
+        e = F.scaled_dot_product_attention(
+            Q, K, V,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+
+        # Возвращаем пустой тензор для p, так как FlashAttention не материализует матрицу внимания.
+        # Это экономит O(B*M*L) памяти.
+        p_dummy = torch.empty((Q.size(0), Q.size(1), K.size(1)), device=Q.device)
+        return p_dummy, e
 
 
 class CounterargumentCommunication(nn.Module):
