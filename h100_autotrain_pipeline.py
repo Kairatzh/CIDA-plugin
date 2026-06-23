@@ -224,6 +224,13 @@ def download_dataset(max_samples=0, dataset_source="hf"):
                     df.to_csv(csv_path, index=False)
             else:
                 import concurrent.futures
+                
+                limit = max_samples if max_samples > 0 else 50000
+                existing_pngs = list(images_dir.glob("*.png"))
+                if len(existing_pngs) >= limit and csv_path.exists():
+                    print(f"  [INFO] Найдено {len(existing_pngs)} снимков на диске. Пропуск скачивания!")
+                    return csv_path, images_dir
+                    
                 print(f"  [INFO] Скачивание архива с Kaggle (без авто-распаковки)...")
                 subprocess.run(["kaggle", "datasets", "download", "-d", dataset_id, "-p", str(DATA_DIR)], check=True)
                 
@@ -541,18 +548,18 @@ def train_cida_model(csv_path, images_dir, max_samples=0, epochs=15, batch_size=
     # ── OOM-safe training loop ──
     while batch_size >= 1:
         try:
-            num_workers = min(4, os.cpu_count() or 1) if device.type == "cuda" else 0
+            num_workers = min(12, os.cpu_count() or 1) if device.type == "cuda" else 0
             train_loader = DataLoader(
                 train_ds, batch_size=batch_size, shuffle=True,
                 pin_memory=(device.type == "cuda"), num_workers=num_workers,
                 drop_last=True, persistent_workers=(num_workers > 0),
-                prefetch_factor=4 if num_workers > 0 else None
+                prefetch_factor=10 if num_workers > 0 else None
             )
             val_loader = DataLoader(
                 val_ds, batch_size=batch_size, shuffle=False,
                 pin_memory=(device.type == "cuda"), num_workers=num_workers,
                 persistent_workers=(num_workers > 0),
-                prefetch_factor=4 if num_workers > 0 else None
+                prefetch_factor=10 if num_workers > 0 else None
             )
             
             print(f"  Инициализация DenseNetCIDA (batch_size={batch_size})...")
