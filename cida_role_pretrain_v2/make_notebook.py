@@ -32,7 +32,8 @@ with open(os.path.join(base, "train_v2.py"), "r") as f:
     tv = f.read()
 
 md(["## 1. Role Identity Layer v2 (Fixed)"])
-code(["!mkdir -p cida_role_pretrain_v2\n", "%%writefile cida_role_pretrain_v2/role_identity.py\n" + ri])
+code(["!mkdir -p cida_role_pretrain_v2"])
+code(["%%writefile cida_role_pretrain_v2/role_identity.py\n" + ri])
 
 md(["## 2. Model + Losses v2 (Fixed)"])
 code(["%%writefile cida_role_pretrain_v2/model_and_losses.py\n" + ml])
