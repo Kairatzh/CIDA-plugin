@@ -71,6 +71,11 @@ def parse_nli_file(file_path, max_samples=150000):
 
 # ── 2. DeBERTa-v3-base Encoder with LoRA PEFT ────────────────────────────────
 from transformers import AutoTokenizer, AutoModel
+try:
+    import peft.import_utils
+    peft.import_utils.is_torchao_available = lambda: False
+except Exception:
+    pass
 from peft import LoraConfig, get_peft_model
 
 print("Initializing DeBERTa-v3-base model...")
