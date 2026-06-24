@@ -254,6 +254,70 @@ else:
     print("❌ Ошибка: Локальный файл с весами не найден!")
 """)
 
+    add_md("### 6. Оценка модели (ROC-AUC и Калибровка ECE)")
+    add_code("""import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def expected_calibration_error(y_true, y_prob, n_bins=10):
+    y_prob = np.clip(y_prob, 0, 1)
+    bin_boundaries = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        in_bin = (y_prob > bin_boundaries[i]) & (y_prob <= bin_boundaries[i+1])
+        prop_in_bin = np.mean(in_bin)
+        if prop_in_bin > 0:
+            accuracy_in_bin = np.mean(y_true[in_bin])
+            avg_confidence_in_bin = np.mean(y_prob[in_bin])
+            ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+    return ece
+
+print("Запуск валидации (оценка на батчах)...")
+model.eval()
+all_preds = []
+all_labels = []
+
+# Для быстроты берем только 20 батчей (около 640 снимков)
+with torch.no_grad():
+    for i, (imgs, labels) in enumerate(tqdm(train_loader, desc="Валидация")):
+        if i >= 20: break
+        imgs, labels = imgs.to(device), labels.cpu().numpy()
+        
+        out = model(x_224=imgs, warmup=False)
+        preds = out["p_final"].cpu().numpy()
+        
+        all_preds.append(preds)
+        all_labels.append(labels)
+
+all_preds = np.vstack(all_preds)
+all_labels = np.vstack(all_labels)
+
+print("\\n" + "="*50)
+print("🩺 РЕЗУЛЬТАТЫ KAIROS OS (CHEXPERT 5 КЛАССОВ)")
+print("="*50)
+
+macro_auc = []
+macro_ece = []
+
+for i, class_name in enumerate(CHEXPERT_CLASSES):
+    y_true = all_labels[:, i]
+    y_pred = all_preds[:, i]
+    
+    # Пропускаем классы, если в сэмпле нет позитивных примеров
+    if y_true.sum() > 0 and y_true.sum() < len(y_true):
+        auc = roc_auc_score(y_true, y_pred)
+        ece = expected_calibration_error(y_true, y_pred)
+        macro_auc.append(auc)
+        macro_ece.append(ece)
+        print(f"🔹 {class_name:<18} | ROC-AUC: {auc:.4f} | ECE: {ece:.4f}")
+    else:
+        print(f"🔹 {class_name:<18} | Недостаточно данных для оценки")
+
+if macro_auc:
+    print("-" * 50)
+    print(f"🌟 MACRO AVERAGE     | ROC-AUC: {np.mean(macro_auc):.4f} | ECE: {np.mean(macro_ece):.4f}")
+print("="*50)
+""")
+
     nb = {
         "cells": cells,
         "metadata": {
