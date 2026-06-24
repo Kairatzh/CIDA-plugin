@@ -102,9 +102,55 @@ sys.path.insert(0, os.path.join(base_dir, '..'))
 sys.path.insert(0, os.path.join(base_dir, 'cida_role_pretrain_v2'))
 
 from cida_plugin import CIDAPlugin, CIDAPluginConfig
+import cida_plugin.agent
+import cida_plugin.core
+
+def custom_apply_role_priors_batched(b_data, M, multi_label=False, positive_class_idx=1):
+    """
+    Custom NLI role priors for 3 classes:
+    - Prosecutor (0): Biased to class 0 (Entailment) [0.80, 0.10, 0.10]
+    - Defender (1): Biased to class 2 (Contradiction) [0.10, 0.10, 0.80]
+    - Skeptic (2): Biased to class 1 (Neutral / High Entropy) [0.25, 0.50, 0.25]
+    - Integrator (3): No prior (uniform [0.333, 0.333, 0.333] blend = 0.0)
+    """
+    B, _, K = b_data.shape
+    device = b_data.device
+    dtype = b_data.dtype
+    
+    priors = torch.zeros((M, K), device=device, dtype=dtype)
+    blend_mask = torch.zeros((M, 1), device=device, dtype=dtype)
+    
+    # Prosecutor (0)
+    priors[0] = torch.tensor([0.80, 0.10, 0.10], device=device, dtype=dtype)
+    blend_mask[0, 0] = 0.40 # 40% prior blend
+    
+    # Defender (1)
+    priors[1] = torch.tensor([0.10, 0.10, 0.80], device=device, dtype=dtype)
+    blend_mask[1, 0] = 0.40 # 40% prior blend
+    
+    # Skeptic (2)
+    priors[2] = torch.tensor([0.25, 0.50, 0.25], device=device, dtype=dtype)
+    blend_mask[2, 0] = 0.40 # 40% prior blend
+    
+    # Integrator (3)
+    priors[3] = torch.tensor([0.3333, 0.3333, 0.3333], device=device, dtype=dtype)
+    blend_mask[3, 0] = 0.0 # No prior for Integrator
+    
+    priors = priors.unsqueeze(0)        # (1, M, K)
+    blend_mask = blend_mask.unsqueeze(0) # (1, M, 1)
+    
+    return (1.0 - blend_mask) * b_data + blend_mask * priors
+
+# Monkey-patch prior blending functions
+cida_plugin.agent.apply_role_priors_batched = custom_apply_role_priors_batched
+cida_plugin.core.apply_role_priors_batched = custom_apply_role_priors_batched
+
 from cida_plugin.agent import RoleNames
 from role_identity import RoleIdentityLayer, ContrastiveMessageLoss, RoleTimeDynamics
 from model_and_losses import RoleCIDA, RolePreTrainLossV2, UncertaintyCalibrationLossV2, EMAModel
+import model_and_losses
+model_and_losses.apply_role_priors_batched = custom_apply_role_priors_batched
+
 
 # Override RoleCIDA's forward pass to accept tokenized inputs and run encoder dynamically
 original_init = RoleCIDA.__init__
