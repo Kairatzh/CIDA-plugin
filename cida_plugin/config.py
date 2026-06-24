@@ -168,6 +168,15 @@ class CIDAPluginConfig:
     use_dynamic_trust: bool = False
     trust_ema_gamma: float = 0.9
 
+    # ─── Kairos Dynamic Deliberation (KDD) ───────────────────────────────────────
+    # Time-Travel (Rollback) mechanics
+    enable_rollback: bool = False
+    rollback_noise_std: float = 0.05
+    
+    # Latent Superposition
+    # If final disagreement is > threshold, output Superposition State
+    superposition_threshold: float = 0.7
+
     def __post_init__(self):
         assert self.d_input > 0, "d_input must be positive"
         assert self.num_agents >= 2, "Need at least 2 agents"

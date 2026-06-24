@@ -327,6 +327,9 @@ class CIDAPlugin(nn.Module):
 
             from torch.utils.checkpoint import checkpoint
 
+            prev_disagreement = float('inf')
+            rollback_triggered = False
+
             for t in range(cfg.max_rounds):
                 rounds_used = t + 1
 
@@ -377,6 +380,24 @@ class CIDAPlugin(nn.Module):
                     s_t, b_t, u_t, p_t, e_t, m_t = deliberation_round(
                         state_t.s, state_t.b, state_t.u, state_t.p, state_t.e
                     )
+                    
+                # ── Kairos Dynamic Deliberation: Time-Travel (Rollback) ────────
+                if getattr(cfg, 'enable_rollback', False) and not self.training:
+                    with torch.no_grad():
+                        _, _, current_d = self.consensus(b_t)
+                        current_d_mean = current_d.mean().item()
+                        
+                        if current_d_mean > prev_disagreement:
+                            # Entropy increased -> Rollback!
+                            noise_std = getattr(cfg, 'rollback_noise_std', 0.05)
+                            noise = torch.randn_like(state_t.s) * noise_std
+                            state_t.s = state_t.s + noise
+                            rollback_triggered = True
+                            prev_disagreement = float('inf') # Reset to allow new path
+                            continue # Skip update and try next round
+                            
+                        prev_disagreement = current_d_mean
+                # ───────────────────────────────────────────────────────────────
                     
                 # Update main state
                 state_t.s, state_t.b, state_t.u, state_t.p, state_t.e = s_t, b_t, u_t, p_t, e_t
