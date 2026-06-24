@@ -45,7 +45,11 @@ else:
 
 sys.path.insert(0, base_dir)
 sys.path.insert(0, os.path.join(base_dir, '..'))
-sys.path.insert(0, '/content/CIDA-plugin') # Fallback for Colab
+sys.path.insert(0, os.path.join(base_dir, 'cida_role_pretrain_v2'))
+for _p in ['/content/CIDA-plugin', '/content/CIDA-plugin/cida_role_pretrain_v2']:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 from cida_plugin import CIDAPlugin, CIDAPluginConfig
 from cida_plugin.agent import RoleNames
 from role_identity import RoleIdentityLayer, ContrastiveMessageLoss, RoleTimeDynamics
@@ -54,17 +58,17 @@ from model_and_losses import RoleCIDA, RolePreTrainLossV2, UncertaintyCalibratio
 # ── 3. Load datasets ────────────────────────────────────────────────────────
 from datasets import load_dataset, concatenate_datasets
 print('Loading datasets...')
-snli = load_dataset('snli', split='train').filter(lambda x: x['label'] != -1)
+snli = load_dataset('stanfordnlp/snli', split='train').filter(lambda x: x['label'] != -1)
 snli = snli.map(lambda x: {'text': x['premise']+' | '+x['hypothesis'],
     'arg_role': int(x['label'])}, remove_columns=snli.column_names, num_proc=2)
 snli = snli.select(range(min(80000, len(snli))))
 
-mnli = load_dataset('multi_nli', split='train').filter(lambda x: x['label'] != -1)
+mnli = load_dataset('nyu-mll/multi_nli', split='train').filter(lambda x: x['label'] != -1)
 mnli = mnli.map(lambda x: {'text': x['premise']+' | '+x['hypothesis'],
     'arg_role': int(x['label'])}, remove_columns=mnli.column_names, num_proc=2)
 mnli = mnli.select(range(min(80000, len(mnli))))
 
-ag_news = load_dataset('ag_news', split='train')
+ag_news = load_dataset('fancyzhx/ag_news', split='train')
 ag_news = ag_news.map(lambda x: {'text': x['text'], 'arg_role': x['label'] % 3},
     remove_columns=ag_news.column_names, num_proc=2)
 ag_news = ag_news.select(range(20000))
