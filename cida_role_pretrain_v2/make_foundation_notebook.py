@@ -17,8 +17,11 @@ md(["# CIDA Role Pre-Training v2 (Foundation Edition)\n",
 md(["## 0. Setup and Dependencies"])
 code(["!pip uninstall torchao -y -q\n",
       "!pip install torchdiffeq transformers sentence-transformers scikit-learn peft -q\n",
-      "!git clone https://github.com/Kairatzh/CIDA-plugin.git 2>/dev/null || (cd CIDA-plugin && git pull)\n",
-      "%cd CIDA-plugin"])
+      "import os\n",
+      "if not os.path.exists('/content/CIDA-plugin'):\n",
+      "    !git clone https://github.com/Kairatzh/CIDA-plugin.git /content/CIDA-plugin\n",
+      "%cd /content/CIDA-plugin\n",
+      "!git pull"])
 
 # Read source files
 base = os.path.dirname(os.path.abspath(__file__))
