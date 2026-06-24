@@ -55,30 +55,25 @@ from cida_plugin.agent import RoleNames
 from role_identity import RoleIdentityLayer, ContrastiveMessageLoss, RoleTimeDynamics
 from model_and_losses import RoleCIDA, RolePreTrainLossV2, UncertaintyCalibrationLossV2, EMAModel
 
-# ── 3. Load datasets ────────────────────────────────────────────────────────
-from datasets import load_dataset, concatenate_datasets
-print('Loading datasets...')
-snli = load_dataset('stanfordnlp/snli', split='train').filter(lambda x: x['label'] != -1)
-snli = snli.map(lambda x: {'text': x['premise']+' | '+x['hypothesis'],
-    'arg_role': int(x['label'])}, remove_columns=snli.column_names, num_proc=2)
-snli = snli.select(range(min(80000, len(snli))))
-
-mnli = load_dataset('nyu-mll/multi_nli', split='train').filter(lambda x: x['label'] != -1)
-mnli = mnli.map(lambda x: {'text': x['premise']+' | '+x['hypothesis'],
-    'arg_role': int(x['label'])}, remove_columns=mnli.column_names, num_proc=2)
-mnli = mnli.select(range(min(80000, len(mnli))))
-
-ag_news = load_dataset('fancyzhx/ag_news', split='train')
-ag_news = ag_news.map(lambda x: {'text': x['text'], 'arg_role': x['label'] % 3},
-    remove_columns=ag_news.column_names, num_proc=2)
-ag_news = ag_news.select(range(20000))
+# ── 3. Load datasets (Bypassing HF datasets due to API issues) ──────────────
+from sklearn.datasets import fetch_20newsgroups
+print('Loading 20newsgroups dataset (bypassing HuggingFace Datasets)...')
+raw_data = fetch_20newsgroups(subset='train', remove=('headers', 'footers', 'quotes'))
+texts, roles = [], []
+for t, r in zip(raw_data.data, raw_data.target):
+    clean_t = t.strip()
+    if len(clean_t) > 20:
+        texts.append(clean_t[:1000])
+        roles.append(int(r % 3))
+    if len(texts) >= 20000:
+        break
 
 # ── 4. Pre-compute embeddings ───────────────────────────────────────────────
-arg_data = concatenate_datasets([snli, mnli]).shuffle(seed=42)
-print(f'Embedding {len(arg_data):,} Stage 1 texts...')
-arg_embs = embed_texts(arg_data['text']); arg_roles = torch.tensor(arg_data['arg_role'], dtype=torch.long)
-print(f'Embedding {len(ag_news):,} Stage 3 texts...')
-cd_embs = embed_texts(ag_news['text']); cd_roles = torch.tensor(ag_news['arg_role'], dtype=torch.long)
+print(f'Embedding {len(texts):,} texts using MiniLM...')
+arg_embs = embed_texts(texts)
+arg_roles = torch.tensor(roles, dtype=torch.long)
+cd_embs = arg_embs
+cd_roles = arg_roles
 
 class EmbeddingDataset(Dataset):
     def __init__(self, embs, roles): self.embs, self.roles = embs, roles
@@ -129,7 +124,7 @@ model.zero_grad()
 # ── 7. Losses + Optimizer ───────────────────────────────────────────────────
 role_loss_fn = RolePreTrainLossV2(n_classes=3)
 calib_loss_fn = UncertaintyCalibrationLossV2()
-STAGE_EPOCHS = {1: 6, 2: 5, 3: 5}
+STAGE_EPOCHS = {1: 2, 2: 2, 3: 2}
 
 optimizer = optim.AdamW([
     {'params': model.role_layer.parameters(), 'lr': 5e-4, 'weight_decay': 0.0},
