@@ -81,7 +81,7 @@ raw_encoder = AutoModel.from_pretrained("microsoft/deberta-v3-base")
 peft_config = LoraConfig(
     r=16,
     lora_alpha=32,
-    target_modules=["q_proj", "v_proj"],
+    target_modules=["query_proj", "value_proj"],
     lora_dropout=0.05,
     bias="none"
 )
@@ -341,7 +341,7 @@ class CIDAInferenceEngine:
         peft_config = LoraConfig(
             r=16,
             lora_alpha=32,
-            target_modules=["q_proj", "v_proj"],
+            target_modules=["query_proj", "value_proj"],
             lora_dropout=0.05,
             bias="none"
         )
