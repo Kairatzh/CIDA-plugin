@@ -15,7 +15,7 @@ md(["# CIDA Role Pre-Training v2 (Foundation Edition)\n",
     "4. **CIDAInferenceEngine**: High-level wrapper class to run predictions and get structured outputs immediately after training.\n"])
 
 md(["## 0. Setup and Dependencies"])
-code(["!pip install torchdiffeq transformers sentence-transformers scikit-learn -q\n",
+code(["!pip install torchdiffeq transformers sentence-transformers scikit-learn peft -q\n",
       "!git clone https://github.com/Kairatzh/CIDA-plugin.git 2>/dev/null || (cd CIDA-plugin && git pull)\n",
       "%cd CIDA-plugin"])
 
