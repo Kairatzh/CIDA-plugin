@@ -4,7 +4,15 @@ CIDA Role Pre-Training v2 — Foundation-Grade Script.
 - Datasets: Direct downloads of official SNLI (Stanford) & MultiNLI (NYU)
 - Target: 90%+ accuracy on logic & NLI benchmarks
 """
-import sys, os, time, math, warnings, zipfile, urllib.request
+import sys
+# ── PEFT torchao import check bypass ──
+try:
+    import peft.import_utils
+    peft.import_utils.is_torchao_available = lambda *args, **kwargs: False
+except Exception:
+    pass
+# ──────────────────────────────────────
+import os, time, math, warnings, zipfile, urllib.request
 import numpy as np
 import torch, torch.nn as nn, torch.nn.functional as F
 import torch.optim as optim
