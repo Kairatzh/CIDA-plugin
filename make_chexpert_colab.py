@@ -159,7 +159,11 @@ train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
 
     add_md("### 3. Инициализация Kairos Encoder + CIDA и загрузка весов")
     add_code("""import torch.nn as nn
-from KairosMM.10_densenet_cida import DenseNetCIDA
+import importlib
+
+# Модуль начинается с цифры, поэтому импортируем динамически
+densenet_mod = importlib.import_module("KairosMM.10_densenet_cida")
+DenseNetCIDA = densenet_mod.DenseNetCIDA
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Используем устройство: {device}")
