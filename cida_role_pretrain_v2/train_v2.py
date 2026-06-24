@@ -38,8 +38,14 @@ def embed_texts(texts, batch_size=512):
     return torch.cat(vecs)
 
 # ── 2. Import CIDA + v2 modules ─────────────────────────────────────────────
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+if '__file__' in globals():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+else:
+    base_dir = os.path.abspath('.')
+
+sys.path.insert(0, base_dir)
+sys.path.insert(0, os.path.join(base_dir, '..'))
+sys.path.insert(0, '/content/CIDA-CheXpert') # Fallback for Colab
 from cida_plugin import CIDAPlugin, CIDAPluginConfig
 from cida_plugin.agent import RoleNames
 from role_identity import RoleIdentityLayer, ContrastiveMessageLoss, RoleTimeDynamics
