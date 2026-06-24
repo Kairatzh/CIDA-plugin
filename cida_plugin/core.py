@@ -368,7 +368,7 @@ class CIDAPlugin(nn.Module):
                     
                     return state.s, state.b, state.u, state.p, state.e, m_new
 
-                if self.training and state_t.s.requires_grad:
+                if self.training and state_t.s.requires_grad and pooled.is_cuda:
                     s_t, b_t, u_t, p_t, e_t, m_t = checkpoint(
                         deliberation_round, state_t.s, state_t.b, state_t.u, state_t.p, state_t.e,
                         use_reentrant=False

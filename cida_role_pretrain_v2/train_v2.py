@@ -99,7 +99,7 @@ cfg = CIDAPluginConfig(
     num_attn_heads=8, role_prior_blend=0.40, lambda_cal=0.3, lambda_ac=0.1,
     min_disagreement=0.08, comm_dropout=0.15, use_perspective_projector=True,
     anonymous_messages=True, sparse_comm_k=2, use_dynamic_trust=True,
-    trust_ema_gamma=0.9,
+    trust_ema_gamma=0.9, positive_class_idx=0,
 )
 model = RoleCIDA(D_EMB, D_HIDDEN, 3, CIDAPlugin, cfg, embed_fn=embed_texts).to(DEVICE)
 total_p = sum(p.numel() for p in model.parameters())

@@ -70,48 +70,43 @@ def apply_role_prior(
     positive_class_idx: int = 1,
 ) -> torch.Tensor:
     """
-    Смешивает data-driven belief с role-specific prior.
-
-    b_data: (B, K) — убеждение из данных
-    role_idx: индекс роли агента
-    positive_class_idx: индекс "положительного" класса для multi-class задач
-                       (по умолчанию 1, но может быть 0, 2 и т.д.)
-
-    Returns: (B, K) — posterior после применения prior
-
-    Математика (binary case):
-        b_posterior = (1 - λ) · b_data + λ · b_prior
-        где λ = ROLE_PRIOR_BLEND
-
-    Это эквивалентно Bayesian belief blending с фиксированным prior.
-    Чем сильнее BLEND, тем больше роль определяет начальную позицию агента.
+    Смешивает data-driven belief с role-specific prior (обобщённая версия для любого K).
     """
-    prior_val = ROLE_PRIOR_POSITIVE[role_idx % 4]
-
-    if prior_val is None:
-        # Интегратор: без prior
+    role = role_idx % 4
+    if role == 3: # Интегратор: без prior
         return b_data
 
     K = b_data.size(-1)
+    device = b_data.device
+    dtype = b_data.dtype
 
     if multi_label or K == 1:
-        # Каждый выход — независимая binary классификация
+        prior_val = ROLE_PRIOR_POSITIVE[role]
         prior = torch.full_like(b_data, prior_val)
     elif K == 2:
-        # Binary single-label
+        prior_val = ROLE_PRIOR_POSITIVE[role]
         prior = torch.tensor(
             [1.0 - prior_val, prior_val],
-            device=b_data.device,
-            dtype=b_data.dtype,
+            device=device,
+            dtype=dtype,
         ).expand_as(b_data)
     else:
-        # Multi-class: prior_val для "positive" класса, равномерно для остальных
-        uniform_val = (1.0 - prior_val) / max(K - 1, 1)
-        prior = torch.full_like(b_data, uniform_val)
-        prior = prior.clone()
-        prior[:, positive_class_idx] = prior_val  # указанный класс = "positive"
-        # FIX v4: Явная нормализация — без неё при prior_val=0.50, K=14
-        # сумма = ~7.0 вместо 1.0, что ломает blending и обучение на NIH-14
+        # Multi-class
+        if role == 0:   # Prosecutor: biased to positive class
+            prior_val = 0.85
+            uniform_val = (1.0 - prior_val) / max(K - 1, 1)
+            prior = torch.full_like(b_data, uniform_val)
+            prior = prior.clone()
+            prior[:, positive_class_idx] = prior_val
+        elif role == 1: # Defender: biased against positive class (pro-alternative classes)
+            prior_val = 0.15
+            uniform_val = (1.0 - prior_val) / max(K - 1, 1)
+            prior = torch.full_like(b_data, uniform_val)
+            prior = prior.clone()
+            prior[:, positive_class_idx] = prior_val
+        elif role == 2: # Skeptic: neutral / high uncertainty (uniform)
+            prior = torch.full_like(b_data, 1.0 / K)
+            
         prior = prior / prior.sum(dim=-1, keepdim=True)
 
     return (1.0 - ROLE_PRIOR_BLEND) * b_data + ROLE_PRIOR_BLEND * prior
@@ -125,7 +120,6 @@ def apply_role_priors_batched(
 ) -> torch.Tensor:
     """
     Векторизованная версия apply_role_prior для батча агентов сразу (B, M, K).
-    Избегает цикла по M агентам (сокращает количество CUDA kernel launches).
     """
     B, _, K = b_data.shape
     device = b_data.device
@@ -135,20 +129,31 @@ def apply_role_priors_batched(
     blend_mask = torch.full((M, 1), ROLE_PRIOR_BLEND, device=device, dtype=dtype)
     
     for i in range(M):
-        prior_val = ROLE_PRIOR_POSITIVE[i % 4]
-        if prior_val is None:
-            blend_mask[i, 0] = 0.0 # Интегратор: оставляем только данные
+        role = i % 4
+        if role == 3: # Интегратор: без prior
+            blend_mask[i, 0] = 0.0
             continue
             
         if multi_label or K == 1:
-            priors[i, :] = prior_val
+            priors[i, :] = ROLE_PRIOR_POSITIVE[role]
         elif K == 2:
-            priors[i, 0] = 1.0 - prior_val
-            priors[i, 1] = prior_val
+            priors[i, 0] = 1.0 - ROLE_PRIOR_POSITIVE[role]
+            priors[i, 1] = ROLE_PRIOR_POSITIVE[role]
         else:
-            uniform_val = (1.0 - prior_val) / max(K - 1, 1)
-            priors[i, :] = uniform_val
-            priors[i, positive_class_idx] = prior_val
+            # Multi-class
+            if role == 0:   # Prosecutor: biased to positive class
+                prior_val = 0.85
+                uniform_val = (1.0 - prior_val) / max(K - 1, 1)
+                priors[i, :] = uniform_val
+                priors[i, positive_class_idx] = prior_val
+            elif role == 1: # Defender: biased against positive class
+                prior_val = 0.15
+                uniform_val = (1.0 - prior_val) / max(K - 1, 1)
+                priors[i, :] = uniform_val
+                priors[i, positive_class_idx] = prior_val
+            elif role == 2: # Skeptic: neutral / uniform
+                priors[i, :] = 1.0 / K
+                
             priors[i] = priors[i] / priors[i].sum()
             
     priors = priors.unsqueeze(0)        # (1, M, K)
