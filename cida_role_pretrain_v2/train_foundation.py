@@ -1,18 +1,10 @@
 """
 CIDA Role Pre-Training v2 — Foundation-Grade Script.
-- Encoder: microsoft/deberta-v3-base (768 dimensions) with LoRA PEFT
+- Encoder: microsoft/deberta-v3-base (768 dimensions) with Selective Layer Fine-Tuning (PEFT-free)
 - Datasets: Direct downloads of official SNLI (Stanford) & MultiNLI (NYU)
 - Target: 90%+ accuracy on logic & NLI benchmarks
 """
-import sys
-# ── PEFT torchao import check bypass ──
-try:
-    import peft.import_utils
-    peft.import_utils.is_torchao_available = lambda *args, **kwargs: False
-except Exception:
-    pass
-# ──────────────────────────────────────
-import os, time, math, warnings, zipfile, urllib.request
+import sys, os, time, math, warnings, zipfile, urllib.request
 import numpy as np
 import torch, torch.nn as nn, torch.nn.functional as F
 import torch.optim as optim
@@ -77,30 +69,27 @@ def parse_nli_file(file_path, max_samples=150000):
                 break
     return texts, labels
 
-# ── 2. DeBERTa-v3-base Encoder with LoRA PEFT ────────────────────────────────
+# ── 2. DeBERTa-v3-base Encoder with Selective Layer Fine-Tuning ──────────────
 from transformers import AutoTokenizer, AutoModel
-try:
-    import peft.import_utils
-    peft.import_utils.is_torchao_available = lambda: False
-except Exception:
-    pass
-from peft import LoraConfig, get_peft_model
 
 print("Initializing DeBERTa-v3-base model...")
 tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-base")
-raw_encoder = AutoModel.from_pretrained("microsoft/deberta-v3-base")
+encoder = AutoModel.from_pretrained("microsoft/deberta-v3-base")
 
-# Apply LoRA Config
-peft_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
-    target_modules=["query_proj", "value_proj"],
-    lora_dropout=0.05,
-    bias="none"
-)
-encoder = get_peft_model(raw_encoder, peft_config)
-print("LoRA PEFT applied to DeBERTa model:")
-encoder.print_trainable_parameters()
+# Freeze all lower representations (Embeddings + layers 0 to 8)
+for param in encoder.embeddings.parameters():
+    param.requires_grad = False
+    
+for i, layer in enumerate(encoder.encoder.layer):
+    if i < 9: # Layers 0-8 frozen
+        for param in layer.parameters():
+            param.requires_grad = False
+    else: # Only tune top 3 layers (9, 10, 11)
+        for param in layer.parameters():
+            param.requires_grad = True
+
+trainable_encoder_params = [p for p in encoder.parameters() if p.requires_grad]
+print(f"PEFT-free Selective Fine-Tuning: training {len(trainable_encoder_params)} parameter tensors in top 3 layers.")
 encoder.to(DEVICE)
 
 # ── 3. Import CIDA + v2 modules ─────────────────────────────────────────────
@@ -202,26 +191,26 @@ def main():
         trust_ema_gamma=0.9,
     )
     
-    # Load model with LoRA encoder embedded inside
+    # Load model with Selective Fine-Tuning encoder embedded inside
     model = RoleCIDA(D_EMB, D_HIDDEN, 3, CIDAPlugin, cfg, encoder_model=encoder).to(DEVICE)
     role_loss_fn = RolePreTrainLossV2(n_classes=3)
     calib_loss_fn = UncertaintyCalibrationLossV2()
     
-    # Setup Optimizer to train both CIDA and LoRA weights
-    lora_params = [p for p in model.encoder.parameters() if p.requires_grad]
+    # Setup Optimizer to train both CIDA and top DeBERTa layers
+    encoder_params = [p for p in model.encoder.parameters() if p.requires_grad]
     optimizer = optim.AdamW([
         {'params': model.role_layer.parameters(), 'lr': 5e-4, 'weight_decay': 0.0},
         {'params': model.plugin.parameters(), 'lr': 2e-4, 'weight_decay': 1e-2},
         {'params': model.role_msg.parameters(), 'lr': 3e-4, 'weight_decay': 1e-3},
         {'params': model.msg_contrast.parameters(), 'lr': 3e-4, 'weight_decay': 0.0},
         {'params': model.time_dynamics.parameters(), 'lr': 1e-4, 'weight_decay': 0.0},
-        {'params': lora_params, 'lr': 8e-5, 'weight_decay': 1e-2}, # LoRA learning rate
+        {'params': encoder_params, 'lr': 2e-5, 'weight_decay': 1e-2}, # standard fine-tuning LR
     ], fused=(DEVICE=='cuda'))
     
     STAGE_EPOCHS = {1: 4, 2: 3, 3: 3}
     total_steps = sum(STAGE_EPOCHS[s]*len(s1_trl) for s in [1, 2, 3])
     scheduler = optim.lr_scheduler.OneCycleLR(optimizer,
-        max_lr=[8e-4, 3e-4, 5e-4, 5e-4, 2e-4, 1.5e-4],
+        max_lr=[8e-4, 3e-4, 5e-4, 5e-4, 2e-4, 5e-5],
         total_steps=total_steps, pct_start=0.05, anneal_strategy='cos')
     ema = EMAModel(model, decay=0.999)
     
@@ -349,20 +338,12 @@ class CIDAInferenceEngine:
         cfg_dict = ckpt['config']
         cfg = CIDAPluginConfig(**cfg_dict)
         
-        # Load raw encoder & apply LoRA config exactly as training
+        # Load raw encoder
         raw_encoder = AutoModel.from_pretrained("microsoft/deberta-v3-base")
-        peft_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=["query_proj", "value_proj"],
-            lora_dropout=0.05,
-            bias="none"
-        )
-        lora_encoder = get_peft_model(raw_encoder, peft_config)
         
         self.model = RoleCIDA(d_emb=cfg.d_input, d_hidden=cfg.d_hidden, 
                               num_classes=cfg.num_classes, plugin_cls=CIDAPlugin, 
-                              plugin_cfg=cfg, encoder_model=lora_encoder).to(device)
+                              plugin_cfg=cfg, encoder_model=raw_encoder).to(device)
         self.model.load_state_dict(ckpt['ema_shadow'] if 'ema_shadow' in ckpt else ckpt['plugin'])
         self.model.eval()
         
@@ -375,7 +356,7 @@ class CIDAInferenceEngine:
         Analyze a list of texts.
         Returns detailed consensus metrics and agent beliefs per round.
         """
-        # Embed dynamically using the embedded LoRA encoder
+        # Embed dynamically using the embedded encoder
         inputs = self.tokenizer(texts, padding=True, truncation=True, max_length=128, return_tensors="pt").to(self.device)
         out = self.model(inputs['input_ids'], inputs['attention_mask'])
         
