@@ -25,6 +25,9 @@ def create_notebook():
     add_code("""import os
 import pandas as pd
 import numpy as np
+import subprocess
+import zipfile
+import concurrent.futures
 from pathlib import Path
 from tqdm import tqdm
 from PIL import Image
@@ -32,27 +35,71 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
-# Для демо-версии в Колабе мы создадим загрузчик, который берет CheXpert из HF
-# Если его там нет, мы сгенерируем фиктивный, чтобы код работал до подключения к реальной базе Стэнфорда.
 DATA_DIR = Path("./data/chexpert")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 images_dir = DATA_DIR / "images"
 images_dir.mkdir(exist_ok=True)
 csv_path = DATA_DIR / "train.csv"
 
-# Названия 5 ключевых классов CheXpert (соревнование)
 CHEXPERT_CLASSES = ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Pleural Effusion']
+MAX_SAMPLES = 50000
+
+print("Скачивание датасета с Kaggle...")
+# Установите Kaggle API
+subprocess.run(["pip", "install", "-q", "kaggle"], check=True)
+
+# Чтобы Kaggle API работал, убедитесь, что вы загрузили kaggle.json в ~/.kaggle/kaggle.json
+# Популярный открытый датасет CheXpert на Kaggle (ashery/chexpert) или NIH (nih-chest-xrays/data). 
+# Используем ashery/chexpert (Downscaled).
+dataset_id = "ashery/chexpert" 
 
 try:
-    print("Попытка загрузки CheXpert-small из Hugging Face...")
-    from datasets import load_dataset
-    # Используем публичный сэмпл CheXpert (если доступен)
-    ds = load_dataset("alkzar90/NIH-Chest-Xray-dataset", split="train[:2000]") 
-    # Примечание: тут грузим NIH как заглушку, если CheXpert закрыт.
-    print("Успешно загружен сэмпл данных.")
+    if not list(images_dir.glob("*.jpg")):
+        print(f"Скачиваем {dataset_id}...")
+        subprocess.run(["kaggle", "datasets", "download", "-d", dataset_id, "-p", str(DATA_DIR)], check=True)
+        
+        zip_path = list(DATA_DIR.glob("*.zip"))[0]
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            all_files = z.namelist()
+            img_files = [f for f in all_files if f.endswith(('.jpg', '.png'))]
+            csv_files = [f for f in all_files if f.endswith('.csv') and 'train' in f.lower()]
+            
+            print(f"Извлечение {MAX_SAMPLES} снимков из архива...")
+            img_subset = img_files[:MAX_SAMPLES]
+            
+            # Извлекаем CSV
+            if csv_files:
+                z.extract(csv_files[0], DATA_DIR)
+                # Переименуем для удобства
+                os.rename(DATA_DIR / csv_files[0], csv_path)
+            
+            # Извлекаем картинки в многопоточном режиме
+            def extract_img(f):
+                target_path = images_dir / Path(f).name
+                with z.open(f) as source, open(target_path, "wb") as target:
+                    target.write(source.read())
+                    
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                list(tqdm(executor.map(extract_img, img_subset), total=len(img_subset), desc="Извлечение изображений"))
+                
+        # Удаляем архив
+        zip_path.unlink()
+        
+        # Обрезаем CSV под извлеченные картинки
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+            # Приводим пути в CSV к нашим извлеченным именам файлов
+            df['filename'] = df['Path'].apply(lambda x: Path(x).name)
+            extracted_names = [Path(f).name for f in img_subset]
+            df = df[df['filename'].isin(extracted_names)].head(MAX_SAMPLES)
+            df.to_csv(csv_path, index=False)
+            print(f"Успешно подготовлено {len(df)} записей!")
+    else:
+        print("Датасет уже скачан и распакован.")
 except Exception as e:
-    print(f"Ошибка загрузки: {e}")
-    print("Создаем синтетический датасет для отладки пайплайна...")
+    print(f"Ошибка загрузки через Kaggle (возможно нет kaggle.json): {e}")
+    # Fallback to dummy data
+    print("Создаем синтетический датасет для тестирования...")
     records = []
     for i in range(100):
         img_name = f"img_{i}.png"
@@ -60,7 +107,7 @@ except Exception as e:
         img.save(images_dir / img_name)
         record = {"Path": f"images/{img_name}"}
         for c in CHEXPERT_CLASSES:
-            record[c] = 1.0 if np.random.rand() > 0.8 else 0.0 # 0.0, 1.0, -1.0
+            record[c] = 1.0 if np.random.rand() > 0.8 else 0.0
         records.append(record)
     pd.DataFrame(records).to_csv(csv_path, index=False)
 """)
