@@ -232,7 +232,26 @@ for epoch in range(epochs):
 # Сохранение итогового медицинского мозга
 os.makedirs("checkpoints", exist_ok=True)
 torch.save(model.state_dict(), "checkpoints/kairos_chexpert_best.pth")
-print("Обучение завершено. Веса сохранены!")
+print("Обучение завершено. Веса сохранены локально!")
+""")
+
+    add_md("### 5. Сохранение финальной модели на Google Диск")
+    add_code("""# Копируем обученную медицинскую модель на ваш Google Диск, чтобы не потерять
+import shutil
+from google.colab import drive
+
+# Убедимся, что диск примонтирован
+if not os.path.exists('/content/drive'):
+    drive.mount('/content/drive')
+
+drive_path = "/content/drive/MyDrive/kairos_chexpert_best.pth"
+local_path = "checkpoints/kairos_chexpert_best.pth"
+
+if os.path.exists(local_path):
+    shutil.copy(local_path, drive_path)
+    print(f"✅ Финальные веса Kairos OS успешно сохранены на вашем Диске: {drive_path}")
+else:
+    print("❌ Ошибка: Локальный файл с весами не найден!")
 """)
 
     nb = {
