@@ -45,7 +45,7 @@ else:
 
 sys.path.insert(0, base_dir)
 sys.path.insert(0, os.path.join(base_dir, '..'))
-sys.path.insert(0, '/content/CIDA-CheXpert') # Fallback for Colab
+sys.path.insert(0, '/content/CIDA-plugin') # Fallback for Colab
 from cida_plugin import CIDAPlugin, CIDAPluginConfig
 from cida_plugin.agent import RoleNames
 from role_identity import RoleIdentityLayer, ContrastiveMessageLoss, RoleTimeDynamics
