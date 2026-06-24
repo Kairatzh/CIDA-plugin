@@ -168,19 +168,28 @@ DenseNetCIDA = densenet_mod.DenseNetCIDA
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Используем устройство: {device}")
 
-# 1. Создаем модель (5 классов CheXpert вместо 14 NIH)
+# 1. Создаем модель (5 классов CheXpert)
 # Мы РАЗМОРАЖИВАЕМ энкодер, чтобы DenseNet тоже учился!
-model = DenseNetCIDA(num_classes=5, d_hidden=512, max_rounds=3, freeze_encoder=False)
+# ОЧЕНЬ ВАЖНО: d_hidden=128, чтобы совпало с нашими весами Foundation (которые мы учили на NLI)
+model = DenseNetCIDA(num_classes=5, d_hidden=128, max_rounds=3, freeze_encoder=False)
 
 # 2. Загружаем веса CIDA (cida_best.pth) из Stage 1
 import requests
 import os
 
-# Скачаем ваши веса cida_best.pth (если они есть на HF или загрузите их вручную)
 if os.path.exists("checkpoints/cida_best.pth"):
-    print("Найдены локальные веса cida_best.pth!")
-    # model.cida.load_state_dict(torch.load("checkpoints/cida_best.pth", map_location="cpu"), strict=False)
-    # strict=False потому что кол-во классов изменилось (14 -> 5), проекторы классов (alpha) инициализируются заново.
+    print("Найдены локальные веса cida_best.pth! Загружаем 'Мозг'...")
+    state_dict = torch.load("checkpoints/cida_best.pth", map_location="cpu")
+    # В Foundation мы сохраняли dict: {'plugin': ..., 'role_layer': ...}
+    # Достанем только plugin
+    if 'plugin' in state_dict:
+        plugin_state = state_dict['plugin']
+    else:
+        plugin_state = state_dict
+        
+    # strict=False сам пропустит input_proj (разные размерности 768->1024) и проекторы классов (3->5)
+    missing, unexpected = model.cida.load_state_dict(plugin_state, strict=False)
+    print(f"Загружено с strict=False. \\nПропущено (это нормально): {missing[:3]}...")
 else:
     print("Веса cida_best.pth не найдены. Обучение начнется с нуля (без Role Pre-training).")
 
@@ -191,9 +200,21 @@ print("Модель KairosOS-Encoder готова к обучению!")
     add_md("### 4. Обучение (Classification Loss включен!)")
     add_code("""import torch.optim as optim
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import OneCycleLR
 
-optimizer = optim.AdamW(model.parameters(), lr=1e-4)
-epochs = 5
+epochs = 10
+
+# Разделяем learning rate (энкодер учим очень аккуратно, а голову CIDA - агрессивно)
+encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n or 'features' in n]
+cida_params = [p for n, p in model.named_parameters() if 'cida' in n]
+
+optimizer = optim.AdamW([
+    {'params': encoder_params, 'lr': 2e-5},
+    {'params': cida_params, 'lr': 5e-4}
+], weight_decay=1e-4)
+
+scheduler = OneCycleLR(optimizer, max_lr=[2e-5, 5e-4], epochs=epochs, 
+                       steps_per_epoch=len(train_loader), pct_start=0.2)
 
 def focal_loss(probs, targets, alpha=0.25, gamma=2.0):
     bce_loss = F.binary_cross_entropy(probs, targets, reduction='none')
@@ -223,9 +244,10 @@ for epoch in range(epochs):
         
         loss.backward()
         optimizer.step()
+        scheduler.step()
         
         epoch_loss += loss.item()
-        pbar.set_postfix({"Loss": f"{loss.item():.4f}", "Disag": f"{loss_disagreement.item():.4f}"})
+        pbar.set_postfix({"Loss": f"{loss.item():.4f}", "LR_CIDA": f"{scheduler.get_last_lr()[1]:.6f}"})
         
     print(f"Эпоха {epoch+1} завершена. Avg Loss: {epoch_loss/len(train_loader):.4f}")
 

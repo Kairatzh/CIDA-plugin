@@ -13,7 +13,7 @@ NIH_CLASSES = [
 def make_cida_config_densenet(
     num_classes: int = 14,
     multi_label: bool = True,
-    d_hidden: int = 512,
+    d_hidden: int = 128,
     max_rounds: int = 3,
     num_agents: int = 4,
     **kwargs,
@@ -46,10 +46,10 @@ class DenseNetCIDA(nn.Module):
     def __init__(
         self,
         num_classes: int = 14,
-        d_hidden: int = 512,
+        d_hidden: int = 128,
         max_rounds: int = 3,
         num_agents: int = 4,
-        freeze_encoder: bool = False
+        freeze_encoder: bool = True
     ):
         super().__init__()
         # Load pre-trained DenseNet121 (ImageNet weights)
