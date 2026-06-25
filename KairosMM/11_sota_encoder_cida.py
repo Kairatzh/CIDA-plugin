@@ -25,8 +25,8 @@ def make_cida_config_sota(
         enable_rollback=True,
         superposition_threshold=0.4,
         # Architectural
-        comm_heads=4,
-        dropout=0.1,
+        num_attn_heads=4,
+        comm_dropout=0.1,
         **kwargs
     )
 
