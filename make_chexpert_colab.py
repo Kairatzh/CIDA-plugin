@@ -150,10 +150,16 @@ train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
 """)
 
     add_md("### 3. Инициализация SOTA модели (EfficientNet + CIDA) и загрузка Google Drive")
-    add_code("""import torch.nn as nn
+    add_code("""import os
+import sys
+import torch.nn as nn
 import importlib
 import shutil
 from google.colab import drive
+
+# Убеждаемся, что Python видит наши локальные папки (KairosMM, cida_plugin)
+if '/content/CIDA-plugin' not in sys.path:
+    sys.path.append('/content/CIDA-plugin')
 
 # 1. Монтируем Google Drive, чтобы достать веса Foundation
 try:
@@ -163,8 +169,8 @@ try:
         os.makedirs("checkpoints", exist_ok=True)
         shutil.copy(gdrive_path, "checkpoints/cida_best.pth")
         print("Скачали веса CIDA Foundation с Google Диска!")
-except:
-    print("Google Drive не примонтирован. Ищем веса локально.")
+except Exception as e:
+    print(f"Не удалось примонтировать Google Drive или найти веса. Ошибка: {e}")
 
 sota_mod = importlib.import_module("KairosMM.11_sota_encoder_cida")
 SOTAEncoderCIDA = sota_mod.SOTAEncoderCIDA
