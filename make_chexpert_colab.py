@@ -146,6 +146,21 @@ except Exception as e:
             
         return image_224, torch.tensor(labels, dtype=torch.float32)
 
+train_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomRotation(15), # Легкое вращение пациента
+    transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)), # Смещение
+    transforms.ColorJitter(brightness=0.2, contrast=0.2), # Разные аппараты Рентгена
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+val_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
 train_ds = CheXpertDataset(csv_path, images_dir, train_transforms)
 train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
 """)
