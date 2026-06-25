@@ -88,5 +88,6 @@ class SOTAEncoderCIDA(nn.Module):
         features = self.encoder(x_224)
         
         # 2. Передаем в CIDA
-        out = self.cida(features, warmup=warmup, temperature=temperature)
+        # В CIDA v3 аргументы warmup и temperature больше не используются напрямую
+        out = self.cida(features)
         return out
