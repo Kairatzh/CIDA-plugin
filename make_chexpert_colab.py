@@ -250,15 +250,25 @@ for epoch in range(epochs):
         pbar.set_postfix({"Loss": f"{loss.item():.4f}", "LR_CIDA": f"{scheduler.get_last_lr()[1]:.6f}"})
         
     print(f"Эпоха {epoch+1} завершена. Avg Loss: {epoch_loss/len(train_loader):.4f}")
+    
+    # СОХРАНЕНИЕ ПОСЛЕ КАЖДОЙ ЭПОХИ (ЧТОБЫ НЕ ПОТЕРЯТЬ ПРОГРЕСС ПРИ ОТКЛЮЧЕНИИ КОЛАБА)
+    os.makedirs("checkpoints", exist_ok=True)
+    ckpt_path = "checkpoints/kairos_chexpert_best.pth"
+    torch.save(model.state_dict(), ckpt_path)
+    
+    # Автоматически дублируем на Google Диск, если он подключен
+    import shutil
+    drive_path = "/content/drive/MyDrive/kairos_chexpert_best.pth"
+    if os.path.exists("/content/drive/MyDrive"):
+        shutil.copy(ckpt_path, drive_path)
+        print(f"Веса эпохи {epoch+1} сохранены на Google Диск!")
 
-# Сохранение итогового медицинского мозга
-os.makedirs("checkpoints", exist_ok=True)
-torch.save(model.state_dict(), "checkpoints/kairos_chexpert_best.pth")
-print("Обучение завершено. Веса сохранены локально!")
+print("Обучение полностью завершено!")
 """)
 
     add_md("### 5. Сохранение финальной модели на Google Диск")
-    add_code("""# Копируем обученную медицинскую модель на ваш Google Диск, чтобы не потерять
+    add_code("""# Этот шаг теперь выполняется автоматически после каждой эпохи. 
+# Запускать его отдельно не обязательно, но можно для страховки.
 import shutil
 from google.colab import drive
 
