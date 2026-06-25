@@ -243,7 +243,7 @@ for epoch in range(epochs):
         
         # AMP для скорости
         with autocast():
-            out = model(x_224=imgs, warmup=False)
+            out = model(x_224=imgs)
             loss_c = weighted_loss(out["p_final"], labels, pos_weight)
             loss_disagreement = out.get("disagreement", torch.tensor(0.0)).mean()
             loss = loss_c + 0.1 * loss_disagreement
@@ -315,7 +315,7 @@ with torch.no_grad():
         imgs, labels = imgs.to(device), labels.cpu().numpy()
         
         with autocast():
-            out = eval_model(x_224=imgs, warmup=False)
+            out = eval_model(x_224=imgs)
             
         preds = out["p_final"].cpu().numpy()
         all_preds.append(preds)
