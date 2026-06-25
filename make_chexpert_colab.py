@@ -173,15 +173,22 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Используем устройство: {device}")
 
 # 2. Создаем модель (5 классов, Изначально энкодер ЗАМОРОЖЕН)
-model = SOTAEncoderCIDA(model_name='efficientnet_b0', num_classes=5, d_hidden=128, max_rounds=3, freeze_encoder=True)
+# ОЧЕНЬ ВАЖНО: d_hidden=512, чтобы совпало с весами Foundation!
+model = SOTAEncoderCIDA(model_name='efficientnet_b0', num_classes=5, d_hidden=512, max_rounds=3, freeze_encoder=True)
 
 # 3. Загружаем веса
 if os.path.exists("checkpoints/cida_best.pth"):
     print("Загружаем 'Мозг'...")
     state_dict = torch.load("checkpoints/cida_best.pth", map_location="cpu")
     plugin_state = state_dict.get('plugin', state_dict)
-    missing, unexpected = model.cida.load_state_dict(plugin_state, strict=False)
-    print(f"Успешно! Пропущено: {missing[:3]}...")
+    
+    # Фильтруем ключи, чтобы избежать Shape Mismatch
+    model_dict = model.cida.state_dict()
+    filtered_state = {k: v for k, v in plugin_state.items() if k in model_dict and v.shape == model_dict[k].shape}
+    ignored = set(plugin_state.keys()) - set(filtered_state.keys())
+    
+    missing, unexpected = model.cida.load_state_dict(filtered_state, strict=False)
+    print(f"Успешно загружено! Пропущено ключей из-за разных размеров: {len(ignored)}")
 else:
     print("Веса cida_best.pth не найдены. Обучение с нуля.")
 
