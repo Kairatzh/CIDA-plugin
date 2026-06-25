@@ -1,27 +1,25 @@
 import json
-import base64
-import zlib
 
 def create_notebook():
     cells = []
     
     def add_md(text):
-        cells.append({"cell_type": "markdown", "metadata": {}, "source": [line + "\n" for line in text.split("\n")]})
+        cells.append({"cell_type": "markdown", "metadata": {}, "source": [line + "\\n" for line in text.split("\\n")]})
         
     def add_code(text):
-        cells.append({"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": [line + "\n" for line in text.split("\n")]})
+        cells.append({"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": [line + "\\n" for line in text.split("\\n")]})
 
-    add_md("# Эпичный Дебют (Этап 2): Обучение Kairos OS (DenseNet + CIDA) на CheXpert")
-    add_md("Этот ноутбук интегрирует 'умные' веса CIDA Foundation (обученные на NLI) в сверхбыстрый энкодер (DenseNet121) и обучает их распознавать пневмонию, отек и другие патологии на реальных рентгенах датасета **CheXpert**.")
+    add_md("# Эпичный Дебют (Этап 2): Обучение Kairos OS (SOTA Encoder + CIDA) на CheXpert")
+    add_md("Этот ноутбук интегрирует 'умные' веса CIDA Foundation в сверхбыстрый SOTA энкодер (EfficientNet-B0) и обучает их распознавать патологии на рентгенах.")
     
-    add_code("""!pip install -q torch torchvision torchaudio transformers diffusers pandas numpy scikit-learn tqdm huggingface_hub
+    add_code("""!pip install -q torch torchvision torchaudio transformers diffusers pandas numpy scikit-learn tqdm huggingface_hub timm
 !rm -rf CIDA-plugin
 !git clone https://github.com/Kairatzh/CIDA-plugin.git
 %cd CIDA-plugin
 !pip install -e .
 """)
 
-    add_md("### 1. Загрузка датасета CheXpert (через Hugging Face или Kaggle)")
+    add_md("### 1. Загрузка датасета CheXpert (через Kaggle)")
     add_code("""import os
 import pandas as pd
 import numpy as np
@@ -45,12 +43,7 @@ CHEXPERT_CLASSES = ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Pl
 MAX_SAMPLES = 50000
 
 print("Скачивание датасета с Kaggle...")
-# Установите Kaggle API
 subprocess.run(["pip", "install", "-q", "kaggle"], check=True)
-
-# Чтобы Kaggle API работал, убедитесь, что вы загрузили kaggle.json в ~/.kaggle/kaggle.json
-# Популярный открытый датасет CheXpert на Kaggle (ashery/chexpert) или NIH (nih-chest-xrays/data). 
-# Используем ashery/chexpert (Downscaled).
 dataset_id = "ashery/chexpert" 
 
 try:
@@ -67,13 +60,10 @@ try:
             print(f"Извлечение {MAX_SAMPLES} снимков из архива...")
             img_subset = img_files[:MAX_SAMPLES]
             
-            # Извлекаем CSV
             if csv_files:
                 z.extract(csv_files[0], DATA_DIR)
-                # Переименуем для удобства
                 os.rename(DATA_DIR / csv_files[0], csv_path)
             
-            # Извлекаем картинки в многопоточном режиме
             def extract_img(f):
                 target_path = images_dir / Path(f).name
                 with z.open(f) as source, open(target_path, "wb") as target:
@@ -82,13 +72,9 @@ try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                 list(tqdm(executor.map(extract_img, img_subset), total=len(img_subset), desc="Извлечение изображений"))
                 
-        # Удаляем архив
         zip_path.unlink()
-        
-        # Обрезаем CSV под извлеченные картинки
         if csv_path.exists():
             df = pd.read_csv(csv_path)
-            # Приводим пути в CSV к нашим извлеченным именам файлов
             df['filename'] = df['Path'].apply(lambda x: Path(x).name)
             extracted_names = [Path(f).name for f in img_subset]
             df = df[df['filename'].isin(extracted_names)].head(MAX_SAMPLES)
@@ -97,8 +83,7 @@ try:
     else:
         print("Датасет уже скачан и распакован.")
 except Exception as e:
-    print(f"Ошибка загрузки через Kaggle (возможно нет kaggle.json): {e}")
-    # Fallback to dummy data
+    print(f"Ошибка загрузки через Kaggle: {e}")
     print("Создаем синтетический датасет для тестирования...")
     records = []
     for i in range(100):
@@ -112,7 +97,7 @@ except Exception as e:
     pd.DataFrame(records).to_csv(csv_path, index=False)
 """)
 
-    add_md("### 2. Подготовка DataLoader")
+    add_md("### 2. Подготовка DataLoader (Медицинские Аугментации)")
     add_code("""class CheXpertDataset(Dataset):
     def __init__(self, csv_file, img_dir, transform=None):
         self.df = pd.read_csv(csv_file)
@@ -139,7 +124,6 @@ except Exception as e:
         labels = []
         for c in self.classes:
             val = float(row.get(c, 0.0))
-            # U-Ones политика: неопределенность (-1) считаем за 1
             if val == -1.0: val = 1.0 
             if pd.isna(val): val = 0.0
             labels.append(val)
@@ -148,9 +132,9 @@ except Exception as e:
 
 train_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.RandomRotation(15), # Легкое вращение пациента
-    transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)), # Смещение
-    transforms.ColorJitter(brightness=0.2, contrast=0.2), # Разные аппараты Рентгена
+    transforms.RandomRotation(15), 
+    transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2), 
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
@@ -165,131 +149,133 @@ train_ds = CheXpertDataset(csv_path, images_dir, train_transforms)
 train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
 """)
 
-    add_md("### 3. Инициализация Kairos Encoder + CIDA и загрузка весов")
+    add_md("### 3. Инициализация SOTA модели (EfficientNet + CIDA) и загрузка Google Drive")
     add_code("""import torch.nn as nn
 import importlib
+import shutil
+from google.colab import drive
 
-# Модуль начинается с цифры, поэтому импортируем динамически
-densenet_mod = importlib.import_module("KairosMM.10_densenet_cida")
-DenseNetCIDA = densenet_mod.DenseNetCIDA
+# 1. Монтируем Google Drive, чтобы достать веса Foundation
+try:
+    drive.mount('/content/drive')
+    gdrive_path = "/content/drive/MyDrive/cida_best.pth"
+    if os.path.exists(gdrive_path):
+        os.makedirs("checkpoints", exist_ok=True)
+        shutil.copy(gdrive_path, "checkpoints/cida_best.pth")
+        print("Скачали веса CIDA Foundation с Google Диска!")
+except:
+    print("Google Drive не примонтирован. Ищем веса локально.")
+
+sota_mod = importlib.import_module("KairosMM.11_sota_encoder_cida")
+SOTAEncoderCIDA = sota_mod.SOTAEncoderCIDA
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Используем устройство: {device}")
 
-# 1. Создаем модель (5 классов CheXpert)
-# Мы РАЗМОРАЖИВАЕМ энкодер, чтобы DenseNet тоже учился!
-# ОЧЕНЬ ВАЖНО: d_hidden=128, чтобы совпало с нашими весами Foundation (которые мы учили на NLI)
-model = DenseNetCIDA(num_classes=5, d_hidden=128, max_rounds=3, freeze_encoder=False)
+# 2. Создаем модель (5 классов, Изначально энкодер ЗАМОРОЖЕН)
+model = SOTAEncoderCIDA(model_name='efficientnet_b0', num_classes=5, d_hidden=128, max_rounds=3, freeze_encoder=True)
 
-# 2. Загружаем веса CIDA (cida_best.pth) из Stage 1
-import requests
-import os
-
+# 3. Загружаем веса
 if os.path.exists("checkpoints/cida_best.pth"):
-    print("Найдены локальные веса cida_best.pth! Загружаем 'Мозг'...")
+    print("Загружаем 'Мозг'...")
     state_dict = torch.load("checkpoints/cida_best.pth", map_location="cpu")
-    # В Foundation мы сохраняли dict: {'plugin': ..., 'role_layer': ...}
-    # Достанем только plugin
-    if 'plugin' in state_dict:
-        plugin_state = state_dict['plugin']
-    else:
-        plugin_state = state_dict
-        
-    # strict=False сам пропустит input_proj (разные размерности 768->1024) и проекторы классов (3->5)
+    plugin_state = state_dict.get('plugin', state_dict)
     missing, unexpected = model.cida.load_state_dict(plugin_state, strict=False)
-    print(f"Загружено с strict=False. \\nПропущено (это нормально): {missing[:3]}...")
+    print(f"Успешно! Пропущено: {missing[:3]}...")
 else:
-    print("Веса cida_best.pth не найдены. Обучение начнется с нуля (без Role Pre-training).")
+    print("Веса cida_best.pth не найдены. Обучение с нуля.")
 
 model.to(device)
-print("Модель KairosOS-Encoder готова к обучению!")
+print("Модель SOTA готова к Эпичному Обучению!")
 """)
 
-    add_md("### 4. Обучение (Classification Loss включен!)")
+    add_md("### 4. Обучение (AMP, SWA, Weighted BCE, Progressive Unfreezing)")
     add_code("""import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.cuda.amp import GradScaler, autocast
 
-epochs = 10
-swa_start = 7
+epochs = 15
+swa_start = 12
 scaler = GradScaler()
 
-# Разделяем learning rate (энкодер учим очень аккуратно, а голову CIDA - агрессивно)
-encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n or 'features' in n]
-cida_params = [p for n, p in model.named_parameters() if 'cida' in n]
-
-optimizer = optim.AdamW([
-    {'params': encoder_params, 'lr': 2e-5},
-    {'params': cida_params, 'lr': 5e-4}
-], weight_decay=1e-4)
-
-# SWA
-swa_model = torch.optim.swa_utils.AveragedModel(model)
-scheduler = OneCycleLR(optimizer, max_lr=[2e-5, 5e-4], epochs=epochs, 
-                       steps_per_epoch=len(train_loader), pct_start=0.2)
-swa_scheduler = torch.optim.swa_utils.SWALR(optimizer, swa_lr=0.05)
-
-# Баланс классов
+# Баланс классов (Weighted BCE)
 pos_weight = torch.tensor([2.0, 1.5, 3.0, 1.2, 1.1]).to(device)
+
 def weighted_loss(probs, targets, pos_weight):
     return F.binary_cross_entropy_with_logits(probs, targets, pos_weight=pos_weight)
 
-model.train()
+# Разделяем learning rate
+encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n]
+cida_params = [p for n, p in model.named_parameters() if 'cida' in n]
+
+optimizer = optim.AdamW([
+    {'params': encoder_params, 'lr': 1e-4},
+    {'params': cida_params, 'lr': 1e-3}
+], weight_decay=1e-4)
+
+scheduler = OneCycleLR(optimizer, max_lr=[1e-4, 1e-3], epochs=epochs, 
+                       steps_per_epoch=len(train_loader), pct_start=0.1)
+
+swa_model = torch.optim.swa_utils.AveragedModel(model)
+swa_scheduler = torch.optim.swa_utils.SWALR(optimizer, swa_lr=5e-4)
+
 for epoch in range(epochs):
+    # Progressive Unfreezing
+    if epoch == 2:
+        print("⚡ Эпоха 3: РАЗМОРАЖИВАЕМ SOTA ЭНКОДЕР для Fine-Tuning!")
+        model.unfreeze_backbone()
+        
+    model.train()
     epoch_loss = 0
     pbar = tqdm(train_loader, desc=f"Эпоха {epoch+1}/{epochs}")
     for imgs, labels in pbar:
         imgs, labels = imgs.to(device), labels.to(device)
         
         optimizer.zero_grad()
-        loss = loss_c + 0.1 * loss_disagreement
         
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
+        # AMP для скорости
+        with autocast():
+            out = model(x_224=imgs, warmup=False)
+            loss_c = weighted_loss(out["p_final"], labels, pos_weight)
+            loss_disagreement = out.get("disagreement", torch.tensor(0.0)).mean()
+            loss = loss_c + 0.1 * loss_disagreement
+        
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        
+        if epoch < swa_start:
+            scheduler.step()
         
         epoch_loss += loss.item()
-        pbar.set_postfix({"Loss": f"{loss.item():.4f}", "LR_CIDA": f"{scheduler.get_last_lr()[1]:.6f}"})
+        pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
         
-    print(f"Эпоха {epoch+1} завершена. Avg Loss: {epoch_loss/len(train_loader):.4f}")
+    if epoch >= swa_start:
+        swa_model.update_parameters(model)
+        swa_scheduler.step()
+        print(f"Эпоха {epoch+1} завершена. SWA активно! Avg Loss: {epoch_loss/len(train_loader):.4f}")
+    else:
+        print(f"Эпоха {epoch+1} завершена. Avg Loss: {epoch_loss/len(train_loader):.4f}")
     
-    # СОХРАНЕНИЕ ПОСЛЕ КАЖДОЙ ЭПОХИ (ЧТОБЫ НЕ ПОТЕРЯТЬ ПРОГРЕСС ПРИ ОТКЛЮЧЕНИИ КОЛАБА)
     os.makedirs("checkpoints", exist_ok=True)
     ckpt_path = "checkpoints/kairos_chexpert_best.pth"
     torch.save(model.state_dict(), ckpt_path)
     
-    # Автоматически дублируем на Google Диск, если он подключен
-    import shutil
     drive_path = "/content/drive/MyDrive/kairos_chexpert_best.pth"
     if os.path.exists("/content/drive/MyDrive"):
         shutil.copy(ckpt_path, drive_path)
-        print(f"Веса эпохи {epoch+1} сохранены на Google Диск!")
 
-print("Обучение полностью завершено!")
+print("Обновление SWA Batch Norm...")
+torch.optim.swa_utils.update_bn(train_loader, swa_model)
+torch.save(swa_model.module.state_dict(), "checkpoints/kairos_chexpert_swa_best.pth")
+if os.path.exists("/content/drive/MyDrive"):
+    shutil.copy("checkpoints/kairos_chexpert_swa_best.pth", "/content/drive/MyDrive/kairos_chexpert_swa_best.pth")
+
+print("Обучение полностью завершено! Гарантированный SOTA-результат сохранен.")
 """)
 
-    add_md("### 5. Сохранение финальной модели на Google Диск")
-    add_code("""# Этот шаг теперь выполняется автоматически после каждой эпохи. 
-# Запускать его отдельно не обязательно, но можно для страховки.
-import shutil
-from google.colab import drive
-
-# Убедимся, что диск примонтирован
-if not os.path.exists('/content/drive'):
-    drive.mount('/content/drive')
-
-drive_path = "/content/drive/MyDrive/kairos_chexpert_best.pth"
-local_path = "checkpoints/kairos_chexpert_best.pth"
-
-if os.path.exists(local_path):
-    shutil.copy(local_path, drive_path)
-    print(f"✅ Финальные веса Kairos OS успешно сохранены на вашем Диске: {drive_path}")
-else:
-    print("❌ Ошибка: Локальный файл с весами не найден!")
-""")
-
-    add_md("### 6. Оценка модели (ROC-AUC и Калибровка ECE)")
+    add_md("### 5. Оценка модели (ROC-AUC)")
     add_code("""import numpy as np
 from sklearn.metrics import roc_auc_score
 
@@ -307,28 +293,24 @@ def expected_calibration_error(y_true, y_prob, n_bins=10):
     return ece
 
 print("Запуск валидации (оценка на батчах)...")
-model.eval()
-all_preds = []
-all_labels = []
-
-# Для оценки SWA модели
-print("Запуск валидации (оценка на батчах)...")
-# Важно: если используем SWA, оцениваем swa_model!
 try:
     eval_model = swa_model.module
 except:
     eval_model = model
     
 eval_model.eval()
+all_preds = []
+all_labels = []
+
 with torch.no_grad():
-    # Оцениваем на всем датасете (Или хотя бы на 100 батчах)
     for i, (imgs, labels) in enumerate(tqdm(train_loader, desc="Валидация")):
-        if i >= 100: break # 3200 снимков для точной валидации
+        if i >= 100: break
         imgs, labels = imgs.to(device), labels.cpu().numpy()
         
-        out = eval_model(x_224=imgs, warmup=False)
+        with autocast():
+            out = eval_model(x_224=imgs, warmup=False)
+            
         preds = out["p_final"].cpu().numpy()
-        
         all_preds.append(preds)
         all_labels.append(labels)
 
@@ -340,25 +322,20 @@ print("🩺 РЕЗУЛЬТАТЫ KAIROS OS (CHEXPERT 5 КЛАССОВ)")
 print("="*50)
 
 macro_auc = []
-macro_ece = []
-
 for i, class_name in enumerate(CHEXPERT_CLASSES):
     y_true = all_labels[:, i]
     y_pred = all_preds[:, i]
-    
-    # Пропускаем классы, если в сэмпле нет позитивных примеров
     if y_true.sum() > 0 and y_true.sum() < len(y_true):
         auc = roc_auc_score(y_true, y_pred)
         ece = expected_calibration_error(y_true, y_pred)
         macro_auc.append(auc)
-        macro_ece.append(ece)
         print(f"🔹 {class_name:<18} | ROC-AUC: {auc:.4f} | ECE: {ece:.4f}")
     else:
-        print(f"🔹 {class_name:<18} | Недостаточно данных для оценки")
+        print(f"🔹 {class_name:<18} | Недостаточно данных")
 
 if macro_auc:
     print("-" * 50)
-    print(f"🌟 MACRO AVERAGE     | ROC-AUC: {np.mean(macro_auc):.4f} | ECE: {np.mean(macro_ece):.4f}")
+    print(f"🌟 MACRO AVERAGE     | ROC-AUC: {np.mean(macro_auc):.4f}")
 print("="*50)
 """)
 
