@@ -280,7 +280,7 @@ for epoch in range(epochs):
         shutil.copy(ckpt_path, drive_path)
 
 print("Обновление SWA Batch Norm...")
-torch.optim.swa_utils.update_bn(train_loader, swa_model)
+torch.optim.swa_utils.update_bn(train_loader, swa_model, device=device)
 torch.save(swa_model.module.state_dict(), "checkpoints/kairos_chexpert_swa_best.pth")
 if os.path.exists("/content/drive/MyDrive"):
     shutil.copy("checkpoints/kairos_chexpert_swa_best.pth", "/content/drive/MyDrive/kairos_chexpert_swa_best.pth")
