@@ -146,14 +146,7 @@ except Exception as e:
             
         return image_224, torch.tensor(labels, dtype=torch.float32)
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
-train_ds = CheXpertDataset(csv_path, images_dir, transform)
+train_ds = CheXpertDataset(csv_path, images_dir, train_transforms)
 train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
 """)
 
@@ -201,8 +194,11 @@ print("Модель KairosOS-Encoder готова к обучению!")
     add_code("""import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import OneCycleLR
+from torch.cuda.amp import GradScaler, autocast
 
 epochs = 10
+swa_start = 7
+scaler = GradScaler()
 
 # Разделяем learning rate (энкодер учим очень аккуратно, а голову CIDA - агрессивно)
 encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n or 'features' in n]
@@ -213,14 +209,16 @@ optimizer = optim.AdamW([
     {'params': cida_params, 'lr': 5e-4}
 ], weight_decay=1e-4)
 
+# SWA
+swa_model = torch.optim.swa_utils.AveragedModel(model)
 scheduler = OneCycleLR(optimizer, max_lr=[2e-5, 5e-4], epochs=epochs, 
                        steps_per_epoch=len(train_loader), pct_start=0.2)
+swa_scheduler = torch.optim.swa_utils.SWALR(optimizer, swa_lr=0.05)
 
-def focal_loss(probs, targets, alpha=0.25, gamma=2.0):
-    bce_loss = F.binary_cross_entropy(probs, targets, reduction='none')
-    pt = torch.exp(-bce_loss)
-    focal = alpha * (1 - pt) ** gamma * bce_loss
-    return focal.mean()
+# Баланс классов
+pos_weight = torch.tensor([2.0, 1.5, 3.0, 1.2, 1.1]).to(device)
+def weighted_loss(probs, targets, pos_weight):
+    return F.binary_cross_entropy_with_logits(probs, targets, pos_weight=pos_weight)
 
 model.train()
 for epoch in range(epochs):
@@ -230,16 +228,6 @@ for epoch in range(epochs):
         imgs, labels = imgs.to(device), labels.to(device)
         
         optimizer.zero_grad()
-        out = model(x_224=imgs, warmup=False) # warmup=False, дебаты включены
-        
-        # Интегратор наконец-то учится предсказывать реальный медицинский диагноз!
-        p_final = out["p_final"]
-        loss_c = focal_loss(p_final, labels)
-        
-        # Мы добавляем штраф за разногласия, чтобы агенты не ссорились слишком сильно
-        # на простых снимках
-        loss_disagreement = out.get("disagreement", torch.tensor(0.0)).mean()
-        
         loss = loss_c + 0.1 * loss_disagreement
         
         loss.backward()
@@ -308,13 +296,22 @@ model.eval()
 all_preds = []
 all_labels = []
 
-# Для быстроты берем только 20 батчей (около 640 снимков)
+# Для оценки SWA модели
+print("Запуск валидации (оценка на батчах)...")
+# Важно: если используем SWA, оцениваем swa_model!
+try:
+    eval_model = swa_model.module
+except:
+    eval_model = model
+    
+eval_model.eval()
 with torch.no_grad():
+    # Оцениваем на всем датасете (Или хотя бы на 100 батчах)
     for i, (imgs, labels) in enumerate(tqdm(train_loader, desc="Валидация")):
-        if i >= 20: break
+        if i >= 100: break # 3200 снимков для точной валидации
         imgs, labels = imgs.to(device), labels.cpu().numpy()
         
-        out = model(x_224=imgs, warmup=False)
+        out = eval_model(x_224=imgs, warmup=False)
         preds = out["p_final"].cpu().numpy()
         
         all_preds.append(preds)
