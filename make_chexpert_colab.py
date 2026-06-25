@@ -216,7 +216,12 @@ scaler = GradScaler()
 pos_weight = torch.tensor([2.0, 1.5, 3.0, 1.2, 1.1]).to(device)
 
 def weighted_loss(probs, targets, pos_weight):
-    return F.binary_cross_entropy_with_logits(probs, targets, pos_weight=pos_weight)
+    # CIDA outputs probabilities [0, 1]. BCEWithLogitsLoss expects logits!
+    # Applying BCEWithLogitsLoss on probs applies a DOUBLE sigmoid, destroying gradients.
+    # We must compute weighted BCE manually on probabilities.
+    probs = probs.clamp(1e-6, 1 - 1e-6)
+    loss = -pos_weight * targets * torch.log(probs) - (1 - targets) * torch.log(1 - probs)
+    return loss.mean()
 
 # Разделяем learning rate
 encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n]
