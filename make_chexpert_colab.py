@@ -180,8 +180,8 @@ print(f"Используем устройство: {device}")
 
 # 2. Создаем модель (5 классов)
 # ОЧЕНЬ ВАЖНО: d_hidden=512, чтобы совпало с весами Foundation!
-# Энкодер полностью заморожен по запросу пользователя. Обучается только CIDA.
-model = SOTAEncoderCIDA(model_name='efficientnet_b0', num_classes=5, d_hidden=512, max_rounds=3, freeze_encoder=True)
+# Энкодер разморожен с самого начала. Заморозка ImageNet-энкодера на медицинских снимках не работает (OOD).
+model = SOTAEncoderCIDA(model_name='efficientnet_b0', num_classes=5, d_hidden=512, max_rounds=3, freeze_encoder=False)
 
 # 3. Загружаем веса
 if os.path.exists("checkpoints/cida_best.pth"):
@@ -225,11 +225,11 @@ encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n]
 cida_params = [p for n, p in model.named_parameters() if 'cida' in n]
 
 optimizer = optim.AdamW([
-    {'params': encoder_params, 'lr': 1e-4},
-    {'params': cida_params, 'lr': 1e-3}
+    {'params': encoder_params, 'lr': 1e-5}, # Микроскопический LR для CNN, чтобы плавно адаптировать к рентгенам
+    {'params': cida_params, 'lr': 1e-3}     # Высокий LR для быстрого обучения CIDA
 ], weight_decay=1e-4)
 
-scheduler = OneCycleLR(optimizer, max_lr=[1e-4, 1e-3], epochs=epochs, 
+scheduler = OneCycleLR(optimizer, max_lr=[1e-5, 1e-3], epochs=epochs, 
                        steps_per_epoch=len(train_loader), pct_start=0.1)
 
 swa_model = torch.optim.swa_utils.AveragedModel(model)
