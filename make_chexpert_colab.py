@@ -217,14 +217,7 @@ scaler = GradScaler()
 # Баланс классов (Weighted BCE)
 pos_weight = torch.tensor([2.0, 1.5, 3.0, 1.2, 1.1]).to(device)
 
-def weighted_loss(probs, targets, pos_weight):
-    # PyTorch запрещает F.binary_cross_entropy внутри autocast().
-    # Решение: переводим вероятности [0,1] обратно в сырые логиты (inverse sigmoid),
-    # чтобы безопасно использовать встроенный F.binary_cross_entropy_with_logits,
-    # который идеально работает в AMP и поддерживает pos_weight.
-    probs_fp32 = probs.float().clamp(1e-7, 1 - 1e-7)
-    logits = torch.logit(probs_fp32)
-    return F.binary_cross_entropy_with_logits(logits, targets.float(), pos_weight=pos_weight)
+# Удаляем старую функцию weighted_loss, так как мы будем считать лосс напрямую на логитах!
 
 # Разделяем learning rate
 encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n]
@@ -261,7 +254,18 @@ for epoch in range(epochs):
         # AMP для скорости
         with autocast():
             out = model(x_224=imgs)
-            loss_c = weighted_loss(out["p_final"], labels, pos_weight)
+            
+            # 💡 УЛЬТИМАТИВНЫЙ ФИКС FP16 OVERFLOW 💡
+            # Градиент BCE по вероятностям равен (p-y)/(p*(1-p)). В FP16 он мгновенно взрывается до inf!
+            # Поэтому мы достаем СЫРЫЕ ЛОГИТЫ агентов и считаем ошибку на них.
+            # Градиент BCEWithLogitsLoss строго ограничен [-1, 1] и никогда не вызывает NaN/inf!
+            s_final = out["state_final"].s
+            # Получаем логиты. Учитываем, что модель может быть обернута в DataParallel или SWA
+            cida_module = model.module.cida if hasattr(model, 'module') else model.cida
+            logits_agents = cida_module.updater.g(s_final)
+            logits_final = logits_agents.mean(dim=1) # усредняем логиты агентов (ensemble)
+            
+            loss_c = F.binary_cross_entropy_with_logits(logits_final, labels.float(), pos_weight=pos_weight)
             loss_disagreement = out.get("disagreement", torch.tensor(0.0)).mean()
             loss = loss_c + 0.1 * loss_disagreement
         
