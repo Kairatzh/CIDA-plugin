@@ -55,6 +55,11 @@ class SOTAEncoderCIDA(nn.Module):
             d_input = self.encoder(dummy_input).shape[1]
             
         print(f"✅ SOTA Энкодер [{model_name}] загружен. Выходной вектор: {d_input}D")
+        
+        # ВАЖНО: CNN фичи не нормализованы и имеют большую дисперсию.
+        # В FP16 (AMP) это приводит к переполнению (inf) внутри Attention механизмов CIDA.
+        # LayerNorm стабилизирует фичи до N(0, 1), что идеально для CIDA (как у BERT).
+        self.feature_norm = nn.LayerNorm(d_input)
 
         # 2. Создаем конфигурацию CIDA с правильным d_input
         self.cida_config = make_cida_config_sota(
@@ -86,6 +91,9 @@ class SOTAEncoderCIDA(nn.Module):
         # 1. Извлекаем признаки (Global Average Pooling внутри timm)
         # Формат выхода: (batch_size, d_input)
         features = self.encoder(x_224)
+        
+        # Нормализуем фичи для защиты от NaN/Inf в FP16 (AMP)
+        features = self.feature_norm(features)
         
         # 2. Передаем в CIDA
         # В CIDA v3 аргументы warmup и temperature больше не используются напрямую
