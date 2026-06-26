@@ -9,8 +9,8 @@ def create_arc_notebook():
     def add_code(text):
         cells.append({"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": [line + "\n" for line in text.split("\n")]})
 
-    add_md("# 🧩 Эпичное Обучение CIDA на ARC-AGI (Универсальный Интеллект)")
-    add_md("Этот ноутбук обучает **CIDA-Plugin** решать задачи из **ARC-AGI** (Abstraction and Reasoning Corpus) — самого сложного бенчмарка общего ИИ в мире.")
+    add_md("# 🧩 Эпичное Обучение CIDA на ARC-AGI (Few-Shot Meta-Learning)")
+    add_md("Этот ноутбук обучает **CIDA-Plugin** решать задачи из **ARC-AGI** (Abstraction and Reasoning Corpus) в режиме Meta-Learning (Few-Shot), передавая демонстрационные примеры как контекст.")
     
     add_code("""!pip install -q torch torchvision pandas numpy scikit-learn tqdm timm matplotlib
 !rm -rf CIDA-plugin
@@ -24,7 +24,6 @@ def create_arc_notebook():
 import os
 from pathlib import Path
 
-# Скачиваем оригинальный репозиторий ARC от Франсуа Шолле
 if not os.path.exists("ARC-AGI"):
     print("Скачивание репозитория ARC-AGI...")
     subprocess.run(["git", "clone", "https://github.com/fchollet/ARC-AGI.git"], check=True)
@@ -33,38 +32,64 @@ else:
     print("Датасет уже загружен.")
 """)
 
-    add_md("### 2. Подготовка DataLoader (Парсинг и Паддинг Grid-ов)")
+    add_md("### 2. Подготовка Meta-Learning DataLoader (Контекст + Запрос)")
     add_code("""import json
 import glob
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-class ARCDataset(Dataset):
-    def __init__(self, json_dir, max_size=30):
-        self.samples = []
+class ARCMetaDataset(Dataset):
+    def __init__(self, json_dir, max_size=30, max_support=4):
+        self.tasks = []
         self.max_size = max_size
+        self.max_support = max_support
         
-        # Загружаем все задачи из папки
         json_files = glob.glob(os.path.join(json_dir, "*.json"))
         for f in json_files:
             with open(f, 'r') as file:
                 data = json.load(file)
-                # Извлекаем все пары input-output из блока train
-                for pair in data.get("train", []):
-                    self.samples.append((pair["input"], pair["output"]))
+                train_pairs = data.get("train", [])
+                # Для Meta-Learning нужно хотя бы 2 примера: 1 для контекста (support) и 1 для запроса (query)
+                if len(train_pairs) >= 2:
+                    self.tasks.append(train_pairs)
                     
     def __len__(self):
-        return len(self.samples)
+        return len(self.tasks)
         
     def __getitem__(self, idx):
-        inp_grid, out_grid = self.samples[idx]
+        pairs = self.tasks[idx]
         
-        # ARC сетки имеют разные размеры (от 3x3 до 30x30).
-        # Мы дополняем их нулями (черный цвет) до максимального размера 30x30,
-        # чтобы сохранить пространственные координаты и пропорции.
+        # Случайно выбираем один пример в качестве Query (целевой сетки для предсказания)
+        query_idx = np.random.randint(len(pairs))
+        query_pair = pairs[query_idx]
+        
+        # Все остальные примеры используем как Support (контекст трансформации)
+        support_pairs = [p for i, p in enumerate(pairs) if i != query_idx][:self.max_support]
+        
+        # Резервируем тензоры для контекста
+        support_in = torch.zeros(self.max_support, 10, self.max_size, self.max_size)
+        support_out = torch.zeros(self.max_support, self.max_size, self.max_size, dtype=torch.long)
+        support_mask = torch.zeros(self.max_support, self.max_size, self.max_size)
+        
+        for i, pair in enumerate(support_pairs):
+            inp, out = self.pad_grid(pair["input"], pair["output"])
+            support_in[i] = inp
+            support_out[i] = out
+            h_out, w_out = len(pair["output"]), len(pair["output"][0])
+            support_mask[i][:h_out, :w_out] = 1.0
+            
+        # Запрос (Query)
+        query_in, query_out = self.pad_grid(query_pair["input"], query_pair["output"])
+        query_mask = torch.zeros(self.max_size, self.max_size)
+        h_q, w_q = len(query_pair["output"]), len(query_pair["output"][0])
+        query_mask[:h_q, :w_q] = 1.0
+        
+        return support_in, support_out, support_mask, query_in, query_out, query_mask
+
+    def pad_grid(self, inp_grid, out_grid):
         inp_tensor = torch.zeros(self.max_size, self.max_size, dtype=torch.long)
         out_tensor = torch.zeros(self.max_size, self.max_size, dtype=torch.long)
-        mask = torch.zeros(self.max_size, self.max_size, dtype=torch.float32)
         
         h_in, w_in = len(inp_grid), len(inp_grid[0])
         h_out, w_out = len(out_grid), len(out_grid[0])
@@ -76,43 +101,39 @@ class ARCDataset(Dataset):
         for r in range(min(h_out, self.max_size)):
             for c in range(min(w_out, self.max_size)):
                 out_tensor[r, c] = int(out_grid[r][c])
-                mask[r, c] = 1.0
                 
-        # One-hot кодирование цветов (10 возможных цветов в ARC)
         inp_one_hot = torch.zeros(10, self.max_size, self.max_size)
         inp_one_hot.scatter_(0, inp_tensor.unsqueeze(0), 1.0)
         
-        return inp_one_hot, out_tensor, mask
+        return inp_one_hot, out_tensor
 
-train_ds = ARCDataset("ARC-AGI/data/training")
-val_ds = ARCDataset("ARC-AGI/data/evaluation")
+train_ds = ARCMetaDataset("ARC-AGI/data/training")
+val_ds = ARCMetaDataset("ARC-AGI/data/evaluation")
 
-train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=16, shuffle=False)
+train_loader = DataLoader(train_ds, batch_size=8, shuffle=True)
+val_loader = DataLoader(val_ds, batch_size=8, shuffle=False)
 
 print(f"Загружено задач обучения: {len(train_ds)}")
 print(f"Загружено задач валидации: {len(val_ds)}")
 """)
 
-    add_md("### 3. Архитектура CIDAforARC (Сверточный Кодер + Дебатное Ядро + Сверточный Декодер)")
+    add_md("### 3. Архитектура CIDAforARCMeta (Контекстный Кодер + CIDA Core + Сверточный Декодер)")
     add_code("""import torch.nn as nn
+import torch.nn.functional as F
 from cida_plugin.core import CIDAPlugin
 from cida_plugin.config import CIDAPluginConfig
 
 class ARCGridEncoder(nn.Module):
-    \"\"\"
-    Кодирует 2D-сетку ARC в компактный вектор признаков.
-    \"\"\"
     def __init__(self, d_model=256):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(10, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # (15x15)
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), # (8x8)
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((4, 4)),
@@ -124,31 +145,35 @@ class ARCGridEncoder(nn.Module):
         return self.fc(self.conv(x))
 
 class ARCGridDecoder(nn.Module):
-    \"\"\"
-    Декодирует консенсусное верование CIDA обратно в 2D-сетку ARC.
-    \"\"\"
     def __init__(self, d_model=256):
         super().__init__()
         self.fc = nn.Linear(d_model, 128 * 4 * 4)
         self.deconv = nn.Sequential(
             nn.Unflatten(1, (128, 4, 4)),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # (8x8)
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),   # (16x16)
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
             nn.Upsample(size=(30, 30), mode='nearest'),
-            nn.Conv2d(32, 10, kernel_size=3, padding=1) # Логиты по 10 классам цветов
+            nn.Conv2d(32, 10, kernel_size=3, padding=1)
         )
         
     def forward(self, h):
         return self.deconv(self.fc(h))
 
-class CIDAforARC(nn.Module):
+class CIDAforARCMeta(nn.Module):
     def __init__(self, d_model=256, max_rounds=3):
         super().__init__()
         self.encoder = ARCGridEncoder(d_model)
         
-        # Настройка когнитивного ядра CIDA
+        # Проекция пары [Вход, Выход] для получения вектора трансформации
+        self.support_proj = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+        
+        # Конфиг CIDA
         self.cida_config = CIDAPluginConfig(
             d_input=d_model,
             d_hidden=d_model,
@@ -158,23 +183,58 @@ class CIDAforARC(nn.Module):
             multi_label=False
         )
         self.cida = CIDAPlugin(self.cida_config)
+        
+        # Слияние латентного представления запроса с вектором трансформации задачи
+        self.query_merge = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+        
         self.decoder = ARCGridDecoder(d_model)
         
-    def forward(self, x_in):
-        h = self.encoder(x_in)
-        out = self.cida(h)
+    def forward(self, support_in, support_out, query_in):
+        batch_size = query_in.size(0)
+        max_support = support_in.size(1)
+        d_model = self.encoder.fc.out_features
+        
+        # 1. Кодируем входные сетки контекста
+        sup_in_flat = support_in.view(-1, 10, 30, 30)
+        sup_in_latent = self.encoder(sup_in_flat).view(batch_size, max_support, d_model)
+        
+        # 2. Кодируем выходные сетки контекста (переводим их в one-hot перед кодированием)
+        sup_out_one_hot = torch.zeros(batch_size, max_support, 10, 30, 30, device=support_in.device)
+        sup_out_one_hot.scatter_(2, support_out.unsqueeze(2), 1.0)
+        sup_out_flat = sup_out_one_hot.view(-1, 10, 30, 30)
+        sup_out_latent = self.encoder(sup_out_flat).view(batch_size, max_support, d_model)
+        
+        # 3. Вычисляем вектор правила трансформации (Task Embedding)
+        sup_concat = torch.cat([sup_in_latent, sup_out_latent], dim=-1)
+        sup_rules = self.support_proj(sup_concat)
+        task_embed = sup_rules.mean(dim=1) # Усредняем правила демонстраций
+        
+        # 4. Кодируем запрос (Query)
+        query_latent = self.encoder(query_in)
+        
+        # 5. Объединяем контекст с запросом
+        merged = torch.cat([query_latent, task_embed], dim=-1)
+        cida_input = self.query_merge(merged)
+        
+        # 6. Запускаем CIDA deliberation
+        out = self.cida(cida_input)
+        
+        # 7. Декодируем в финальную сетку
         grid_logits = self.decoder(out["p_final"])
         return grid_logits, out
 """)
 
     add_md("### 4. Обучение модели")
     add_code("""import torch.optim as optim
-import torch.nn.functional as F
 from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = CIDAforARC(d_model=256, max_rounds=3).to(device)
+model = CIDAforARCMeta(d_model=256, max_rounds=3).to(device)
 
 # Задаем веса классов: фоновый цвет 0 (черный) имеет меньший вес (0.1), 
 # чтобы модель не скатывалась в предсказание сплошного фона.
@@ -192,15 +252,16 @@ for epoch in range(epochs):
     total_cells = 0
     
     pbar = tqdm(train_loader, desc=f"Эпоха {epoch+1}/{epochs}")
-    for imgs, targets, masks in pbar:
-        imgs, targets, masks = imgs.to(device), targets.to(device), masks.to(device)
+    for sup_in, sup_out, sup_mask, q_in, q_out, q_mask in pbar:
+        sup_in, sup_out = sup_in.to(device), sup_out.to(device)
+        q_in, q_out, q_mask = q_in.to(device), q_out.to(device), q_mask.to(device)
         
         optimizer.zero_grad()
-        logits, out = model(imgs)
+        logits, out = model(sup_in, sup_out, q_in)
         
-        # Считаем CrossEntropy только по валидным ячейкам (через маску) с весами классов
-        loss_ce_pixelwise = F.cross_entropy(logits, targets, weight=class_weights, reduction='none')
-        loss_c = (loss_ce_pixelwise * masks).sum() / (masks.sum() + 1e-8)
+        # Считаем CrossEntropy только по валидным ячейкам (через маску запроса) с весами классов
+        loss_ce_pixelwise = F.cross_entropy(logits, q_out, weight=class_weights, reduction='none')
+        loss_c = (loss_ce_pixelwise * q_mask).sum() / (q_mask.sum() + 1e-8)
         
         loss_disagreement = out.get("disagreement", torch.tensor(0.0)).mean()
         loss = loss_c + 0.1 * loss_disagreement
@@ -212,8 +273,8 @@ for epoch in range(epochs):
         running_loss += loss.item()
         
         preds = logits.argmax(dim=1)
-        correct_cells += ((preds == targets) * masks).sum().item()
-        total_cells += masks.sum().item()
+        correct_cells += ((preds == q_out) * q_mask).sum().item()
+        total_cells += q_mask.sum().item()
         
         pbar.set_postfix({
             "Loss": f"{loss.item():.4f}", 
@@ -243,12 +304,14 @@ val_correct = 0
 val_total = 0
 
 with torch.no_grad():
-    for imgs, targets, masks in tqdm(val_loader, desc="Валидация"):
-        imgs, targets, masks = imgs.to(device), targets.to(device), masks.to(device)
-        logits, _ = model(imgs)
+    for sup_in, sup_out, _, q_in, q_out, q_mask in tqdm(val_loader, desc="Валидация"):
+        sup_in, sup_out = sup_in.to(device), sup_out.to(device)
+        q_in, q_out, q_mask = q_in.to(device), q_out.to(device), q_mask.to(device)
+        
+        logits, _ = model(sup_in, sup_out, q_in)
         preds = logits.argmax(dim=1)
-        val_correct += ((preds == targets) * masks).sum().item()
-        val_total += masks.sum().item()
+        val_correct += ((preds == q_out) * q_mask).sum().item()
+        val_total += q_mask.sum().item()
         
 val_acc = val_correct / (val_total + 1e-8)
 print(f"\\n" + "="*50)
