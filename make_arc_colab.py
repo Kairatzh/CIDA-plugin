@@ -196,6 +196,13 @@ class CIDAforARCMeta(nn.Module):
         # Copy-Gate: позволяет модели напрямую копировать исходные пиксели запроса в выходные логиты
         self.final_conv = nn.Conv2d(20, 10, kernel_size=1)
         
+        # Инициализируем final_conv как тождественное отображение для входной сетки (каналы 10-19)
+        with torch.no_grad():
+            self.final_conv.weight.fill_(0.0)
+            self.final_conv.bias.fill_(0.0)
+            for i in range(10):
+                self.final_conv.weight[i, 10 + i, 0, 0] = 1.0
+        
     def forward(self, support_in, support_out, query_in):
         batch_size = query_in.size(0)
         max_support = support_in.size(1)
@@ -241,10 +248,6 @@ from tqdm import tqdm
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = CIDAforARCMeta(d_model=256, max_rounds=3).to(device)
 
-# Задаем веса классов: фоновый цвет 0 (черный) имеет меньший вес (0.1), 
-# чтобы модель не скатывалась в предсказание сплошного фона.
-class_weights = torch.tensor([0.1, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]).to(device)
-
 optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
 
 epochs = 20
@@ -264,8 +267,8 @@ for epoch in range(epochs):
         optimizer.zero_grad()
         logits, out = model(sup_in, sup_out, q_in)
         
-        # Считаем CrossEntropy только по валидным ячейкам (через маску запроса) с весами классов
-        loss_ce_pixelwise = F.cross_entropy(logits, q_out, weight=class_weights, reduction='none')
+        # Считаем стандартный CrossEntropy только по валидным ячейкам (маска уже исключает паддинг)
+        loss_ce_pixelwise = F.cross_entropy(logits, q_out, reduction='none')
         loss_c = (loss_ce_pixelwise * q_mask).sum() / (q_mask.sum() + 1e-8)
         
         loss_disagreement = out.get("disagreement", torch.tensor(0.0)).mean()
