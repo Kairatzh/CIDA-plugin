@@ -207,6 +207,8 @@ print("Модель SOTA готова к Эпичному Обучению!")
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.cuda.amp import GradScaler, autocast
+import numpy as np
+from sklearn.metrics import roc_auc_score
 
 epochs = 15
 swa_start = 12
@@ -245,6 +247,9 @@ for epoch in range(epochs):
         
     model.train()
     epoch_loss = 0
+    all_preds = []
+    all_labels = []
+    
     pbar = tqdm(train_loader, desc=f"Эпоха {epoch+1}/{epochs}")
     for imgs, labels in pbar:
         imgs, labels = imgs.to(device), labels.to(device)
@@ -264,16 +269,32 @@ for epoch in range(epochs):
         
         if epoch < swa_start:
             scheduler.step()
+            
+        # Collect for train AUC
+        all_preds.append(out["p_final"].detach().float().cpu().numpy())
+        all_labels.append(labels.cpu().numpy())
         
         epoch_loss += loss.item()
         pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
         
+    # Calculate Train AUC
+    all_preds_np = np.vstack(all_preds)
+    all_labels_np = np.vstack(all_labels)
+    macro_auc = []
+    for i in range(5):
+        y_true = all_labels_np[:, i]
+        y_pred = all_preds_np[:, i]
+        if y_true.sum() > 0 and y_true.sum() < len(y_true):
+            macro_auc.append(roc_auc_score(y_true, y_pred))
+            
+    epoch_auc = np.mean(macro_auc) if macro_auc else 0.5
+        
     if epoch >= swa_start:
         swa_model.update_parameters(model)
         swa_scheduler.step()
-        print(f"Эпоха {epoch+1} завершена. SWA активно! Avg Loss: {epoch_loss/len(train_loader):.4f}")
+        print(f"Эпоха {epoch+1} завершена. SWA активно! Avg Loss: {epoch_loss/len(train_loader):.4f} | Train ROC-AUC: {epoch_auc:.4f}")
     else:
-        print(f"Эпоха {epoch+1} завершена. Avg Loss: {epoch_loss/len(train_loader):.4f}")
+        print(f"Эпоха {epoch+1} завершена. Avg Loss: {epoch_loss/len(train_loader):.4f} | Train ROC-AUC: {epoch_auc:.4f}")
     
     os.makedirs("checkpoints", exist_ok=True)
     ckpt_path = "checkpoints/kairos_chexpert_best.pth"
