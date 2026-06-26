@@ -106,7 +106,7 @@ class CounterargumentCommunication(nn.Module):
 
         b_i = b.unsqueeze(2)
         b_j = b.unsqueeze(1)
-        D = torch.norm(b_i - b_j, p=1, dim=-1)
+        D = (b_i - b_j).abs().sum(dim=-1)
 
         e_norm = F.normalize(e, p=2, dim=-1)
         S = torch.bmm(e_norm, e_norm.transpose(1, 2))

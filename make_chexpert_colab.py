@@ -220,18 +220,18 @@ scaler = GradScaler()
 pos_weight = torch.tensor([2.0, 1.5, 3.0, 1.2, 1.1]).to(device)
 
 # Оптимизируем обе части с разным LR:
-# Энкодер учится очень бережно (2e-5), а случайная CIDA быстро подстраивается (2e-3)
+# Энкодер учится бережно (2e-5), а CIDA подстраивается стабильно (2e-4)
 encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n]
 cida_params = [p for n, p in model.named_parameters() if 'cida' in n]
 
 optimizer = optim.AdamW([
     {'params': encoder_params, 'lr': 2e-5},
-    {'params': cida_params, 'lr': 2e-3}
+    {'params': cida_params, 'lr': 2e-4}
 ], weight_decay=1e-4)
 
 # pct_start=0.05: очень быстрый разогрев (первые 5% шагов),
 # а затем плавное уменьшение LR до конца обучения (соответствует вашей идее больших шагов в начале и маленьких в конце)
-scheduler = OneCycleLR(optimizer, max_lr=[2e-5, 2e-3], epochs=epochs, 
+scheduler = OneCycleLR(optimizer, max_lr=[2e-5, 2e-4], epochs=epochs, 
                        steps_per_epoch=len(train_loader), pct_start=0.05)
 
 swa_model = torch.optim.swa_utils.AveragedModel(model)

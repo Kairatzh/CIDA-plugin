@@ -122,7 +122,7 @@ class CIDALoss(nn.Module):
         """
         b_i = b_final.unsqueeze(2)   # (B, M, 1, K)
         b_j = b_final.unsqueeze(1)   # (B, 1, M, K)
-        pairwise_dist = torch.norm(b_i - b_j, p=1, dim=-1)  # (B, M, M)
+        pairwise_dist = (b_i - b_j).abs().sum(dim=-1)  # (B, M, M)
 
         # Только нижняя треугольная часть (без диагонали)
         M = b_final.size(1)

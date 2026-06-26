@@ -123,8 +123,9 @@ class ConsensusAggregator(nn.Module):
             # FIX v4: Нормализация через log-softmax — численно стабильна
             p_final = F.softmax(p_final.log().clamp(-10, 10), dim=-1)
 
-        # ── Несогласие = std убеждений по агентам ─────────────────────────────
-        disagreement = b.std(dim=1).mean(dim=-1)  # (B,)
+        # ── Несогласие = std убеждений по агентам (со стабильным градиентом) ──
+        var = b.var(dim=1, unbiased=True)
+        disagreement = torch.sqrt(var + 1e-8).mean(dim=-1)  # (B,)
 
         # ── Неопределённость = несогласие + собственная uncertainty агентов ──
         if u is not None:
