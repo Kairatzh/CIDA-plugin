@@ -193,6 +193,9 @@ class CIDAforARCMeta(nn.Module):
         
         self.decoder = ARCGridDecoder(d_model)
         
+        # Copy-Gate: позволяет модели напрямую копировать исходные пиксели запроса в выходные логиты
+        self.final_conv = nn.Conv2d(20, 10, kernel_size=1)
+        
     def forward(self, support_in, support_out, query_in):
         batch_size = query_in.size(0)
         max_support = support_in.size(1)
@@ -223,8 +226,10 @@ class CIDAforARCMeta(nn.Module):
         # 6. Запускаем CIDA deliberation
         out = self.cida(cida_input)
         
-        # 7. Декодируем в финальную сетку
-        grid_logits = self.decoder(out["p_final"])
+        # 7. Декодируем и применяем Copy-Gate
+        dec_out = self.decoder(out["p_final"])
+        combined = torch.cat([dec_out, query_in], dim=1) # (batch, 20, 30, 30)
+        grid_logits = self.final_conv(combined)          # (batch, 10, 30, 30)
         return grid_logits, out
 """)
 
