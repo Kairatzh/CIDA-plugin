@@ -178,9 +178,10 @@ SOTAEncoderCIDA = sota_mod.SOTAEncoderCIDA
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Используем устройство: {device}")
 
-# 2. Создаем модель (5 классов, Изначально энкодер ЗАМОРОЖЕН)
+# 2. Создаем модель (5 классов)
 # ОЧЕНЬ ВАЖНО: d_hidden=512, чтобы совпало с весами Foundation!
-model = SOTAEncoderCIDA(model_name='efficientnet_b0', num_classes=5, d_hidden=512, max_rounds=3, freeze_encoder=True)
+# СРАЗУ размораживаем энкодер. Progressive Unfreezing на пике OneCycleLR убивал веса CNN.
+model = SOTAEncoderCIDA(model_name='efficientnet_b0', num_classes=5, d_hidden=512, max_rounds=3, freeze_encoder=False)
 
 # 3. Загружаем веса
 if os.path.exists("checkpoints/cida_best.pth"):
@@ -235,11 +236,6 @@ swa_model = torch.optim.swa_utils.AveragedModel(model)
 swa_scheduler = torch.optim.swa_utils.SWALR(optimizer, swa_lr=5e-4)
 
 for epoch in range(epochs):
-    # Progressive Unfreezing
-    if epoch == 2:
-        print("⚡ Эпоха 3: РАЗМОРАЖИВАЕМ SOTA ЭНКОДЕР для Fine-Tuning!")
-        model.unfreeze_backbone()
-        
     model.train()
     epoch_loss = 0
     all_preds = []
