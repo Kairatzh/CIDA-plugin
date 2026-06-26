@@ -45,16 +45,21 @@ class SOTAEncoderCIDA(nn.Module):
     ):
         super().__init__()
         
-        # 1. Загружаем SOTA энкодер через timm
-        # num_classes=0 отключает финальный классификатор, возвращая только признаки (pooled features)
-        self.encoder = timm.create_model(model_name, pretrained=True, num_classes=0)
-        
-        # Определяем размерность выхода энкодера (на лету)
-        with torch.no_grad():
-            dummy_input = torch.randn(1, 3, 224, 224)
-            d_input = self.encoder(dummy_input).shape[1]
-            
-        print(f"✅ SOTA Энкодер [{model_name}] загружен. Выходной вектор: {d_input}D")
+        # 1. Загружаем SOTA энкодер
+        if model_name == 'xrv_densenet121':
+            import torchxrayvision as xrv
+            print("⚕️ Загружаем специализированный медицинский энкодер (TorchXRayVision)...")
+            self.encoder = xrv.models.DenseNet(weights="densenet121-res224-all")
+            self.encoder.classifier = nn.Identity() # Убираем родной классификатор
+            self.encoder.op_threshs = None
+            d_input = 1024
+            print(f"✅ Медицинский SOTA Энкодер загружен. Выходной вектор: {d_input}D")
+        else:
+            self.encoder = timm.create_model(model_name, pretrained=True, num_classes=0)
+            with torch.no_grad():
+                dummy_input = torch.randn(1, 3, 224, 224)
+                d_input = self.encoder(dummy_input).shape[1]
+            print(f"✅ Общий SOTA Энкодер [{model_name}] загружен. Выходной вектор: {d_input}D")
         
         # ВАЖНО: CNN фичи не нормализованы и имеют большую дисперсию.
         # В FP16 (AMP) это приводит к переполнению (inf) внутри Attention механизмов CIDA.

@@ -12,7 +12,7 @@ def create_notebook():
     add_md("# Эпичный Дебют (Этап 2): Обучение Kairos OS (SOTA Encoder + CIDA) на CheXpert")
     add_md("Этот ноутбук интегрирует 'умные' веса CIDA Foundation в сверхбыстрый SOTA энкодер (EfficientNet-B0) и обучает их распознавать патологии на рентгенах.")
     
-    add_code("""!pip install -q torch torchvision torchaudio transformers diffusers pandas numpy scikit-learn tqdm huggingface_hub timm
+    add_code("""!pip install -q torch torchvision torchaudio transformers diffusers pandas numpy scikit-learn tqdm huggingface_hub timm torchxrayvision
 !rm -rf CIDA-plugin
 !git clone https://github.com/Kairatzh/CIDA-plugin.git
 %cd CIDA-plugin
@@ -134,15 +134,17 @@ train_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.RandomRotation(15), 
     transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2), 
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    # TorchXRayVision ожидает 1 канал (grayscale) со значениями [-1024, 1024]
+    transforms.Lambda(lambda x: x.mean(dim=0, keepdim=True)),
+    transforms.Lambda(lambda x: (x * 2048.0) - 1024.0),
 ])
 
 val_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    transforms.Lambda(lambda x: x.mean(dim=0, keepdim=True)),
+    transforms.Lambda(lambda x: (x * 2048.0) - 1024.0),
 ])
 
 train_ds = CheXpertDataset(csv_path, images_dir, train_transforms)
@@ -180,8 +182,8 @@ print(f"Используем устройство: {device}")
 
 # 2. Создаем модель (5 классов)
 # ОЧЕНЬ ВАЖНО: d_hidden=512, чтобы совпало с весами Foundation!
-# Энкодер разморожен с самого начала. Заморозка ImageNet-энкодера на медицинских снимках не работает (OOD).
-model = SOTAEncoderCIDA(model_name='efficientnet_b0', num_classes=5, d_hidden=512, max_rounds=3, freeze_encoder=False)
+# Энкодер полностью заморожен, но теперь он ИДЕАЛЬНО знает рентгены!
+model = SOTAEncoderCIDA(model_name='xrv_densenet121', num_classes=5, d_hidden=512, max_rounds=3, freeze_encoder=True)
 
 # 3. Загружаем веса
 if os.path.exists("checkpoints/cida_best.pth"):
@@ -220,16 +222,14 @@ pos_weight = torch.tensor([2.0, 1.5, 3.0, 1.2, 1.1]).to(device)
 
 # Удаляем старую функцию weighted_loss, так как мы будем считать лосс напрямую на логитах!
 
-# Разделяем learning rate
-encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n]
+# Энкодер теперь заморожен, оптимизируем ТОЛЬКО CIDA
 cida_params = [p for n, p in model.named_parameters() if 'cida' in n]
 
 optimizer = optim.AdamW([
-    {'params': encoder_params, 'lr': 1e-5}, # Микроскопический LR для CNN, чтобы плавно адаптировать к рентгенам
     {'params': cida_params, 'lr': 1e-3}     # Высокий LR для быстрого обучения CIDA
 ], weight_decay=1e-4)
 
-scheduler = OneCycleLR(optimizer, max_lr=[1e-5, 1e-3], epochs=epochs, 
+scheduler = OneCycleLR(optimizer, max_lr=1e-3, epochs=epochs, 
                        steps_per_epoch=len(train_loader), pct_start=0.1)
 
 swa_model = torch.optim.swa_utils.AveragedModel(model)
