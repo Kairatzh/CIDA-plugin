@@ -169,6 +169,7 @@ class CIDAforARC(nn.Module):
 
     add_md("### 4. Обучение модели")
     add_code("""import torch.optim as optim
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
 
