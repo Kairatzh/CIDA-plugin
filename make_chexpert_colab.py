@@ -216,12 +216,11 @@ scaler = GradScaler()
 pos_weight = torch.tensor([2.0, 1.5, 3.0, 1.2, 1.1]).to(device)
 
 def weighted_loss(probs, targets, pos_weight):
-    # CIDA outputs probabilities [0, 1]. BCEWithLogitsLoss expects logits!
-    # Applying BCEWithLogitsLoss on probs applies a DOUBLE sigmoid, destroying gradients.
-    # We must compute weighted BCE manually on probabilities.
-    probs = probs.clamp(1e-6, 1 - 1e-6)
-    loss = -pos_weight * targets * torch.log(probs) - (1 - targets) * torch.log(1 - probs)
-    return loss.mean()
+    # Ультимативный фикс для FP16 (AMP). 
+    # Ручной torch.log() выдавал NaN из-за округления 1-1e-6 до 1.0 в FP16!
+    # Используем встроенный (и бронебойный) F.binary_cross_entropy с маской весов.
+    weight_mask = targets * pos_weight + (1 - targets)
+    return F.binary_cross_entropy(probs.float(), targets.float(), weight=weight_mask)
 
 # Разделяем learning rate
 encoder_params = [p for n, p in model.named_parameters() if 'encoder' in n]
