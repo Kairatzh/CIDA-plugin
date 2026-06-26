@@ -136,7 +136,7 @@ class ARCGridDecoder(nn.Module):
             nn.ReLU(),
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),   # (16x16)
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((30, 30)),
+            nn.Upsample(size=(30, 30), mode='nearest'),
             nn.Conv2d(32, 10, kernel_size=3, padding=1) # Логиты по 10 классам цветов
         )
         
@@ -176,11 +176,14 @@ from tqdm import tqdm
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = CIDAforARC(d_model=256, max_rounds=3).to(device)
 
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+# Задаем веса классов: фоновый цвет 0 (черный) имеет меньший вес (0.1), 
+# чтобы модель не скатывалась в предсказание сплошного фона.
+class_weights = torch.tensor([0.1, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]).to(device)
+
+optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
 
 epochs = 20
-scheduler = OneCycleLR(optimizer, max_lr=1e-3, epochs=epochs, steps_per_epoch=len(train_loader))
+scheduler = OneCycleLR(optimizer, max_lr=2e-4, epochs=epochs, steps_per_epoch=len(train_loader))
 
 for epoch in range(epochs):
     model.train()
@@ -195,8 +198,8 @@ for epoch in range(epochs):
         optimizer.zero_grad()
         logits, out = model(imgs)
         
-        # Считаем CrossEntropy только по валидным ячейкам (через маску)
-        loss_ce_pixelwise = F.cross_entropy(logits, targets, reduction='none')
+        # Считаем CrossEntropy только по валидным ячейкам (через маску) с весами классов
+        loss_ce_pixelwise = F.cross_entropy(logits, targets, weight=class_weights, reduction='none')
         loss_c = (loss_ce_pixelwise * masks).sum() / (masks.sum() + 1e-8)
         
         loss_disagreement = out.get("disagreement", torch.tensor(0.0)).mean()
