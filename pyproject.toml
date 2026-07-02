@@ -46,7 +46,7 @@ Documentation = "https://github.com/Kairatzh/CIDA-plugin#readme"
 Issues = "https://github.com/Kairatzh/CIDA-plugin/issues"
 
 [tool.setuptools]
-packages = ["cida_plugin"]
+packages = ["cida_plugin", "cida_latent_plugin"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
