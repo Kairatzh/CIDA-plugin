@@ -70,7 +70,7 @@ cells.append(cell("c1", """
     from datasets import load_dataset
     from tqdm.auto import tqdm
 
-    DEVICE = "cuda"
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     MODEL_NAME = "Qwen/Qwen1.5-1.8B-Chat"
     NUM_PLAN = 4  # number of virtual plan tokens to inject
     MAX_SEQ = 256  # max sequence length (prompt+answer)
@@ -79,14 +79,21 @@ cells.append(cell("c1", """
         gc.collect()
         if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-    print(f"Loading {MODEL_NAME} in float16...")
+    print(f"Loading {MODEL_NAME}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True, padding_side="left")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    llm = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME, trust_remote_code=True, torch_dtype=torch.float16,
-        device_map={"": 0}, output_hidden_states=True)
+    if torch.cuda.is_available():
+        print("GPU detected. Loading model in float16 on GPU...")
+        llm = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, trust_remote_code=True, torch_dtype=torch.float16,
+            device_map={"": 0}, output_hidden_states=True)
+    else:
+        print("Warning: GPU not detected. Loading model in float32 on CPU (training will be slow)...")
+        llm = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, trust_remote_code=True, torch_dtype=torch.float32,
+            device_map="cpu", output_hidden_states=True)
 
     # Freeze ALL LLM parameters
     for p in llm.parameters():
@@ -96,7 +103,8 @@ cells.append(cell("c1", """
     LLM_HIDDEN = llm.config.hidden_size
     embed_tokens = llm.get_input_embeddings()
     print(f"LLM loaded. Hidden size: {LLM_HIDDEN}, Params: {sum(p.numel() for p in llm.parameters())/1e6:.0f}M (all frozen)")
-    print(f"VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+    vram_used = torch.cuda.memory_allocated()/1e9 if torch.cuda.is_available() else 0.0
+    print(f"VRAM used: {vram_used:.2f} GB")
 """))
 
 # ── Cell 2: Latent CIDA v2 + PlanProjector ──
@@ -156,7 +164,8 @@ cells.append(cell("c2", """
     print(f"Latent CIDA params: {cida_params/1e6:.2f}M (trainable)")
     print(f"Projector params: {proj_params/1e6:.2f}M (trainable)")
     print(f"Total trainable: {(cida_params+proj_params)/1e6:.2f}M")
-    print(f"Total VRAM: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+    vram_used = torch.cuda.memory_allocated()/1e9 if torch.cuda.is_available() else 0.0
+    print(f"Total VRAM: {vram_used:.2f} GB")
 """))
 
 # ── Cell 3: Load Multi-Task Dataset ──
@@ -243,7 +252,8 @@ cells.append(cell("c4", """
     LOG_EVERY = 50
 
     print(f"Training for {EPOCHS} epoch(s), {len(train_data)} samples, grad_accum={GRAD_ACCUM}")
-    print(f"VRAM before training: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+    vram_before = torch.cuda.memory_allocated()/1e9 if torch.cuda.is_available() else 0.0
+    print(f"VRAM before training: {vram_before:.2f} GB")
 
     cida.train()
     proj.train()
@@ -294,7 +304,7 @@ cells.append(cell("c4", """
             # 6. Concatenate: prompt_emb + plan + answer_emb
             p_emb = full_emb[:, :prompt_len].detach()
             a_emb = full_emb[:, prompt_len:].detach()
-            cat = torch.cat([p_emb, plan, a_emb], dim=1).to(torch.float16)
+            cat = torch.cat([p_emb, plan, a_emb], dim=1).to(llm.dtype)
 
             # 7. Build attention mask and shifted labels
             pm = torch.ones(1, NUM_PLAN, dtype=enc_full["attention_mask"].dtype, device=DEVICE)
@@ -325,7 +335,7 @@ cells.append(cell("c4", """
             if (step_idx + 1) % LOG_EVERY == 0:
                 avg = epoch_loss / (step_idx + 1)
                 lr_now = scheduler.get_last_lr()[0]
-                vram = torch.cuda.memory_allocated()/1e9
+                vram = torch.cuda.memory_allocated()/1e9 if torch.cuda.is_available() else 0.0
                 print(f"  Step {step_idx+1}/{len(train_data)} | Loss: {avg:.4f} | LR: {lr_now:.2e} | VRAM: {vram:.2f}GB")
 
             # Free memory
@@ -417,7 +427,7 @@ cells.append(cell("c6", """
             print(f"      ✅ [CIDA Monitor] Rollback successful. New Disagreement: {co['disagreement'].item():.3f}")
 
         plan = proj(co["state_final"].s)
-        cat = torch.cat([p_emb, plan], dim=1).to(torch.float16)
+        cat = torch.cat([p_emb, plan], dim=1).to(llm.dtype)
         pm = torch.ones(1, NUM_PLAN, dtype=enc["attention_mask"].dtype, device=DEVICE)
         gm = torch.cat([enc["attention_mask"], pm], dim=1)
         
