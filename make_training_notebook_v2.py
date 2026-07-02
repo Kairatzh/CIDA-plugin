@@ -843,7 +843,7 @@ cells.append(cell("c9", """
         ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
             max_new_tokens=max_new, do_sample=False,
             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
-        return tokenizer.decode(ids[0, enc["input_ids"].size(1) + NUM_PLAN:], skip_special_tokens=True)
+        return tokenizer.decode(ids[0], skip_special_tokens=True)
 
     gsm_base_18_correct = 0
     gsm_cida_18_correct = 0
