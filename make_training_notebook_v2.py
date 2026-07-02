@@ -379,6 +379,40 @@ cells.append(cell("c5", """
     plt.tight_layout(); plt.show()
 """))
 
+# ── Cell 5.5: Optional Load from Google Drive ──
+cells.append(md("m5_5", """
+    ### 5.5 (Optional) Load Previously Trained CIDA v2 Weights from Google Drive
+    
+    If you have already trained the model and want to skip the training section,
+    run this cell to download the weights from your Google Drive into the local directory.
+"""))
+
+cells.append(cell("c5_5", """
+    import shutil
+    import os
+    
+    try:
+        from google.colab import drive
+        drive.mount('/content/drive', force_remount=False)
+        drive_weights_path = "/content/drive/MyDrive/Kairos_Cache/cida_v2_weights"
+        
+        if os.path.exists(drive_weights_path) and os.listdir(drive_weights_path):
+            os.makedirs("cida_v2_best", exist_ok=True)
+            for f in os.listdir(drive_weights_path):
+                shutil.copy2(os.path.join(drive_weights_path, f), f"cida_v2_best/{f}")
+            print("Successfully copied CIDA v2 weights from Google Drive to cida_v2_best/")
+            
+            # Load weights into active model in memory
+            cida.load_state_dict(torch.load("cida_v2_best/pytorch_model.bin", map_location=DEVICE))
+            proj.load_state_dict(torch.load("cida_v2_best/plan_projector.pt", map_location=DEVICE))
+            print("Successfully loaded weights into memory!")
+        else:
+            print(f"No weights found at: {drive_weights_path}. Skip this step if you ran the training above.")
+    except Exception as e:
+        print(f"Could not load weights from Google Drive: {e}")
+        print("Using active in-memory weights from training.")
+"""))
+
 # ── Cell 6: Evaluation ──
 cells.append(md("m6", """
     ## 6. Evaluation: Base LLM vs CIDA v2
