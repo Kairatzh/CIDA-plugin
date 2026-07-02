@@ -645,6 +645,7 @@ cells.append(md("m9", """
 cells.append(cell("c9", """
     import re
     from huggingface_hub import hf_hub_download
+    from datasets import load_dataset
     
     print("Loading test datasets for benchmark...")
     gsm_test = load_dataset("openai/gsm8k", "main", split="test")
@@ -661,6 +662,33 @@ cells.append(cell("c9", """
     # ----------------------------------------------------
     print("\\n=== PHASE 1: Evaluating 1.8B Models ===")
     
+    if 'cida' not in globals() or 'proj' not in globals():
+        print("Initializing CIDA and Projector models from config...")
+        from cida_latent_plugin import CIDAPlugin as LatentCIDAPlugin, CIDAPluginConfig as LatentConfig
+        import torch.nn as nn
+        
+        class PlanProjector(nn.Module):
+            def __init__(self, d_cida, d_llm, num_agents, num_plan_tokens=8):
+                super().__init__()
+                self.num_plan_tokens = num_plan_tokens
+                self.d_llm = d_llm
+                d_flat = num_agents * d_cida
+                self.projector = nn.Sequential(
+                    nn.Linear(d_flat, d_flat*2), nn.GELU(), nn.Dropout(0.05),
+                    nn.Linear(d_flat*2, num_plan_tokens*d_llm),
+                    nn.LayerNorm(num_plan_tokens*d_llm))
+            def forward(self, state_s):
+                B = state_s.size(0)
+                return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
+                
+        LLM_HIDDEN = llm.config.hidden_size
+        cida_cfg = LatentConfig(
+            d_input=LLM_HIDDEN, d_hidden=256, d_message=256,
+            num_agents=4, num_classes=2, max_rounds=3, comm_dropout=0.0
+        )
+        cida = LatentCIDAPlugin(cida_cfg).to(DEVICE)
+        proj = PlanProjector(d_cida=256, d_llm=LLM_HIDDEN, num_agents=4, num_plan_tokens=NUM_PLAN).to(DEVICE)
+
     # Load best CIDA v2 weights
     print("Configuring and loading best CIDA v2 checkpoint...")
     cida.config.max_rounds = 4
