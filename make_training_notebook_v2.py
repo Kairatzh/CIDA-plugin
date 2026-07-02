@@ -596,22 +596,38 @@ cells.append(cell("c8", """
         print("Weights are saved locally in cida_v2_best/")
 """))
 
-# ── Cell 9: Comprehensive Multi-Dataset Benchmark ──
+# ── Cell 9: Comprehensive 4-Way Multi-Dataset Benchmark ──
 cells.append(md("m9", """
-    ## 9. Comprehensive Multi-Dataset Test-Set Evaluation (GSM8K & ARC-Challenge)
+    ## 9. Comprehensive 4-Way Multi-Dataset Test-Set Evaluation
     
     This final cell runs a systematic benchmark over test subsets of multiple reasoning datasets
-    (GSM8K for math, ARC-Challenge for scientific reasoning) to report overall accuracy metrics.
+    (GSM8K for math, ARC-Challenge for scientific reasoning) to compare 4 models side-by-side:
+    1. **Base Qwen 1.8B** (System 1)
+    2. **Current CIDA v2 (1.8B)** (System 2, Our newly trained model)
+    3. **Base Qwen 7B** (System 1, Larger model baseline)
+    4. **Kairos 7B (HuggingFace)** (System 2, Pre-trained CIDA v1 model)
 """))
 
 cells.append(cell("c9", """
     import re
+    from huggingface_hub import hf_hub_download
     
     print("Loading test datasets for benchmark...")
     gsm_test = load_dataset("openai/gsm8k", "main", split="test")
     arc_test = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test")
     
-    # 1. Load weights explicitly to verify configure and load
+    def clean_answer(text):
+        return parse_gsm_answer(text)
+
+    # Evaluation config
+    NUM_EVAL = 30
+    
+    # ----------------------------------------------------
+    # PHASE 1: Evaluate 1.8B Models (Already in memory)
+    # ----------------------------------------------------
+    print("\\n=== PHASE 1: Evaluating 1.8B Models ===")
+    
+    # Load best CIDA v2 weights
     print("Configuring and loading best CIDA v2 checkpoint...")
     cida.config.max_rounds = 4
     if os.path.exists("cida_v2_best/pytorch_model.bin"):
@@ -624,69 +640,214 @@ cells.append(cell("c9", """
     cida.eval()
     proj.eval()
 
-    def clean_answer(text):
-        return parse_gsm_answer(text)
-
-    # Evaluation config
-    NUM_EVAL = 30
+    gsm_base_18_correct = 0
+    gsm_cida_18_correct = 0
+    arc_base_18_correct = 0
+    arc_cida_18_correct = 0
     
-    print(f"Evaluating {NUM_EVAL} samples from GSM8K (Math)...")
-    gsm_base_correct = 0
-    gsm_cida_correct = 0
-    
+    print(f"Evaluating {NUM_EVAL} samples on GSM8K (Math)...")
     for i in range(NUM_EVAL):
         ex = gsm_test[i]
         prompt = format_gsm(ex)["prompt"]
         gold_ans = clean_answer(ex["answer"])
         
+        # Base 1.8B
         base_ans, _, _ = gen_base(prompt, max_new=150)
         base_val = clean_answer(base_ans)
         if base_val is not None and gold_ans is not None and abs(base_val - gold_ans) < 0.01:
-            gsm_base_correct += 1
+            gsm_base_18_correct += 1
             
+        # CIDA v2 1.8B
         cida_ans, _, _, _ = gen_cida_with_rollback(prompt, max_new=150)
         cida_val = clean_answer(cida_ans)
         if cida_val is not None and gold_ans is not None and abs(cida_val - gold_ans) < 0.01:
-            gsm_cida_correct += 1
+            gsm_cida_18_correct += 1
             
-    print(f"Evaluating {NUM_EVAL} samples from ARC-Challenge (Science)...")
-    arc_base_correct = 0
-    arc_cida_correct = 0
-    
+    print(f"Evaluating {NUM_EVAL} samples on ARC-Challenge (Science)...")
     for i in range(NUM_EVAL):
         ex = arc_test[i]
         formatted = format_arc(ex)
         prompt = formatted["prompt"]
         gold_label = ex["answerKey"].strip().lower()
         
+        # Base 1.8B
         base_ans, _, _ = gen_base(prompt, max_new=150)
-        # Check if the gold answer choice letter appears early in output
         base_pred = base_ans.strip().lower()
         if gold_label in base_pred[:30]:
-            arc_base_correct += 1
+            arc_base_18_correct += 1
             
+        # CIDA v2 1.8B
         cida_ans, _, _, _ = gen_cida_with_rollback(prompt, max_new=150)
         cida_pred = cida_ans.strip().lower()
         if gold_label in cida_pred[:30]:
-            arc_cida_correct += 1
+            arc_cida_18_correct += 1
 
-    gsm_base_acc = (gsm_base_correct / NUM_EVAL) * 100
-    gsm_cida_acc = (gsm_cida_correct / NUM_EVAL) * 100
-    arc_base_acc = (arc_base_correct / NUM_EVAL) * 100
-    arc_cida_acc = (arc_cida_correct / NUM_EVAL) * 100
+    # ----------------------------------------------------
+    # Free 1.8B models from GPU memory before loading 7B
+    # ----------------------------------------------------
+    print("\\nFreeing 1.8B model weights to save VRAM...")
+    del llm, cida, proj
+    flush()
+
+    # ----------------------------------------------------
+    # PHASE 2: Evaluate 7B Models (Load in 4-bit)
+    # ----------------------------------------------------
+    print("\\n=== PHASE 2: Evaluating 7B Models ===")
+    MODEL_7B = "Qwen/Qwen1.5-7B-Chat"
     
-    avg_base = (gsm_base_acc + arc_base_acc) / 2
-    avg_cida = (gsm_cida_acc + arc_cida_acc) / 2
+    tokenizer_7b = AutoTokenizer.from_pretrained(MODEL_7B, trust_remote_code=True, padding_side="left")
+    if tokenizer_7b.pad_token is None:
+        tokenizer_7b.pad_token = tokenizer_7b.eos_token
+        
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True
+    )
+    
+    print(f"Loading {MODEL_7B} in 4-bit precision...")
+    llm_7b = AutoModelForCausalLM.from_pretrained(
+        MODEL_7B, trust_remote_code=True, torch_dtype=torch.float16,
+        device_map={"": 0}, quantization_config=bnb_config, output_hidden_states=True)
+    llm_7b.eval()
+    embed_tokens_7b = llm_7b.get_input_embeddings()
+    
+    # Setup 7B Helper functions
+    @torch.no_grad()
+    def gen_base_7b(prompt, max_new=128):
+        flush()
+        enc = tokenizer_7b(prompt, return_tensors="pt").to(DEVICE)
+        ids = llm_7b.generate(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
+            max_new_tokens=max_new, do_sample=False,
+            pad_token_id=tokenizer_7b.pad_token_id, eos_token_id=tokenizer_7b.eos_token_id)
+        gen_ids = ids[0, enc["input_ids"].size(1):]
+        return tokenizer_7b.decode(gen_ids, skip_special_tokens=True)
 
-    # Print final summary table
-    print("\\n" + "="*80)
-    print(f"{'Dataset / Metric':<30} | {'Base LLM Accuracy':<22} | {'CIDA v2 Accuracy':<22}")
-    print("="*80)
-    print(f"{'GSM8K (Mathematics)':<30} | {gsm_base_acc:<20.2f}% | {gsm_cida_acc:<20.2f}%")
-    print(f"{'ARC-Challenge (Science)':<30} | {arc_base_acc:<20.2f}% | {arc_cida_acc:<20.2f}%")
-    print("-"*80)
-    print(f"{'AVERAGE REASONING SCORE':<30} | {avg_base:<20.2f}% | {avg_cida:<20.2f}%")
-    print("="*80)
+    # Load HuggingFace Kairos 7B weights
+    print("Downloading and configuring Kairos 7B CIDA weights from HuggingFace...")
+    from cida_plugin import CIDAPlugin, CIDAPluginConfig
+    config_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="config.json")
+    cida_cfg_7b = CIDAPluginConfig.from_pretrained(os.path.dirname(config_path))
+    cida_7b = CIDAPlugin(cida_cfg_7b).to(DEVICE).eval()
+    
+    cida_bin_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="pytorch_model.bin")
+    cida_7b.load_state_dict(torch.load(cida_bin_path, map_location=DEVICE))
+    
+    class CIDAPlanProjector7B(nn.Module):
+        def __init__(self, d_cida, d_llm, num_agents, num_plan_tokens=8):
+            super().__init__()
+            self.num_plan_tokens = num_plan_tokens
+            self.d_llm = d_llm
+            d_flat = num_agents * d_cida
+            self.projector = nn.Sequential(
+                nn.Linear(d_flat, d_flat*2), nn.GELU(), nn.Dropout(0.05),
+                nn.Linear(d_flat*2, num_plan_tokens*d_llm),
+                nn.LayerNorm(num_plan_tokens*d_llm))
+        def forward(self, state_s):
+            B = state_s.size(0)
+            return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
+            
+    proj_7b = CIDAPlanProjector7B(d_cida=cida_cfg_7b.d_hidden, d_llm=llm_7b.config.hidden_size, num_agents=cida_cfg_7b.num_agents, num_plan_tokens=8).to(DEVICE)
+    proj_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="plan_projector.pt")
+    proj_7b.load_state_dict(torch.load(proj_path, map_location=DEVICE))
+    proj_7b.eval()
+
+    @torch.no_grad()
+    def gen_kairos_7b(prompt, max_new=150):
+        flush()
+        enc = tokenizer_7b(prompt, return_tensors="pt").to(DEVICE)
+        out = llm_7b(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], output_hidden_states=True)
+        h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
+        p_emb = embed_tokens_7b(enc["input_ids"]).detach().float()
+        del out; flush()
+        
+        cida_7b.config.max_rounds = 4
+        co = cida_7b(pooled=h_base)
+        plan = proj_7b(co["state_final"].s)
+        cat = torch.cat([p_emb, plan], dim=1).to(llm_7b.dtype)
+        pm = torch.ones(1, 8, dtype=enc["attention_mask"].dtype, device=DEVICE)
+        gm = torch.cat([enc["attention_mask"], pm], dim=1)
+        
+        ids = llm_7b.generate(inputs_embeds=cat, attention_mask=gm,
+            max_new_tokens=max_new, do_sample=False,
+            pad_token_id=tokenizer_7b.pad_token_id, eos_token_id=tokenizer_7b.eos_token_id)
+        return tokenizer_7b.decode(ids[0], skip_special_tokens=True)
+
+    gsm_base_7_correct = 0
+    gsm_kairos_7_correct = 0
+    arc_base_7_correct = 0
+    arc_kairos_7_correct = 0
+    
+    print(f"Evaluating {NUM_EVAL} samples on GSM8K (Math)...")
+    for i in range(NUM_EVAL):
+        ex = gsm_test[i]
+        prompt = format_gsm(ex)["prompt"]
+        gold_ans = clean_answer(ex["answer"])
+        
+        # Base 7B
+        base_ans = gen_base_7b(prompt, max_new=150)
+        base_val = clean_answer(base_ans)
+        if base_val is not None and gold_ans is not None and abs(base_val - gold_ans) < 0.01:
+            gsm_base_7_correct += 1
+            
+        # Kairos CIDA 7B
+        cida_ans = gen_kairos_7b(prompt, max_new=150)
+        cida_val = clean_answer(cida_ans)
+        if cida_val is not None and gold_ans is not None and abs(cida_val - gold_ans) < 0.01:
+            gsm_kairos_7_correct += 1
+            
+    print(f"Evaluating {NUM_EVAL} samples on ARC-Challenge (Science)...")
+    for i in range(NUM_EVAL):
+        ex = arc_test[i]
+        formatted = format_arc(ex)
+        prompt = formatted["prompt"]
+        gold_label = ex["answerKey"].strip().lower()
+        
+        # Base 7B
+        base_ans = gen_base_7b(prompt, max_new=150)
+        base_pred = base_ans.strip().lower()
+        if gold_label in base_pred[:30]:
+            arc_base_7_correct += 1
+            
+        # Kairos CIDA 7B
+        cida_ans = gen_kairos_7b(prompt, max_new=150)
+        cida_pred = cida_ans.strip().lower()
+        if gold_label in cida_pred[:30]:
+            arc_kairos_7_correct += 1
+
+    # Cleanup 7B models
+    del llm_7b, cida_7b, proj_7b
+    flush()
+
+    # Calculate Accuracies
+    acc_base_18_gsm = (gsm_base_18_correct / NUM_EVAL) * 100
+    acc_cida_18_gsm = (gsm_cida_18_correct / NUM_EVAL) * 100
+    acc_base_7_gsm = (gsm_base_7_correct / NUM_EVAL) * 100
+    acc_kairos_7_gsm = (gsm_kairos_7_correct / NUM_EVAL) * 100
+    
+    acc_base_18_arc = (arc_base_18_correct / NUM_EVAL) * 100
+    acc_cida_18_arc = (arc_cida_18_correct / NUM_EVAL) * 100
+    acc_base_7_arc = (arc_base_7_correct / NUM_EVAL) * 100
+    acc_kairos_7_arc = (arc_kairos_7_correct / NUM_EVAL) * 100
+    
+    avg_base_18 = (acc_base_18_gsm + acc_base_18_arc) / 2
+    avg_cida_18 = (acc_cida_18_gsm + acc_cida_18_arc) / 2
+    avg_base_7 = (acc_base_7_gsm + acc_base_7_arc) / 2
+    avg_kairos_7 = (acc_kairos_7_gsm + acc_kairos_7_arc) / 2
+
+    # ----------------------------------------------------
+    # Print final summary scoreboard
+    # ----------------------------------------------------
+    print("\\n" + "="*90)
+    print(f"{'Model Configuration':<35} | {'GSM8K Accuracy':<16} | {'ARC-Ch. Accuracy':<16} | {'Average Accuracy':<16}")
+    print("="*90)
+    print(f"{'1. Base Qwen 1.8B (System 1)':<35} | {acc_base_18_gsm:<14.2f}% | {acc_base_18_arc:<14.2f}% | {avg_base_18:<14.2f}%")
+    print(f"{'2. CIDA v2 (1.8B) [Our Newly Trained]':<35} | {acc_cida_18_gsm:<14.2f}% | {acc_cida_18_arc:<14.2f}% | {avg_cida_18:<14.2f}%")
+    print("-"*90)
+    print(f"{'3. Base Qwen 7B (System 1)':<35} | {acc_base_7_gsm:<14.2f}% | {acc_base_7_arc:<14.2f}% | {avg_base_7:<14.2f}%")
+    print(f"{'4. Kairos 7B (HuggingFace) [CIDA v1]':<35} | {acc_kairos_7_gsm:<14.2f}% | {acc_kairos_7_arc:<14.2f}% | {avg_kairos_7:<14.2f}%")
+    print("="*90)
 """))
 
 # ── Assemble notebook ──
