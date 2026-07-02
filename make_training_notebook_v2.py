@@ -728,6 +728,26 @@ cells.append(cell("c9", """
         print("Initializing CIDA and Projector models from config...")
         from cida_latent_plugin import CIDAPlugin as LatentCIDAPlugin, CIDAPluginConfig as LatentConfig
         
+        # Load config dynamically if possible
+        cida_cfg = None
+        for path in ["cida_v2_best", "drive/MyDrive/Kairos_Cache/cida_v2_weights", "/content/drive/MyDrive/Kairos_Cache/cida_v2_weights"]:
+            cfg_file = os.path.join(path, "config.json")
+            if os.path.exists(cfg_file):
+                try:
+                    cida_cfg = LatentConfig.from_pretrained(path)
+                    print(f"Loaded config from {path}/")
+                    break
+                except:
+                    pass
+                    
+        if cida_cfg is None:
+            # Fallback (CIDA v2 has 512 hidden size in checkpoint, fallback to 512)
+            LLM_HIDDEN = llm.config.hidden_size
+            cida_cfg = LatentConfig(
+                d_input=LLM_HIDDEN, d_hidden=512, d_message=512,
+                num_agents=4, num_classes=2, max_rounds=3, comm_dropout=0.0
+            )
+            
         class PlanProjector(nn.Module):
             def __init__(self, d_cida, d_llm, num_agents, num_plan_tokens=8):
                 super().__init__()
@@ -742,27 +762,54 @@ cells.append(cell("c9", """
                 B = state_s.size(0)
                 return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
                 
-        LLM_HIDDEN = llm.config.hidden_size
-        cida_cfg = LatentConfig(
-            d_input=LLM_HIDDEN, d_hidden=256, d_message=256,
-            num_agents=4, num_classes=2, max_rounds=3, comm_dropout=0.0
-        )
         cida = LatentCIDAPlugin(cida_cfg).to(DEVICE)
-        proj = PlanProjector(d_cida=256, d_llm=LLM_HIDDEN, num_agents=4, num_plan_tokens=NUM_PLAN).to(DEVICE)
+        proj = PlanProjector(d_cida=cida_cfg.d_hidden, d_llm=llm.config.hidden_size, num_agents=cida_cfg.num_agents, num_plan_tokens=NUM_PLAN).to(DEVICE)
 
     # Load best CIDA v2 weights
     print("Configuring and loading best CIDA v2 checkpoint...")
     cida.config.max_rounds = 4
-    if os.path.exists("cida_v2_best/pytorch_model.bin"):
-        cida.load_state_dict(torch.load("cida_v2_best/pytorch_model.bin", map_location=DEVICE))
-        proj.load_state_dict(torch.load("cida_v2_best/plan_projector.pt", map_location=DEVICE))
-        print("Successfully loaded weights from cida_v2_best/")
-    elif os.path.exists("drive/MyDrive/Kairos_Cache/cida_v2_weights/pytorch_model.bin"):
-        # check drive too just in case
-        cida.load_state_dict(torch.load("drive/MyDrive/Kairos_Cache/cida_v2_weights/pytorch_model.bin", map_location=DEVICE))
-        proj.load_state_dict(torch.load("drive/MyDrive/Kairos_Cache/cida_v2_weights/plan_projector.pt", map_location=DEVICE))
-        print("Successfully loaded weights from Google Drive/")
-    else:
+    
+    loaded = False
+    for path in ["cida_v2_best", "drive/MyDrive/Kairos_Cache/cida_v2_weights", "/content/drive/MyDrive/Kairos_Cache/cida_v2_weights"]:
+        model_file = os.path.join(path, "pytorch_model.bin")
+        proj_file = os.path.join(path, "plan_projector.pt")
+        if os.path.exists(model_file) and os.path.exists(proj_file):
+            try:
+                checkpoint = torch.load(model_file, map_location=DEVICE)
+                # Extrapolate d_hidden from checkpoint shape
+                chk_hidden = checkpoint["input_proj.0.weight"].shape[0]
+                if cida.config.d_hidden != chk_hidden:
+                    print(f"Re-initializing CIDA to match checkpoint shape: d_hidden={chk_hidden}")
+                    from cida_latent_plugin import CIDAPlugin as LatentCIDAPlugin, CIDAPluginConfig as LatentConfig
+                    cida.config.d_hidden = chk_hidden
+                    cida.config.d_message = chk_hidden
+                    cida = LatentCIDAPlugin(cida.config).to(DEVICE)
+                    
+                    class PlanProjector(nn.Module):
+                        def __init__(self, d_cida, d_llm, num_agents, num_plan_tokens=8):
+                            super().__init__()
+                            self.num_plan_tokens = num_plan_tokens
+                            self.d_llm = d_llm
+                            d_flat = num_agents * d_cida
+                            self.projector = nn.Sequential(
+                                nn.Linear(d_flat, d_flat*2), nn.GELU(), nn.Dropout(0.05),
+                                nn.Linear(d_flat*2, num_plan_tokens*d_llm),
+                                nn.LayerNorm(num_plan_tokens*d_llm))
+                        def forward(self, state_s):
+                            B = state_s.size(0)
+                            return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
+                            
+                    proj = PlanProjector(d_cida=chk_hidden, d_llm=llm.config.hidden_size, num_agents=cida.config.num_agents, num_plan_tokens=NUM_PLAN).to(DEVICE)
+                    
+                cida.load_state_dict(checkpoint)
+                proj.load_state_dict(torch.load(proj_file, map_location=DEVICE))
+                print(f"Successfully loaded weights from {path}/")
+                loaded = True
+                break
+            except Exception as e:
+                print(f"Attempted loading from {path} but failed: {e}")
+                
+    if not loaded:
         print("Running with active in-memory weights (checkpoint files not found).")
         
     cida.eval()
