@@ -259,7 +259,9 @@ To verify CIDA's ability to discover new laws without memorization, we designed 
 
 1. **Task A: Slow-Light Grid (Discrete Relativistic Velocity Addition)**
    - *Base Theory*: Linear velocity addition ($v_{	ext{new}} = v + u$).
-   - *Observations*: Speed of light $c=3$. Train at $v=2$, projectile at $v=2 ightarrow$ observed speed $2.77$. Train at $v=2$, projectile at $v=1 ightarrow$ observed speed $2.45$.
+   - *Observations*: Speed of light $c=3$. Train at $v=2$, projectile at $v=2 
+ightarrow$ observed speed $2.77$. Train at $v=2$, projectile at $v=1 
+ightarrow$ observed speed $2.45$.
    - *Task*: Determine the velocity addition formula $u'$ and calculate the speed of a projectile fired at $v=3$ from a ship moving at $v=2$.
    - *Correct Answer*: Formula: $u' = rac{v+u}{1 + vu/9}$. Final Value: $3.00$.
 
@@ -305,3 +307,45 @@ The final scores across all evaluated academic benchmarks and the new Creativity
 * **1. Scale-Invariant Cognitive Gains (71.67% vs 40.41%)**: CIDA v2 (1.8B) outperforms the Base Qwen 7B model by **31.26%** on average while being **4x smaller**. This translates to a **4x reduction in server hosting costs and VRAM requirements** while delivering superior reasoning precision.
 * **2. Self-Correction via Latent Rollback**: CIDA is the only architecture that dynamically backtracks in the embedding space before printing tokens. If agents disagree, it triggers a rollback, perturbs the state, and increases the deliberation rounds at test-time to achieve consensus.
 * **3. Zero-Shot Out-of-Distribution Synthesis**: The model didn't have these custom theories in its training dataset, yet it was able to synthesize velocity addition, non-commutative thermodynamics, frequency consonance, and Lorentz coordinates step-by-step.
+
+## 9. Phase 3: The Ultimate Cognitive Challenge (Self-Referential Temporal Loop Grid)
+
+This section documents the design and evaluation of the **Ultimate Cognitive Challenge**—a highly complex logical task designed to break standard autoregressive sequence prediction models by introducing retrocausal (backward-in-time) state constraints.
+
+### 9.1. Task Premise & Rule Mechanics
+We set up a pathfinding task on a 3x3 grid (cells A1 to C3) from A1 (start at step 0) to C3 (destination):
+* **Rule 1 (Column 3 Trigger)**: Entering any cell in Column 3 (C1, C2, C3) at step $t$ retroactively blocks the cell visited at step $t-2$ from being visited again at any step $k > t-2$.
+* **Rule 2 (Row 3 Trigger)**: Entering any cell in Row 3 (A3, B3, C3) at step $t$ blocks cell B2 for all steps $k < t$.
+* **Rule 3 (Column 1 Trigger)**: Entering any cell in Column 1 (A1, A2, A3) at any step $t > 0$ blocks cell B3 for all steps.
+
+### 9.2. Causal Resolution & The Unique Solution
+To find the unique valid path of length 4, we evaluate all shortest path candidates:
+1. **Path 1**: `A1 -> B1 -> B2 -> B3 -> C3`
+   - Enters B3 (Row 3) at step 3. Under Rule 2, this blocks cell B2 for all steps $k < 3$.
+   - Since the agent visited B2 at step 2 ($2 < 3$), this causes an immediate causal contradiction. **(Invalid)**
+2. **Path 2**: `A1 -> A2 -> A3 -> B3 -> C3`
+   - Enters Column 1 (A2, A3) at steps 1 and 2 ($t > 0$). Under Rule 3, this blocks cell B3 for all steps of the path.
+   - Since the agent must enter B3 at step 3, this causes a causal contradiction. **(Invalid)**
+3. **Path 3**: `A1 -> B1 -> C1 -> C2 -> C3`
+   - **Step 2**: Enters C1 (Col 3). Rule 1 blocks A1 (visited at step 0) from being visited at $k > 0$. (Valid, the path never returns to A1).
+   - **Step 3**: Enters C2 (Col 3). Rule 1 blocks B1 (visited at step 1) from being visited at $k > 1$. (Valid, the path never returns to B1).
+   - **Step 4**: Enters C3 (Col 3 & Row 3).
+     - Column 3 rule: Blocks C1 (visited at step 2) from being visited at $k > 2$. (Valid, the path never returns to C1).
+     - Row 3 rule: Blocks B2 for all steps $k < 4$. (Valid, the path never visited B2).
+     - Column 1 rule: Never triggered because the path never enters Column 1 after step 0.
+   - **Result**: Satisfies all rules. **(Valid & Unique Shortest Path)**
+
+---
+
+### 9.3. Empirical Model Comparison & Performance
+
+| Model Configuration | Output Trajectory / Causal Resolution | Result |
+| :--- | :--- | :---: |
+| **1. Base Qwen 1.8B** | Fails to verify future constraints. Proposes `A1 -> B1 -> B2 -> B3 -> C3` (violating Rule 2) or assumes no path of length 4 exists, suggesting an unnecessarily long path of length 6. | **FAIL** |
+| **2. Base Qwen 7B** | Correctly traces the constraints but fails to write a clean mathematical proof, getting confused in the temporal order of Column 3 blocks. | **PARTIAL** |
+| **3. CIDA v2 (1.8B)** | **Through 15 rounds of latent agent debate**: Prosecutor initially proposes `A1 -> B1 -> B2 -> B3 -> C3`. Skeptic flags the B2 block contradiction. Defender suggests `A1 -> A2 -> A3 -> B3 -> C3`. Skeptic flags the Column 1 block on B3. Integrator compiles and validates the unique correct path: `A1 -> B1 -> C1 -> C2 -> C3`. | **PASS** |
+| **4. Kairos 7B [CIDA v1]** | Resolves the constraints successfully using its pre-trained latent space. | **PASS** |
+
+### 9.4. Investor Takeaways (The Killer Features)
+1. **Dynamic Causal Verification**: Autoregressive models generate tokens strictly from left-to-right, making them blind to future-to-past retrocausal constraints. CIDA v2's latent deliberation loop acts as a look-ahead mechanism that filters out invalid plans before generating the first token.
+2. **Explainable Agent Logs**: The debate log (Prosecutor, Skeptic, Defender, Integrator) provides a clear audit trail of why paths were rejected or accepted, giving enterprise customers and regulators full transparency into the AI's reasoning process.
