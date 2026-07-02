@@ -390,18 +390,25 @@ cells.append(cell("c6", """
     cida.eval()
     proj.eval()
 
+    from IPython.display import display, HTML
+    import matplotlib.pyplot as plt
+
     @torch.no_grad()
     def gen_base(prompt, max_new=128):
         flush()
+        t0 = time.perf_counter()
         enc = tokenizer(prompt, return_tensors="pt", max_length=MAX_SEQ//2, truncation=True).to(DEVICE)
         ids = llm.generate(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
             max_new_tokens=max_new, do_sample=False,
             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
-        return tokenizer.decode(ids[0, enc["input_ids"].size(1):], skip_special_tokens=True)
+        dt = time.perf_counter() - t0
+        gen_ids = ids[0, enc["input_ids"].size(1):]
+        return tokenizer.decode(gen_ids, skip_special_tokens=True), len(gen_ids), dt
 
     @torch.no_grad()
     def gen_cida_with_rollback(prompt, max_new=150, max_attempts=2):
         flush()
+        t0 = time.perf_counter()
         enc = tokenizer(prompt, return_tensors="pt", max_length=MAX_SEQ//2, truncation=True).to(DEVICE)
         out = llm(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
                   output_hidden_states=True, use_cache=False)
@@ -434,40 +441,147 @@ cells.append(cell("c6", """
         ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
             max_new_tokens=max_new, do_sample=False,
             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
-        return tokenizer.decode(ids[0], skip_special_tokens=True)
+        dt = time.perf_counter() - t0
+        text = tokenizer.decode(ids[0], skip_special_tokens=True)
+        return text, len(ids[0]), dt, co
 
     def chat(q, sys_msg="You are a helpful assistant. Think step by step."):
         return f"<|im_start|>system\\n{sys_msg}\\n<|im_end|>\\n<|im_start|>user\\n{q}\\n<|im_end|>\\n<|im_start|>assistant\\n"
 
-    # Test on math and logic traps
+    def render_duel(q, base_ans, base_toks, base_time, cida_ans, cida_toks, cida_time, disagreement):
+        html = f'''
+        <div style="font-family:sans-serif;margin:16px 0;background:#0f172a;padding:16px;border-radius:12px">
+          <div style="color:#f8fafc;font-weight:bold;margin-bottom:8px">Prompt: {q}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div style="background:#1e293b;border:1px solid #ef4444;border-radius:8px;padding:12px">
+              <div style="color:#ef4444;font-weight:bold;font-size:14px">Base Qwen (System 1)</div>
+              <div style="color:#94a3b8;font-size:11px">Time: {base_time:.2f}s | Tokens: {base_toks}</div>
+              <div style="color:#e2e8f0;font-family:monospace;white-space:pre-wrap;margin-top:8px;font-size:13px">{base_ans}</div>
+            </div>
+            <div style="background:#1e293b;border:1px solid #22d3ee;border-radius:8px;padding:12px">
+              <div style="color:#22d3ee;font-weight:bold;font-size:14px">CIDA v2 (System 2)</div>
+              <div style="color:#94a3b8;font-size:11px">Time: {cida_time:.2f}s | Tokens: {cida_toks} | Disagreement: {disagreement:.4f}</div>
+              <div style="color:#e2e8f0;font-family:monospace;white-space:pre-wrap;margin-top:8px;font-size:13px">{cida_ans}</div>
+            </div>
+          </div>
+        </div>'''
+        display(HTML(html))
+
+    def plot_belief_trajectory(cida_out):
+        if cida_out and "b_all" in cida_out and len(cida_out["b_all"]) > 0:
+            b_all = cida_out["b_all"]
+            num_rounds = len(b_all)
+            num_agents = b_all[0].size(1)
+            agents = ['Prosecutor', 'Skeptic', 'Synthesizer', 'Coordinator']
+            colors = ['#dc3545', '#ffc107', '#28a745', '#17a2b8']
+            plt.figure(figsize=(7, 3.5))
+            plt.style.use('dark_background')
+            for a in range(num_agents):
+                beliefs = []
+                for r in range(num_rounds):
+                    val = torch.sigmoid(b_all[r][0, a, -1]).item()
+                    beliefs.append(val)
+                plt.plot(range(1, num_rounds + 1), beliefs, marker='o', 
+                         label=agents[a], color=colors[a], linewidth=2, markersize=6)
+            plt.title("Agent Belief Trajectory & Attraction (System 2)", color='#f8fafc', fontsize=11)
+            plt.xlabel("Deliberation Round", color='#94a3b8'); plt.ylabel("Belief State", color='#94a3b8')
+            plt.xticks(range(1, num_rounds + 1))
+            plt.grid(True, color='white', alpha=0.1)
+            plt.legend(facecolor='#1e293b', edgecolor='gray')
+            plt.tight_layout(); plt.show()
+
     test_prompts = [
         ("Math", "Natalia sold clips to 48 of her friends in April, then half as many in May. How many total?"),
         ("Logic Trap", "A is older than B, B is older than C, C is older than D. Is D older than A?"),
         ("Science", "If you drop a feather and a hammer on the Moon (no atmosphere), which hits the ground first?"),
     ]
 
-    print("=" * 80)
-    print(f"{'Type':<10} | {'Question':<60}")
-    print("=" * 80)
+    print("=== Running Duels ===")
     for task_type, q in test_prompts:
         prompt = chat(q)
-        print(f"\\n{'─'*80}")
-        print(f"[{task_type}] {q}")
+        base_ans, base_toks, base_time = gen_base(prompt, max_new=150)
+        cida_ans, cida_toks, cida_time, co = gen_cida_with_rollback(prompt, max_new=150)
         
-        base_ans = gen_base(prompt, max_new=150)
-        print(f"\\n  BASE (System 1):  {base_ans[:200]}")
-        
-        cida_ans = gen_cida_with_rollback(prompt, max_new=150)
-        print(f"  CIDA (System 2):  {cida_ans[:200]}")
-    print("\\n" + "=" * 80)
+        disagreement = co["disagreement"].item()
+        render_duel(q, base_ans, base_toks, base_time, cida_ans, cida_toks, cida_time, disagreement)
+        plot_belief_trajectory(co)
 """))
 
-# ── Cell 7: Save to Drive ──
+# ── Cell 7: Fast Perplexity Benchmark ──
 cells.append(md("m7", """
-    ## 7. Save Trained Weights to Google Drive
+    ## 7. Fast Perplexity & Loss Evaluation Benchmark
+    
+    This benchmark measures the cross-entropy loss and Perplexity (PPL) on target math solutions,
+    verifying if CIDA v2 improves language modeling of correct reasoning chains.
 """))
 
 cells.append(cell("c7", """
+    eval_benchmark_data = [
+        {
+            "prompt": "Natalia sold clips to 48 of her friends in April, then half as many in May. How many total?",
+            "solution": "Natalia sold 48 / 2 = 24 clips in May. Natalia sold 48 + 24 = 72 clips altogether."
+        },
+        {
+            "prompt": "Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?",
+            "solution": "Weng earns $12 / 60 = $0.20 per minute. Yesterday she earned 50 * $0.20 = $10."
+        }
+    ]
+
+    def eval_ppl(prompt, target_text, use_cida=False):
+        prompt_chat = chat(prompt)
+        full_str = prompt_chat + target_text + tokenizer.eos_token
+        
+        enc_prompt = tokenizer(prompt_chat, return_tensors="pt").to(DEVICE)
+        enc_full = tokenizer(full_str, return_tensors="pt").to(DEVICE)
+        
+        prompt_len = enc_prompt["input_ids"].shape[1]
+        target_ids = enc_full["input_ids"].clone()
+        target_ids[:, :prompt_len] = -100  # mask prompt
+        
+        with torch.no_grad():
+            if not use_cida:
+                outputs = llm(input_ids=enc_full["input_ids"], attention_mask=enc_full["attention_mask"], labels=target_ids)
+                loss = outputs.loss.item()
+            else:
+                out_prompt = llm(input_ids=enc_prompt["input_ids"], attention_mask=enc_prompt["attention_mask"], output_hidden_states=True)
+                pooled = out_prompt.hidden_states[-1][0, -1].unsqueeze(0).float()
+                
+                cida.config.max_rounds = 4
+                co = cida(pooled=pooled)
+                plan = proj(co["state_final"].s)
+                
+                full_embeddings = embed_tokens(enc_full["input_ids"]).float()
+                p_emb = full_embeddings[:, :prompt_len]
+                sol_emb = full_embeddings[:, prompt_len:]
+                
+                cat = torch.cat([p_emb, plan, sol_emb], dim=1).to(llm.dtype)
+                pm = torch.ones(1, NUM_PLAN, dtype=enc_full["attention_mask"].dtype, device=DEVICE)
+                attn_mask = torch.cat([enc_full["attention_mask"][:, :prompt_len], pm, enc_full["attention_mask"][:, prompt_len:]], dim=1)
+                
+                shifted_labels = torch.cat([
+                    torch.full((1, prompt_len + NUM_PLAN), -100, dtype=target_ids.dtype, device=DEVICE),
+                    target_ids[:, prompt_len:]
+                ], dim=1)
+                
+                outputs = llm(inputs_embeds=cat, attention_mask=attn_mask, labels=shifted_labels)
+                loss = outputs.loss.item()
+        return loss, math.exp(loss)
+
+    print("=== Perplexity Benchmark ===")
+    for idx, prob in enumerate(eval_benchmark_data):
+        loss_b, ppl_b = eval_ppl(prob["prompt"], prob["solution"], use_cida=False)
+        loss_c, ppl_c = eval_ppl(prob["prompt"], prob["solution"], use_cida=True)
+        print(f"\\nProblem {idx+1}: {prob['prompt'][:50]}...")
+        print(f"  Base model -> Loss: {loss_b:.4f} | Perplexity (PPL): {ppl_b:.2f}")
+        print(f"  CIDA v2    -> Loss: {loss_c:.4f} | Perplexity (PPL): {ppl_c:.2f} ({((ppl_b - ppl_c)/ppl_b)*100:.1f}% improvement!)")
+"""))
+
+# ── Cell 8: Save to Drive ──
+cells.append(md("m8", """
+    ## 8. Save Trained Weights to Google Drive
+"""))
+
+cells.append(cell("c8", """
     import shutil
     try:
         from google.colab import drive
