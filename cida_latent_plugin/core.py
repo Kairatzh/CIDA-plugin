@@ -10,6 +10,7 @@ Architecture:
 """
 import os
 import warnings
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -449,3 +450,75 @@ class CIDAPlugin(nn.Module):
             "ponder_cost": ponder_cost,
             "ttt_info": ttt_info,
         }
+
+
+class PlanProjector(nn.Module):
+    """
+    PlanProjector maps the CIDA latent consensus states to virtual plan tokens for LLM prepending.
+    """
+    def __init__(self, num_plan_tokens: int = 4, hidden_size: Optional[int] = None, hidden_dim: Optional[int] = None):
+        super().__init__()
+        self.hidden_size = hidden_size if hidden_size is not None else (hidden_dim if hidden_dim is not None else 4096)
+        self.num_plan_tokens = num_plan_tokens
+        
+        # Default initialization (matches CIDA v2 weights card)
+        self.projector = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size * 2),
+            nn.GELU(),
+            nn.Dropout(0.05),
+            nn.Linear(self.hidden_size * 2, num_plan_tokens * self.hidden_size),
+            nn.LayerNorm(num_plan_tokens * self.hidden_size)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B = x.size(0)
+        if x.dim() > 2:
+            x = x.reshape(B, -1)
+        
+        in_features = self.projector[0].in_features
+        if x.size(1) != in_features:
+            if x.size(1) < in_features:
+                padding = torch.zeros(B, in_features - x.size(1), device=x.device, dtype=x.dtype)
+                x = torch.cat([x, padding], dim=1)
+            else:
+                x = x[:, :in_features]
+                
+        out = self.projector(x.float())
+        return out.view(B, self.num_plan_tokens, self.hidden_size)
+
+    def load_state_dict(self, state_dict: dict, strict: bool = True):
+        # Dynamically rebuild the sequential layers based on state_dict shapes
+        keys = list(state_dict.keys())
+        layers = {}
+        for k in keys:
+            if not k.startswith("projector."):
+                continue
+            parts = k.split(".")
+            idx = int(parts[1])
+            param_type = parts[2]  # weight or bias
+            if idx not in layers:
+                layers[idx] = {}
+            layers[idx][param_type] = state_dict[k].shape
+
+        max_idx = max(layers.keys()) if layers else -1
+        modules = []
+        
+        for i in range(max_idx + 1):
+            if i in layers:
+                shape = layers[i]["weight"]
+                if len(shape) == 2:
+                    out_f, in_f = shape[0], shape[1]
+                    modules.append(nn.Linear(in_f, out_f))
+                elif len(shape) == 1:
+                    modules.append(nn.LayerNorm(shape[0]))
+            else:
+                if i == 1:
+                    modules.append(nn.GELU())
+                else:
+                    modules.append(nn.Dropout(0.05))
+
+        if modules:
+            self.projector = nn.Sequential(*modules)
+            
+        return super().load_state_dict(state_dict, strict=strict)
+

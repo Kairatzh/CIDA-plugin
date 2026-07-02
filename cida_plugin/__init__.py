@@ -13,8 +13,8 @@ CIDA-Plugin: Universal Evidence-Grounded Multi-Agent Deliberation Layer (v3).
     out = plugin(pooled_output, seq_output=hidden_states, mask=attention_mask)
 """
 
-from .config import CIDAPluginConfig
-from .core import CIDAPlugin
+from .config import CIDAPluginConfig, CIDAPluginConfig as LatentConfig, CIDAPluginConfig as CidaConfig
+from .core import CIDAPlugin, CIDAPlugin as LatentCIDAPlugin, CIDAPlugin as CidaModel, PlanProjector
 from .agent import (
     AgentState,
     apply_role_prior,
@@ -32,14 +32,21 @@ from .losses import CIDALoss
 from .diagnostics import DebateDiagnostics
 from .ttt import TestTimeTrainer
 from .liquid_dynamics import LiquidDeliberationSolver
-from .hf import wrap_hf_model, HFModelWithCIDA
+from .hf import wrap_hf_model, HFModelWithCIDA, wrap_hf_causal_lm, HFModelForCausalLMWithCIDA
 
 __all__ = [
     # Главный интерфейс
     "CIDAPlugin",
     "CIDAPluginConfig",
+    "LatentCIDAPlugin",
+    "LatentConfig",
+    "CidaModel",
+    "CidaConfig",
+    "PlanProjector",
     "wrap_hf_model",
     "HFModelWithCIDA",
+    "wrap_hf_causal_lm",
+    "HFModelForCausalLMWithCIDA",
     # Потери и диагностика
     "CIDALoss",
     "DebateDiagnostics",
