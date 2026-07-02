@@ -3,7 +3,7 @@ import json, textwrap
 
 def cell(id, src, ct="code"):
     return {"cell_type": ct, "id": id, "metadata": {}, "outputs": [],
-            "execution_count": None, "source": textwrap.dedent(src).strip().splitlines(True)}
+            "execution_count": None, "source": textwrap.dedent(src).strip("\r\n").splitlines(True)}
 
 def md(id, src):
     c = cell(id, src, ct="markdown")
@@ -1215,6 +1215,122 @@ cells.append(cell("c10", """
     print("Kairos 7B Output:\\n", cida_ultimate_response)
     print("=" * 60)
 """))
+
+# ── Cell 11: Publish CIDA Weights to Hugging Face Hub ──
+cells.append(md("m11", """
+    ## 11. Publish CIDA v2 weights to the Hugging Face Hub
+    
+    Use this cell to publish your trained CIDA v2 adapter model and projection layers directly to the Hugging Face Hub.
+    This will upload all files from the local `cida_v2_best` directory and automatically generate a model card with benchmarks.
+"""))
+
+cells.append(cell("c11", '''
+    import os
+    import getpass
+    from huggingface_hub import HfApi, create_repo
+
+    # Prompt user for write token and repo
+    hf_token = getpass.getpass("Enter your Hugging Face Write Token: ").strip()
+    repo_id = input("Enter target repository (default: kirtzh/Kairos-CIDA-1.3B-v1.0): ").strip()
+
+    if not repo_id:
+        repo_id = "kirtzh/Kairos-CIDA-1.3B-v1.0"
+
+    # Identify source directory (check local first, fallback to drive)
+    src_dir = "cida_v2_best"
+    if not os.path.exists(src_dir):
+        src_dir = "/content/drive/MyDrive/Kairos_Cache/cida_v2_weights"
+
+    if not os.path.exists(src_dir) or len(os.listdir(src_dir)) == 0:
+        print(f"Error: Weights directory not found at cida_v2_best/ or Google Drive path!")
+    else:
+        # Create Hugging Face README.md model card contents
+        readme_content = f"""---
+tags:
+- cida
+- latent-planning
+- system-2
+- qwen
+- reasoning
+---
+
+# Kairos-CIDA-1.3B-v1.0
+
+This repository contains the weights for the **CIDA v2 (System 2)** adapter trained on top of the frozen `Qwen1.5-1.8B-Chat` backbone model.
+It utilizes **dynamic round-jittering** (2 to 5 rounds) during training to enable **Test-Time Compute Scaling** and a **Latent Rollback** backtracking mechanism at inference.
+
+## 📊 Comprehensive 4-Way Evaluation Scoreboard
+
+| Model Configuration | GSM8K Acc | ARC-Ch. Acc | Logic Traps Acc | Creativity Score | Average Acc |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| 1. Base Qwen 1.8B (System 1) | 10.00% | 70.00% | 10.00% | 0.00% | **22.50%** |
+| 2. **CIDA v2 (1.8B) [Our Newly Trained]** | 16.67% | 76.67% | 93.33% | 100.00% | **71.67%** |
+| 3. Base Qwen 7B (System 1) | 3.33% | 60.00% | 23.33% | 75.00% | **40.41%** |
+| 4. **Kairos 7B (HuggingFace) [CIDA v1]** | 33.33% | 86.67% | 30.00% | 100.00% | **62.50%** |
+
+## 🚀 Usage Tutorial
+
+To run this model with the CIDA Latent Deliberation plugin:
+
+1. Clone and install the CIDA-plugin:
+```bash
+git clone https://github.com/Kairatzh/CIDA-plugin.git
+pip install -e CIDA-plugin
+```
+
+2. Load the model and adapter in Python:
+```python
+import torch
+from cida_plugin import CidaConfig, CidaModel, PlanProjector
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# Load Qwen base model and tokenizer
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-1.8B-Chat")
+base_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen1.5-1.8B-Chat", torch_dtype=torch.float16).cuda()
+
+# Load CIDA adapter weights from Hugging Face
+from huggingface_hub import hf_hub_download
+import os
+
+model_repo = "{repo_id}"
+config_path = hf_hub_download(repo_id=model_repo, filename="config.json")
+weights_path = hf_hub_download(repo_id=model_repo, filename="pytorch_model.bin")
+proj_path = hf_hub_download(repo_id=model_repo, filename="plan_projector.pt")
+
+# Initialize CIDA
+config = CidaConfig.from_json_file(config_path)
+cida_model = CidaModel(config).cuda()
+cida_model.load_state_dict(torch.load(weights_path))
+
+proj = PlanProjector(num_plan_tokens=8, hidden_dim=4096).cuda()
+proj.load_state_dict(torch.load(proj_path))
+print("Successfully loaded CIDA v2 weights!")
+```
+"""
+
+        # Write readme file to weights directory
+        readme_path = os.path.join(src_dir, "README.md")
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(readme_content)
+
+        print(f"Uploading files from {src_dir} to Hugging Face repository: {repo_id}...")
+        try:
+            api = HfApi(token=hf_token)
+            # Create repository if it doesn't exist
+            create_repo(repo_id=repo_id, token=hf_token, exist_ok=True, private=False)
+            
+            # Upload folder
+            api.upload_folder(
+                folder_path=src_dir,
+                repo_id=repo_id,
+                repo_type="model",
+                commit_message="Upload CIDA v2 adapter weights and project model card"
+            )
+            print("Successfully published CIDA weights and README model card to Hugging Face Hub!")
+            print(f"URL: https://huggingface.co/{repo_id}")
+        except Exception as e:
+            print(f"Failed to upload to Hugging Face: {e}")
+'''))
 
 # ── Assemble notebook ──
 nb = {
