@@ -596,6 +596,99 @@ cells.append(cell("c8", """
         print("Weights are saved locally in cida_v2_best/")
 """))
 
+# ── Cell 9: Comprehensive Multi-Dataset Benchmark ──
+cells.append(md("m9", """
+    ## 9. Comprehensive Multi-Dataset Test-Set Evaluation (GSM8K & ARC-Challenge)
+    
+    This final cell runs a systematic benchmark over test subsets of multiple reasoning datasets
+    (GSM8K for math, ARC-Challenge for scientific reasoning) to report overall accuracy metrics.
+"""))
+
+cells.append(cell("c9", """
+    import re
+    
+    print("Loading test datasets for benchmark...")
+    gsm_test = load_dataset("openai/gsm8k", "main", split="test")
+    arc_test = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test")
+    
+    # 1. Load weights explicitly to verify configure and load
+    print("Configuring and loading best CIDA v2 checkpoint...")
+    cida.config.max_rounds = 4
+    if os.path.exists("cida_v2_best/pytorch_model.bin"):
+        cida.load_state_dict(torch.load("cida_v2_best/pytorch_model.bin", map_location=DEVICE))
+        proj.load_state_dict(torch.load("cida_v2_best/plan_projector.pt", map_location=DEVICE))
+        print("Successfully loaded weights from cida_v2_best/")
+    else:
+        print("Running with active in-memory weights (checkpoint not found).")
+        
+    cida.eval()
+    proj.eval()
+
+    def clean_answer(text):
+        return parse_gsm_answer(text)
+
+    # Evaluation config
+    NUM_EVAL = 30
+    
+    print(f"Evaluating {NUM_EVAL} samples from GSM8K (Math)...")
+    gsm_base_correct = 0
+    gsm_cida_correct = 0
+    
+    for i in range(NUM_EVAL):
+        ex = gsm_test[i]
+        prompt = format_gsm(ex)["prompt"]
+        gold_ans = clean_answer(ex["answer"])
+        
+        base_ans, _, _ = gen_base(prompt, max_new=150)
+        base_val = clean_answer(base_ans)
+        if base_val is not None and gold_ans is not None and abs(base_val - gold_ans) < 0.01:
+            gsm_base_correct += 1
+            
+        cida_ans, _, _, _ = gen_cida_with_rollback(prompt, max_new=150)
+        cida_val = clean_answer(cida_ans)
+        if cida_val is not None and gold_ans is not None and abs(cida_val - gold_ans) < 0.01:
+            gsm_cida_correct += 1
+            
+    print(f"Evaluating {NUM_EVAL} samples from ARC-Challenge (Science)...")
+    arc_base_correct = 0
+    arc_cida_correct = 0
+    
+    for i in range(NUM_EVAL):
+        ex = arc_test[i]
+        formatted = format_arc(ex)
+        prompt = formatted["prompt"]
+        gold_label = ex["answerKey"].strip().lower()
+        
+        base_ans, _, _ = gen_base(prompt, max_new=150)
+        # Check if the gold answer choice letter appears early in output
+        base_pred = base_ans.strip().lower()
+        if gold_label in base_pred[:30]:
+            arc_base_correct += 1
+            
+        cida_ans, _, _, _ = gen_cida_with_rollback(prompt, max_new=150)
+        cida_pred = cida_ans.strip().lower()
+        if gold_label in cida_pred[:30]:
+            arc_cida_correct += 1
+
+    gsm_base_acc = (gsm_base_correct / NUM_EVAL) * 100
+    gsm_cida_acc = (gsm_cida_correct / NUM_EVAL) * 100
+    arc_base_acc = (arc_base_correct / NUM_EVAL) * 100
+    arc_cida_acc = (arc_cida_correct / NUM_EVAL) * 100
+    
+    avg_base = (gsm_base_acc + arc_base_acc) / 2
+    avg_cida = (gsm_cida_acc + arc_cida_acc) / 2
+
+    # Print final summary table
+    print("\\n" + "="*80)
+    print(f"{'Dataset / Metric':<30} | {'Base LLM Accuracy':<22} | {'CIDA v2 Accuracy':<22}")
+    print("="*80)
+    print(f"{'GSM8K (Mathematics)':<30} | {gsm_base_acc:<20.2f}% | {gsm_cida_acc:<20.2f}%")
+    print(f"{'ARC-Challenge (Science)':<30} | {arc_base_acc:<20.2f}% | {arc_cida_acc:<20.2f}%")
+    print("-"*80)
+    print(f"{'AVERAGE REASONING SCORE':<30} | {avg_base:<20.2f}% | {avg_cida:<20.2f}%")
+    print("="*80)
+"""))
+
 # ── Assemble notebook ──
 nb = {
     "nbformat": 4, "nbformat_minor": 5,
