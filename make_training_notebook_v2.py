@@ -730,13 +730,22 @@ cells.append(cell("c9", """
         
         # Load config dynamically if possible
         cida_cfg = None
+        num_plan_18 = 8  # Default fallback
         for path in ["cida_v2_best", "drive/MyDrive/Kairos_Cache/cida_v2_weights", "/content/drive/MyDrive/Kairos_Cache/cida_v2_weights"]:
             cfg_file = os.path.join(path, "config.json")
+            k_cfg = os.path.join(path, "kairos_config.json")
             if os.path.exists(cfg_file):
                 try:
                     cida_cfg = LatentConfig.from_pretrained(path)
                     print(f"Loaded config from {path}/")
-                    break
+                except:
+                    pass
+            if os.path.exists(k_cfg):
+                try:
+                    with open(k_cfg, "r") as f:
+                        meta = json.load(f)
+                        num_plan_18 = meta.get("num_plan_tokens", 8)
+                        print(f"Detected num_plan_tokens={num_plan_18} from config.")
                 except:
                     pass
                     
@@ -763,7 +772,7 @@ cells.append(cell("c9", """
                 return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
                 
         cida = LatentCIDAPlugin(cida_cfg).to(DEVICE)
-        proj = PlanProjector(d_cida=cida_cfg.d_hidden, d_llm=llm.config.hidden_size, num_agents=cida_cfg.num_agents, num_plan_tokens=NUM_PLAN).to(DEVICE)
+        proj = PlanProjector(d_cida=cida_cfg.d_hidden, d_llm=llm.config.hidden_size, num_agents=cida_cfg.num_agents, num_plan_tokens=num_plan_18).to(DEVICE)
 
     # Load best CIDA v2 weights
     print("Configuring and loading best CIDA v2 checkpoint...")
@@ -773,8 +782,15 @@ cells.append(cell("c9", """
     for path in ["cida_v2_best", "drive/MyDrive/Kairos_Cache/cida_v2_weights", "/content/drive/MyDrive/Kairos_Cache/cida_v2_weights"]:
         model_file = os.path.join(path, "pytorch_model.bin")
         proj_file = os.path.join(path, "plan_projector.pt")
+        k_cfg = os.path.join(path, "kairos_config.json")
         if os.path.exists(model_file) and os.path.exists(proj_file):
             try:
+                # Read config values
+                if os.path.exists(k_cfg):
+                    with open(k_cfg, "r") as f:
+                        meta = json.load(f)
+                        num_plan_18 = meta.get("num_plan_tokens", num_plan_18)
+                
                 checkpoint = torch.load(model_file, map_location=DEVICE)
                 # Extrapolate d_hidden from checkpoint shape
                 chk_hidden = checkpoint["input_proj.0.weight"].shape[0]
@@ -799,11 +815,11 @@ cells.append(cell("c9", """
                             B = state_s.size(0)
                             return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
                             
-                    proj = PlanProjector(d_cida=chk_hidden, d_llm=llm.config.hidden_size, num_agents=cida.config.num_agents, num_plan_tokens=NUM_PLAN).to(DEVICE)
+                    proj = PlanProjector(d_cida=chk_hidden, d_llm=llm.config.hidden_size, num_agents=cida.config.num_agents, num_plan_tokens=num_plan_18).to(DEVICE)
                     
                 cida.load_state_dict(checkpoint)
                 proj.load_state_dict(torch.load(proj_file, map_location=DEVICE))
-                print(f"Successfully loaded weights from {path}/")
+                print(f"Successfully loaded weights from {path}/ (num_plan_tokens={num_plan_18})")
                 loaded = True
                 break
             except Exception as e:
@@ -826,7 +842,7 @@ cells.append(cell("c9", """
         return tokenizer.decode(gen_ids, skip_special_tokens=True)
 
     @torch.no_grad()
-    def local_gen_cida_18(prompt, max_new=150):
+    def local_gen_cida_18(prompt, max_new=150, max_attempts=2):
         flush()
         enc = tokenizer(prompt, return_tensors="pt").to(DEVICE)
         out = llm(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], output_hidden_states=True)
@@ -834,10 +850,21 @@ cells.append(cell("c9", """
         p_emb = embed_tokens(enc["input_ids"]).detach().float()
         del out; flush()
         
+        # Attempt 1: Standard Deliberation
+        cida.config.max_rounds = 3
         co = cida(pooled=h_base)
+        disagreement = co["disagreement"].item()
+        
+        # Latent Rollback (dynamic backtrack when conflict/uncertainty > 0.20)
+        if disagreement > 0.20 and max_attempts > 1:
+            noise = torch.randn_like(h_base) * 0.05
+            h_perturbed = h_base + noise
+            cida.config.max_rounds = 6
+            co = cida(pooled=h_perturbed)
+            
         plan = proj(co["state_final"].s)
         cat = torch.cat([p_emb, plan], dim=1).to(llm.dtype)
-        pm = torch.ones(1, 8, dtype=enc["attention_mask"].dtype, device=DEVICE)
+        pm = torch.ones(1, num_plan_18, dtype=enc["attention_mask"].dtype, device=DEVICE)
         gm = torch.cat([enc["attention_mask"], pm], dim=1)
         
         ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
