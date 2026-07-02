@@ -646,6 +646,7 @@ cells.append(cell("c9", """
     import re
     import os
     import gc
+    import json
     import torch
     import torch.nn as nn
     from huggingface_hub import hf_hub_download
@@ -869,7 +870,10 @@ cells.append(cell("c9", """
         
         ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
             max_new_tokens=max_new, do_sample=False,
-            pad_token_id=tokenizer    # Saved scores for other configurations (to avoid reloading and speed up evaluation)
+            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+        return tokenizer.decode(ids[0], skip_special_tokens=True)
+
+    # Saved scores for other configurations (to avoid reloading and speed up evaluation)
     acc_base_18_gsm = 10.00
     acc_base_18_arc = 70.00
     
