@@ -644,28 +644,89 @@ cells.append(md("m9", """
 
 cells.append(cell("c9", """
     import re
+    import os
+    import gc
+    import torch
+    import torch.nn as nn
     from huggingface_hub import hf_hub_download
     from datasets import load_dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    NUM_PLAN = 8
+    
+    def flush():
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    def parse_gsm_answer(text):
+        m = re.findall(r"[-+]?\\d*\\.\\d+|\\d+", text)
+        if m:
+            return float(m[-1])
+        return None
+        
+    def clean_answer(text):
+        return parse_gsm_answer(text)
+
+    def format_gsm(ex):
+        q = ex["question"]
+        prompt = f"<|im_start|>system\\nYou are a mathematical reasoner. Solve step by step.\\n<|im_end|>\\n<|im_start|>user\\n{q}\\n<|im_end|>\\n<|im_start|>assistant\\n"
+        return {"prompt": prompt, "answer": ex["answer"]}
+
+    def format_arc(ex):
+        choices = ex["choices"]
+        opts = "\\n".join([f"{l}) {t}" for l, t in zip(choices["label"], choices["text"])])
+        q = f"{ex['question']}\\n{opts}"
+        gold_label = ex["answerKey"]
+        gold_text = ""
+        for l, t in zip(choices["label"], choices["text"]):
+            if l == gold_label:
+                gold_text = t
+                break
+        answer = f"The answer is {gold_label}) {gold_text}"
+        prompt = f"<|im_start|>system\\nYou are a logical reasoner. Pick the correct answer and explain briefly.\\n<|im_end|>\\n<|im_start|>user\\n{q}\\n<|im_end|>\\n<|im_start|>assistant\\n"
+        return {"prompt": prompt, "answer": answer}
+
     print("Loading test datasets for benchmark...")
     gsm_test = load_dataset("openai/gsm8k", "main", split="test")
     arc_test = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test")
     
-    def clean_answer(text):
-        return parse_gsm_answer(text)
-
-    # Evaluation config
     NUM_EVAL = 30
     
     # ----------------------------------------------------
-    # PHASE 1: Evaluate 1.8B Models (Already in memory)
+    # PHASE 1: Evaluate 1.8B Models
     # ----------------------------------------------------
     print("\\n=== PHASE 1: Evaluating 1.8B Models ===")
     
+    # Load 1.8B base model dynamically if not in memory
+    if 'llm' not in globals() or 'tokenizer' not in globals():
+        print("Loading Qwen 1.8B model dynamically...")
+        MODEL_NAME_18 = "Qwen/Qwen1.5-1.8B-Chat"
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME_18, trust_remote_code=True, padding_side="left")
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            
+        bnb_config_18 = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True
+        )
+        llm = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME_18, trust_remote_code=True, torch_dtype=torch.float16,
+            device_map={"": 0}, quantization_config=bnb_config_18, output_hidden_states=True)
+        llm.eval()
+        embed_tokens = llm.get_input_embeddings()
+    else:
+        print("Using active 1.8B model from session.")
+        MODEL_NAME_18 = "Qwen/Qwen1.5-1.8B-Chat"
+        embed_tokens = llm.get_input_embeddings()
+        
+    # Setup 1.8B CIDA / Projector
     if 'cida' not in globals() or 'proj' not in globals():
         print("Initializing CIDA and Projector models from config...")
         from cida_latent_plugin import CIDAPlugin as LatentCIDAPlugin, CIDAPluginConfig as LatentConfig
-        import torch.nn as nn
         
         class PlanProjector(nn.Module):
             def __init__(self, d_cida, d_llm, num_agents, num_plan_tokens=8):
@@ -696,11 +757,46 @@ cells.append(cell("c9", """
         cida.load_state_dict(torch.load("cida_v2_best/pytorch_model.bin", map_location=DEVICE))
         proj.load_state_dict(torch.load("cida_v2_best/plan_projector.pt", map_location=DEVICE))
         print("Successfully loaded weights from cida_v2_best/")
+    elif os.path.exists("drive/MyDrive/Kairos_Cache/cida_v2_weights/pytorch_model.bin"):
+        # check drive too just in case
+        cida.load_state_dict(torch.load("drive/MyDrive/Kairos_Cache/cida_v2_weights/pytorch_model.bin", map_location=DEVICE))
+        proj.load_state_dict(torch.load("drive/MyDrive/Kairos_Cache/cida_v2_weights/plan_projector.pt", map_location=DEVICE))
+        print("Successfully loaded weights from Google Drive/")
     else:
-        print("Running with active in-memory weights (checkpoint not found).")
+        print("Running with active in-memory weights (checkpoint files not found).")
         
     cida.eval()
     proj.eval()
+
+    @torch.no_grad()
+    def local_gen_base_18(prompt, max_new=128):
+        flush()
+        enc = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        ids = llm.generate(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
+            max_new_tokens=max_new, do_sample=False,
+            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+        gen_ids = ids[0, enc["input_ids"].size(1):]
+        return tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+    @torch.no_grad()
+    def local_gen_cida_18(prompt, max_new=150):
+        flush()
+        enc = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        out = llm(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], output_hidden_states=True)
+        h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
+        p_emb = embed_tokens(enc["input_ids"]).detach().float()
+        del out; flush()
+        
+        co = cida(pooled=h_base)
+        plan = proj(co["state_final"].s)
+        cat = torch.cat([p_emb, plan], dim=1).to(llm.dtype)
+        pm = torch.ones(1, 8, dtype=enc["attention_mask"].dtype, device=DEVICE)
+        gm = torch.cat([enc["attention_mask"], pm], dim=1)
+        
+        ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
+            max_new_tokens=max_new, do_sample=False,
+            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+        return tokenizer.decode(ids[0, enc["input_ids"].size(1) + NUM_PLAN:], skip_special_tokens=True)
 
     gsm_base_18_correct = 0
     gsm_cida_18_correct = 0
@@ -714,13 +810,13 @@ cells.append(cell("c9", """
         gold_ans = clean_answer(ex["answer"])
         
         # Base 1.8B
-        base_ans, _, _ = gen_base(prompt, max_new=150)
+        base_ans = local_gen_base_18(prompt, max_new=150)
         base_val = clean_answer(base_ans)
         if base_val is not None and gold_ans is not None and abs(base_val - gold_ans) < 0.01:
             gsm_base_18_correct += 1
             
         # CIDA v2 1.8B
-        cida_ans, _, _, _ = gen_cida_with_rollback(prompt, max_new=150)
+        cida_ans = local_gen_cida_18(prompt, max_new=150)
         cida_val = clean_answer(cida_ans)
         if cida_val is not None and gold_ans is not None and abs(cida_val - gold_ans) < 0.01:
             gsm_cida_18_correct += 1
@@ -733,13 +829,13 @@ cells.append(cell("c9", """
         gold_label = ex["answerKey"].strip().lower()
         
         # Base 1.8B
-        base_ans, _, _ = gen_base(prompt, max_new=150)
+        base_ans = local_gen_base_18(prompt, max_new=150)
         base_pred = base_ans.strip().lower()
         if gold_label in base_pred[:30]:
             arc_base_18_correct += 1
             
         # CIDA v2 1.8B
-        cida_ans, _, _, _ = gen_cida_with_rollback(prompt, max_new=150)
+        cida_ans = local_gen_cida_18(prompt, max_new=150)
         cida_pred = cida_ans.strip().lower()
         if gold_label in cida_pred[:30]:
             arc_cida_18_correct += 1
