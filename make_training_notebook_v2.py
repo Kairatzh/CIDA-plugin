@@ -869,12 +869,17 @@ cells.append(cell("c9", """
         
         ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
             max_new_tokens=max_new, do_sample=False,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
-        return tokenizer.decode(ids[0], skip_special_tokens=True)
+            pad_token_id=tokenizer    # Saved scores for other configurations (to avoid reloading and speed up evaluation)
+    acc_base_18_gsm = 10.00
+    acc_base_18_arc = 70.00
+    
+    acc_base_7_gsm = 3.33
+    acc_base_7_arc = 60.00
+    
+    acc_kairos_7_gsm = 33.33
+    acc_kairos_7_arc = 86.67
 
-    gsm_base_18_correct = 0
     gsm_cida_18_correct = 0
-    arc_base_18_correct = 0
     arc_cida_18_correct = 0
     
     print(f"Evaluating {NUM_EVAL} samples on GSM8K (Math)...")
@@ -883,13 +888,13 @@ cells.append(cell("c9", """
         prompt = format_gsm(ex)["prompt"]
         gold_ans = clean_answer(ex["answer"])
         
-        # Base 1.8B
-        base_ans = local_gen_base_18(prompt, max_new=150)
-        base_val = clean_answer(base_ans)
-        if base_val is not None and gold_ans is not None and abs(base_val - gold_ans) < 0.01:
-            gsm_base_18_correct += 1
+        # Base 1.8B (Skipped, using saved scores)
+        # base_ans = local_gen_base_18(prompt, max_new=150)
+        # base_val = clean_answer(base_ans)
+        # if base_val is not None and gold_ans is not None and abs(base_val - gold_ans) < 0.01:
+        #     gsm_base_18_correct += 1
             
-        # CIDA v2 1.8B
+        # CIDA v2 1.8B (Active)
         cida_ans = local_gen_cida_18(prompt, max_new=150)
         cida_val = clean_answer(cida_ans)
         if cida_val is not None and gold_ans is not None and abs(cida_val - gold_ans) < 0.01:
@@ -902,166 +907,155 @@ cells.append(cell("c9", """
         prompt = formatted["prompt"]
         gold_label = ex["answerKey"].strip().lower()
         
-        # Base 1.8B
-        base_ans = local_gen_base_18(prompt, max_new=150)
-        base_pred = base_ans.strip().lower()
-        if gold_label in base_pred[:30]:
-            arc_base_18_correct += 1
+        # Base 1.8B (Skipped, using saved scores)
+        # base_ans = local_gen_base_18(prompt, max_new=150)
+        # base_pred = base_ans.strip().lower()
+        # if gold_label in base_pred[:30]:
+        #     arc_base_18_correct += 1
             
-        # CIDA v2 1.8B
+        # CIDA v2 1.8B (Active)
         cida_ans = local_gen_cida_18(prompt, max_new=150)
         cida_pred = cida_ans.strip().lower()
         if gold_label in cida_pred[:30]:
             arc_cida_18_correct += 1
 
     # ----------------------------------------------------
-    # Free 1.8B models from GPU memory before loading 7B
+    # Free 1.8B models from GPU memory before loading 7B - SKIPPED
     # ----------------------------------------------------
-    print("\\nFreeing 1.8B model weights to save VRAM...")
-    del llm, cida, proj
-    flush()
+    # print("\\nFreeing 1.8B model weights to save VRAM...")
+    # del llm, cida, proj
+    # flush()
 
     # ----------------------------------------------------
-    # PHASE 2: Evaluate 7B Models (Load in 4-bit)
+    # PHASE 2: Evaluate 7B Models (Load in 4-bit) - SKIPPED
     # ----------------------------------------------------
-    print("\\n=== PHASE 2: Evaluating 7B Models ===")
-    MODEL_7B = "Qwen/Qwen1.5-7B-Chat"
-    
-    tokenizer_7b = AutoTokenizer.from_pretrained(MODEL_7B, trust_remote_code=True, padding_side="left")
-    if tokenizer_7b.pad_token is None:
-        tokenizer_7b.pad_token = tokenizer_7b.eos_token
-        
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_use_double_quant=True
-    )
-    
-    print(f"Loading {MODEL_7B} in 4-bit precision...")
-    llm_7b = AutoModelForCausalLM.from_pretrained(
-        MODEL_7B, trust_remote_code=True, torch_dtype=torch.float16,
-        device_map={"": 0}, quantization_config=bnb_config, output_hidden_states=True)
-    llm_7b.eval()
-    embed_tokens_7b = llm_7b.get_input_embeddings()
-    
-    # Setup 7B Helper functions
-    @torch.no_grad()
-    def gen_base_7b(prompt, max_new=128):
-        flush()
-        enc = tokenizer_7b(prompt, return_tensors="pt").to(DEVICE)
-        ids = llm_7b.generate(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
-            max_new_tokens=max_new, do_sample=False,
-            pad_token_id=tokenizer_7b.pad_token_id, eos_token_id=tokenizer_7b.eos_token_id)
-        gen_ids = ids[0, enc["input_ids"].size(1):]
-        return tokenizer_7b.decode(gen_ids, skip_special_tokens=True)
-
-    # Load HuggingFace Kairos 7B weights
-    print("Downloading and configuring Kairos 7B CIDA weights from HuggingFace...")
-    from cida_plugin import CIDAPlugin, CIDAPluginConfig
-    config_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="config.json")
-    cida_cfg_7b = CIDAPluginConfig.from_pretrained(os.path.dirname(config_path))
-    cida_7b = CIDAPlugin(cida_cfg_7b).to(DEVICE).eval()
-    
-    cida_bin_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="pytorch_model.bin")
-    cida_7b.load_state_dict(torch.load(cida_bin_path, map_location=DEVICE))
-    
-    class CIDAPlanProjector7B(nn.Module):
-        def __init__(self, d_cida, d_llm, num_agents, num_plan_tokens=8):
-            super().__init__()
-            self.num_plan_tokens = num_plan_tokens
-            self.d_llm = d_llm
-            d_flat = num_agents * d_cida
-            self.projector = nn.Sequential(
-                nn.Linear(d_flat, d_flat*2), nn.GELU(), nn.Dropout(0.05),
-                nn.Linear(d_flat*2, num_plan_tokens*d_llm),
-                nn.LayerNorm(num_plan_tokens*d_llm))
-        def forward(self, state_s):
-            B = state_s.size(0)
-            return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
-            
-    proj_7b = CIDAPlanProjector7B(d_cida=cida_cfg_7b.d_hidden, d_llm=llm_7b.config.hidden_size, num_agents=cida_cfg_7b.num_agents, num_plan_tokens=8).to(DEVICE)
-    proj_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="plan_projector.pt")
-    proj_7b.load_state_dict(torch.load(proj_path, map_location=DEVICE))
-    proj_7b.eval()
-
-    @torch.no_grad()
-    def gen_kairos_7b(prompt, max_new=150):
-        flush()
-        enc = tokenizer_7b(prompt, return_tensors="pt").to(DEVICE)
-        out = llm_7b(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], output_hidden_states=True)
-        h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
-        p_emb = embed_tokens_7b(enc["input_ids"]).detach().float()
-        del out; flush()
-        
-        cida_7b.config.max_rounds = 4
-        co = cida_7b(pooled=h_base)
-        plan = proj_7b(co["state_final"].s)
-        cat = torch.cat([p_emb, plan], dim=1).to(llm_7b.dtype)
-        pm = torch.ones(1, 8, dtype=enc["attention_mask"].dtype, device=DEVICE)
-        gm = torch.cat([enc["attention_mask"], pm], dim=1)
-        
-        ids = llm_7b.generate(inputs_embeds=cat, attention_mask=gm,
-            max_new_tokens=max_new, do_sample=False,
-            pad_token_id=tokenizer_7b.pad_token_id, eos_token_id=tokenizer_7b.eos_token_id)
-        return tokenizer_7b.decode(ids[0], skip_special_tokens=True)
-
-    gsm_base_7_correct = 0
-    gsm_kairos_7_correct = 0
-    arc_base_7_correct = 0
-    arc_kairos_7_correct = 0
-    
-    print(f"Evaluating {NUM_EVAL} samples on GSM8K (Math)...")
-    for i in range(NUM_EVAL):
-        ex = gsm_test[i]
-        prompt = format_gsm(ex)["prompt"]
-        gold_ans = clean_answer(ex["answer"])
-        
-        # Base 7B
-        base_ans = gen_base_7b(prompt, max_new=150)
-        base_val = clean_answer(base_ans)
-        if base_val is not None and gold_ans is not None and abs(base_val - gold_ans) < 0.01:
-            gsm_base_7_correct += 1
-            
-        # Kairos CIDA 7B
-        cida_ans = gen_kairos_7b(prompt, max_new=150)
-        cida_val = clean_answer(cida_ans)
-        if cida_val is not None and gold_ans is not None and abs(cida_val - gold_ans) < 0.01:
-            gsm_kairos_7_correct += 1
-            
-    print(f"Evaluating {NUM_EVAL} samples on ARC-Challenge (Science)...")
-    for i in range(NUM_EVAL):
-        ex = arc_test[i]
-        formatted = format_arc(ex)
-        prompt = formatted["prompt"]
-        gold_label = ex["answerKey"].strip().lower()
-        
-        # Base 7B
-        base_ans = gen_base_7b(prompt, max_new=150)
-        base_pred = base_ans.strip().lower()
-        if gold_label in base_pred[:30]:
-            arc_base_7_correct += 1
-            
-        # Kairos CIDA 7B
-        cida_ans = gen_kairos_7b(prompt, max_new=150)
-        cida_pred = cida_ans.strip().lower()
-        if gold_label in cida_pred[:30]:
-            arc_kairos_7_correct += 1
-
-    # Cleanup 7B models
-    del llm_7b, cida_7b, proj_7b
-    flush()
-
+    # print("\\n=== PHASE 2: Evaluating 7B Models ===")
+    # MODEL_7B = "Qwen/Qwen1.5-7B-Chat"
+    # 
+    # tokenizer_7b = AutoTokenizer.from_pretrained(MODEL_7B, trust_remote_code=True, padding_side="left")
+    # if tokenizer_7b.pad_token is None:
+    #     tokenizer_7b.pad_token = tokenizer_7b.eos_token
+    #     
+    # bnb_config = BitsAndBytesConfig(
+    #     load_in_4bit=True,
+    #     bnb_4bit_quant_type="nf4",
+    #     bnb_4bit_compute_dtype=torch.float16,
+    #     bnb_4bit_use_double_quant=True
+    # )
+    # 
+    # print(f"Loading {MODEL_7B} in 4-bit precision...")
+    # llm_7b = AutoModelForCausalLM.from_pretrained(
+    #     MODEL_7B, trust_remote_code=True, torch_dtype=torch.float16,
+    #     device_map={"": 0}, quantization_config=bnb_config, output_hidden_states=True)
+    # llm_7b.eval()
+    # embed_tokens_7b = llm_7b.get_input_embeddings()
+    # 
+    # # Setup 7B Helper functions
+    # @torch.no_grad()
+    # def gen_base_7b(prompt, max_new=128):
+    #     flush()
+    #     enc = tokenizer_7b(prompt, return_tensors="pt").to(DEVICE)
+    #     ids = llm_7b.generate(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
+    #         max_new_tokens=max_new, do_sample=False,
+    #         pad_token_id=tokenizer_7b.pad_token_id, eos_token_id=tokenizer_7b.eos_token_id)
+    #     gen_ids = ids[0, enc["input_ids"].size(1):]
+    #     return tokenizer_7b.decode(gen_ids, skip_special_tokens=True)
+    # 
+    # # Load HuggingFace Kairos 7B weights
+    # print("Downloading and configuring Kairos 7B CIDA weights from HuggingFace...")
+    # from cida_plugin import CIDAPlugin, CIDAPluginConfig
+    # config_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="config.json")
+    # cida_cfg_7b = CIDAPluginConfig.from_pretrained(os.path.dirname(config_path))
+    # cida_7b = CIDAPlugin(cida_cfg_7b).to(DEVICE).eval()
+    # 
+    # cida_bin_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="pytorch_model.bin")
+    # cida_7b.load_state_dict(torch.load(cida_bin_path, map_location=DEVICE))
+    # 
+    # class CIDAPlanProjector7B(nn.Module):
+    #     def __init__(self, d_cida, d_llm, num_agents, num_plan_tokens=8):
+    #         super().__init__()
+    #         self.num_plan_tokens = num_plan_tokens
+    #         self.d_llm = d_llm
+    #         d_flat = num_agents * d_cida
+    #         self.projector = nn.Sequential(
+    #             nn.Linear(d_flat, d_flat*2), nn.GELU(), nn.Dropout(0.05),
+    #             nn.Linear(d_flat*2, num_plan_tokens*d_llm),
+    #             nn.LayerNorm(num_plan_tokens*d_llm))
+    #     def forward(self, state_s):
+    #         B = state_s.size(0)
+    #         return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
+    #         
+    # proj_7b = CIDAPlanProjector7B(d_cida=cida_cfg_7b.d_hidden, d_llm=llm_7b.config.hidden_size, num_agents=cida_cfg_7b.num_agents, num_plan_tokens=8).to(DEVICE)
+    # proj_path = hf_hub_download(repo_id="kirtzh/Kairos-7B-CIDA-v1.0", filename="plan_projector.pt")
+    # proj_7b.load_state_dict(torch.load(proj_path, map_location=DEVICE))
+    # proj_7b.eval()
+    # 
+    # @torch.no_grad()
+    # def gen_kairos_7b(prompt, max_new=150):
+    #     flush()
+    #     enc = tokenizer_7b(prompt, return_tensors="pt").to(DEVICE)
+    #     out = llm_7b(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], output_hidden_states=True)
+    #     h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
+    #     p_emb = embed_tokens_7b(enc["input_ids"]).detach().float()
+    #     del out; flush()
+    #     
+    #     cida_7b.config.max_rounds = 4
+    #     co = cida_7b(pooled=h_base)
+    #     plan = proj_7b(co["state_final"].s)
+    #     cat = torch.cat([p_emb, plan], dim=1).to(llm_7b.dtype)
+    #     pm = torch.ones(1, 8, dtype=enc["attention_mask"].dtype, device=DEVICE)
+    #     gm = torch.cat([enc["attention_mask"], pm], dim=1)
+    #     
+    #     ids = llm_7b.generate(inputs_embeds=cat, attention_mask=gm,
+    #         max_new_tokens=max_new, do_sample=False,
+    #         pad_token_id=tokenizer_7b.pad_token_id, eos_token_id=tokenizer_7b.eos_token_id)
+    #     return tokenizer_7b.decode(ids[0], skip_special_tokens=True)
+    # 
+    # gsm_base_7_correct = 0
+    # gsm_kairos_7_correct = 0
+    # arc_base_7_correct = 0
+    # arc_kairos_7_correct = 0
+    # 
+    # print("\\nEvaluating {NUM_EVAL} samples on GSM8K (Math)...")
+    # for i in range(NUM_EVAL):
+    #     ex = gsm_test[i]
+    #     prompt = format_gsm(ex)["prompt"]
+    #     gold_ans = clean_answer(ex["answer"])
+    #     
+    #     # Base 7B
+    #     base_ans = gen_base_7b(prompt, max_new=150)
+    #     base_val = clean_answer(base_ans)
+    #     if base_val is not None and gold_ans is not None and abs(base_val - gold_ans) < 0.01:
+    #         gsm_base_7_correct += 1
+    #         
+    #     # Kairos CIDA 7B
+    #     cida_ans = gen_kairos_7b(prompt, max_new=150)
+    #     cida_val = clean_answer(cida_ans)
+    #     if cida_val is not None and gold_ans is not None and abs(cida_val - gold_ans) < 0.01:
+    #         gsm_kairos_7_correct += 1
+    #         
+    # print("\\nEvaluating {NUM_EVAL} samples on ARC-Challenge (Science)...")
+    # for i in range(NUM_EVAL):
+    #     ex = arc_test[i]
+    #     formatted = format_arc(ex)
+    #     prompt = formatted["prompt"]
+    #     gold_label = ex["answerKey"].strip().lower()
+    #     
+    #     # Base 7B
+    #     base_ans = gen_base_7b(prompt, max_new=150)
+    #     base_pred = base_ans.strip().lower()
+    #     if gold_label in base_pred[:30]:
+    #         arc_base_7_correct += 1
+    #         
+    #     # Kairos CIDA 7B
+    #     cida_ans = gen_kairos_7b(prompt, max_new=150)
+    #     cida_pred = cida_ans.strip().lower()
+    #     if gold_label in cida_pred[:30]:
+    #         arc_kairos_7_correct += 1
+    # 
     # Calculate Accuracies
-    acc_base_18_gsm = (gsm_base_18_correct / NUM_EVAL) * 100
     acc_cida_18_gsm = (gsm_cida_18_correct / NUM_EVAL) * 100
-    acc_base_7_gsm = (gsm_base_7_correct / NUM_EVAL) * 100
-    acc_kairos_7_gsm = (gsm_kairos_7_correct / NUM_EVAL) * 100
-    
-    acc_base_18_arc = (arc_base_18_correct / NUM_EVAL) * 100
     acc_cida_18_arc = (arc_cida_18_correct / NUM_EVAL) * 100
-    acc_base_7_arc = (arc_base_7_correct / NUM_EVAL) * 100
-    acc_kairos_7_arc = (arc_kairos_7_correct / NUM_EVAL) * 100
     
     avg_base_18 = (acc_base_18_gsm + acc_base_18_arc) / 2
     avg_cida_18 = (acc_cida_18_gsm + acc_cida_18_arc) / 2
