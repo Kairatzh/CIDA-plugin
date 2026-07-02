@@ -783,25 +783,27 @@ cells.append(cell("c9", """
     for path in ["cida_v2_best", "drive/MyDrive/Kairos_Cache/cida_v2_weights", "/content/drive/MyDrive/Kairos_Cache/cida_v2_weights"]:
         model_file = os.path.join(path, "pytorch_model.bin")
         proj_file = os.path.join(path, "plan_projector.pt")
-        k_cfg = os.path.join(path, "kairos_config.json")
         if os.path.exists(model_file) and os.path.exists(proj_file):
             try:
-                # Read config values
-                if os.path.exists(k_cfg):
-                    with open(k_cfg, "r") as f:
-                        meta = json.load(f)
-                        num_plan_18 = meta.get("num_plan_tokens", num_plan_18)
-                
                 checkpoint = torch.load(model_file, map_location=DEVICE)
-                # Extrapolate d_hidden from checkpoint shape
+                proj_sd = torch.load(proj_file, map_location=DEVICE)
+                
+                # Extrapolate architecture configuration directly from checkpoint tensor shapes
                 chk_hidden = checkpoint["input_proj.0.weight"].shape[0]
-                if cida.config.d_hidden != chk_hidden:
+                chk_num_plan = proj_sd["projector.3.weight"].shape[0] // llm.config.hidden_size
+                
+                reinit_cida = (cida.config.d_hidden != chk_hidden)
+                reinit_proj = (proj.num_plan_tokens != chk_num_plan or reinit_cida)
+                
+                if reinit_cida:
                     print(f"Re-initializing CIDA to match checkpoint shape: d_hidden={chk_hidden}")
                     from cida_latent_plugin import CIDAPlugin as LatentCIDAPlugin, CIDAPluginConfig as LatentConfig
                     cida.config.d_hidden = chk_hidden
                     cida.config.d_message = chk_hidden
                     cida = LatentCIDAPlugin(cida.config).to(DEVICE)
                     
+                if reinit_proj:
+                    print(f"Re-initializing Projector to match checkpoint shape: num_plan_tokens={chk_num_plan}")
                     class PlanProjector(nn.Module):
                         def __init__(self, d_cida, d_llm, num_agents, num_plan_tokens=8):
                             super().__init__()
@@ -816,10 +818,11 @@ cells.append(cell("c9", """
                             B = state_s.size(0)
                             return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
                             
-                    proj = PlanProjector(d_cida=chk_hidden, d_llm=llm.config.hidden_size, num_agents=cida.config.num_agents, num_plan_tokens=num_plan_18).to(DEVICE)
-                    
+                    proj = PlanProjector(d_cida=chk_hidden, d_llm=llm.config.hidden_size, num_agents=cida.config.num_agents, num_plan_tokens=chk_num_plan).to(DEVICE)
+                
+                num_plan_18 = chk_num_plan
                 cida.load_state_dict(checkpoint)
-                proj.load_state_dict(torch.load(proj_file, map_location=DEVICE))
+                proj.load_state_dict(proj_sd)
                 print(f"Successfully loaded weights from {path}/ (num_plan_tokens={num_plan_18})")
                 loaded = True
                 break
