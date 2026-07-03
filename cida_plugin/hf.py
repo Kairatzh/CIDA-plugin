@@ -192,3 +192,123 @@ def wrap_hf_model(
         # Теперь модель готова к обучению с CIDA-Plugin в Hugging Face Trainer!
     """
     return HFModelWithCIDA(hf_model, cida_config=cida_config, **kwargs)
+
+
+class HFModelForCausalLMWithCIDA(nn.Module):
+    """
+    Wrapper for Autoregressive/Causal Language Models (like Qwen, Gemma, Llama).
+    Intercepts the prompt input, runs CIDA deliberation on the latent space,
+    projects the final agent consensus into plan token embeddings,
+    prepends them to the input embeddings, and uses the base model to generate.
+    """
+    def __init__(self, hf_model: nn.Module, cida_plugin: nn.Module, plan_projector: nn.Module):
+        super().__init__()
+        self.base_model = hf_model
+        self.plugin = cida_plugin
+        self.plan_projector = plan_projector
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        **kwargs: Any
+    ):
+        if inputs_embeds is None and input_ids is not None:
+            # 1. Run prompt embedding
+            embed_tokens = self.base_model.get_input_embeddings()
+            inputs_embeds = embed_tokens(input_ids)
+
+            # 2. Extract CIDA consensus plan
+            with torch.no_grad():
+                outputs = self.base_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                    use_cache=False
+                )
+                last_hidden = outputs.hidden_states[-1]
+                sidx = attention_mask.sum(dim=1) - 1
+                bidx = torch.arange(input_ids.size(0), device=input_ids.device)
+                pooled_hidden = last_hidden[bidx, sidx]
+
+            cida_out = self.plugin(pooled=pooled_hidden)
+            plan_embeddings = self.plan_projector(cida_out['state_final'].s) # (B, P, H)
+
+            # Prepend plan embeddings to original tokens
+            inputs_embeds = torch.cat([plan_embeddings, inputs_embeds], dim=1)
+            
+            # Prepend ones to attention mask for plan tokens
+            B, P, _ = plan_embeddings.shape
+            plan_mask = torch.ones(B, P, dtype=attention_mask.dtype, device=attention_mask.device)
+            attention_mask = torch.cat([plan_mask, attention_mask], dim=1)
+            
+            # Clear input_ids as we use inputs_embeds
+            input_ids = None
+
+        return self.base_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            **kwargs
+        )
+
+    def generate_with_cida(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int = 256,
+        **generation_kwargs: Any
+    ) -> torch.Tensor:
+        """
+        Runs CIDA multi-agent deliberation on the prompt and prepends
+        the consensus plan embeddings before generating the final text response.
+        """
+        embed_tokens = self.base_model.get_input_embeddings()
+        prompt_embeds = embed_tokens(input_ids) # (B, Lq, H)
+
+        with torch.no_grad():
+            outputs = self.base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False
+            )
+            last_hidden = outputs.hidden_states[-1]
+            sidx = attention_mask.sum(dim=1) - 1
+            bidx = torch.arange(input_ids.size(0), device=input_ids.device)
+            pooled_hidden = last_hidden[bidx, sidx]
+
+        cida_out = self.plugin(pooled=pooled_hidden)
+        plan_embeddings = self.plan_projector(cida_out['state_final'].s) # (B, P, H)
+
+        # Concatenate plan and prompt embeddings
+        inputs_embeds = torch.cat([plan_embeddings, prompt_embeds], dim=1)
+
+        # Prepend plan mask to attention mask
+        B, P, _ = plan_embeddings.shape
+        plan_mask = torch.ones(B, P, dtype=attention_mask.dtype, device=attention_mask.device)
+        attention_mask = torch.cat([plan_mask, attention_mask], dim=1)
+
+        # Generate tokens
+        generated_ids = self.base_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            **generation_kwargs
+        )
+        return generated_ids
+
+
+def wrap_hf_causal_lm(
+    hf_model: nn.Module,
+    cida_plugin: nn.Module,
+    plan_projector: nn.Module
+) -> HFModelForCausalLMWithCIDA:
+    """
+    Wraps a Causal LM (Qwen/Llama) with CIDA and a PlanProjector for generative inference.
+    """
+    return HFModelForCausalLMWithCIDA(hf_model, cida_plugin, plan_projector)
+
