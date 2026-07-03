@@ -75,7 +75,7 @@ cells.append(cell("c1", """
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     MODEL_NAME = "Qwen/Qwen1.5-1.8B-Chat"
-    NUM_PLAN = 8  # number of virtual plan tokens to inject
+    NUM_PLAN = 4  # number of virtual plan tokens to inject (CIDA v2 uses 4 tokens of size 2048)
     MAX_SEQ = 256  # max sequence length (prompt+answer)
 
     def flush():
@@ -138,7 +138,13 @@ cells.append(cell("c2", """
     # 3. Load PlanProjector
     proj = PlanProjector(num_plan_tokens=NUM_PLAN, hidden_size=LLM_HIDDEN)
     proj.load_state_dict(torch.load(proj_path, map_location=DEVICE))
+    
+    # Dynamically detect shape to support different checkpoints
+    out_features = proj.projector[-1].weight.shape[0]
+    NUM_PLAN = out_features // LLM_HIDDEN
+    proj.num_plan_tokens = NUM_PLAN
     proj = proj.to(DEVICE)
+    print(f"Loaded PlanProjector. Automatically adjusted NUM_PLAN = {NUM_PLAN}")
 
     # Enable gradients for training
     for p in cida.parameters():
