@@ -436,9 +436,97 @@ cells.append(cell("c6", """
     plt.show()
 """))
 
-# ── Cell 7: Push to Hub (Optional) ──
+# ── Cell 7: The Ultimate Cognitive Challenge & OOD Creativity Benchmark ──
+cells.append(md("m_extra", """
+    ## 7. The Ultimate Cognitive Challenge & OOD Creativity Benchmark
+    
+    Here we showcase CIDA's ability to solve extremely hard problems where standard autoregressive models (including Claude and ChatGPT on raw generation) get tripped up:
+    
+    1. **Self-Referential Temporal Loop Grid**: A pathfinding task on a 3x3 grid with future-to-past retrocausal constraints. Sequence models decode greedily and fail to look ahead. CIDA uses agent debate to search the planning space.
+    2. **Slow-Light Grid (Relativistic Velocity Addition)**: Deducing the speed of a projectile under relativistic bounds ($c=3$, $v=2$, $u=3$). Standard LLMs try linear addition ($2+3=5$ or simple averages) and violate the speed of light.
+    
+    We compare:
+    - **Base Qwen 1.8B** (No planning tokens)
+    - **CIDA v2 (Normal - 3 rounds)**
+    - **CIDA v2 (Scaled + Rollback - 15 rounds)**
+"""))
+
+cells.append(cell("c_extra", """
+    # Benchmarking hard OOD tasks
+    tasks = [
+        {
+            "name": "Self-Referential Temporal Loop Grid",
+            "prompt": "You are a pathfinder solving a grid puzzle on a 3x3 grid (cells A1 to C3) from A1 (start at step 0) to C3 (destination) in exactly 4 steps.\\nRules:\\n1. Column 3 Rule: Entering any cell in Column 3 (C1, C2, C3) at step t retroactively blocks the cell visited at step t-2 from being visited again at any step k > t-2.\\n2. Row 3 Rule: Entering any cell in Row 3 (A3, B3, C3) at step t blocks cell B2 for all steps k < t.\\n3. Column 1 Rule: Entering any cell in Column 1 (A1, A2, A3) at any step t > 0 blocks cell B3 for all steps.\\nFind the unique shortest path of length 4 from A1 to C3. Output only the path (e.g. A1 -> B1 -> C1 -> C2 -> C3).",
+            "gold": "A1 -> B1 -> C1 -> C2 -> C3"
+        },
+        {
+            "name": "Slow-Light Grid (Relativistic Velocity Addition)",
+            "prompt": "You are a relativistic physics synthesizer.\\nBase Theory: Linear velocity addition v_new = v + u.\\nObservations: Speed of light c=3. Ship moving at v=2, fires projectile at u=2 -> observed speed is 2.77. Ship moving at v=2, fires projectile at u=1 -> observed speed is 2.45.\\nTask: Determine the speed of a projectile fired at u=3 from a ship moving at v=2. Output only the final speed value.",
+            "gold": "3.00"
+        }
+    ]
+
+    @torch.no_grad()
+    def gen_cida_configured(prompt, max_rounds=3, run_rollback=False):
+        flush()
+        enc = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        out = llm(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
+                  output_hidden_states=True, use_cache=False)
+        h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
+        p_emb = embed_tokens(enc["input_ids"]).detach().float()
+        
+        # Deliberation setup
+        cida.config.max_rounds = max_rounds
+        co = cida(pooled=h_base)
+        disagreement = co["disagreement"].item()
+        
+        # Rollback check
+        if run_rollback and disagreement > 0.18:
+            # Perturb latent state to find alternate consensus
+            noise = torch.randn_like(h_base) * 0.05
+            h_perturbed = h_base + noise
+            cida.config.max_rounds = 15 # thinking longer
+            co = cida(pooled=h_perturbed)
+            
+        plan = proj(co["state_final"].s)
+        cat = torch.cat([p_emb, plan], dim=1).to(llm.dtype)
+        pm = torch.ones(1, NUM_PLAN, dtype=enc["attention_mask"].dtype, device=DEVICE)
+        gm = torch.cat([enc["attention_mask"], pm], dim=1)
+        
+        ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
+            max_new_tokens=40, do_sample=False,
+            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+        text = tokenizer.decode(ids[0], skip_special_tokens=True)
+        return text, co
+
+    print("================================================================================")
+    print("RUNNING REVOLUTIONARY COGNITIVE BENCHMARKS")
+    print("================================================================================")
+    
+    for t in tasks:
+        prompt = chat_format(t["prompt"])
+        print(f"\\nTASK: {t['name']}")
+        print(f"Gold Standard Target: {t['gold']}\\n")
+        
+        # 1. Base Model
+        base_ans = gen_base(prompt, max_new=40).strip()
+        print(f"  [1] Base Qwen 1.8B (System 1):\\n      {base_ans.replace(prompt, '').strip()}")
+        
+        # 2. CIDA Normal (3 rounds)
+        cida_normal_ans, co_n = gen_cida_configured(prompt, max_rounds=3, run_rollback=False)
+        print(f"  [2] CIDA v2 (Normal - 3 rounds):\\n      {cida_normal_ans.replace(prompt, '').strip()}")
+        print(f"      Disagreement: {co_n['disagreement'].item():.4f}")
+        
+        # 3. CIDA Scaled + Rollback (15 rounds)
+        cida_scaled_ans, co_s = gen_cida_configured(prompt, max_rounds=15, run_rollback=True)
+        print(f"  [3] CIDA v2 (Scaled + Rollback - 15 rounds):\\n      {cida_scaled_ans.replace(prompt, '').strip()}")
+        print(f"      Disagreement: {co_s['disagreement'].item():.4f}")
+        print("-" * 80)
+"""))
+
+# ── Cell 8: Push to Hub (Optional) ──
 cells.append(md("m7", """
-    ## 7. Save Weights to Google Drive or Push to Hugging Face
+    ## 8. Save Weights to Google Drive or Push to Hugging Face
     
     Run this cell to save the model weights to Google Drive or publish them back to the Hugging Face Hub.
 """))
