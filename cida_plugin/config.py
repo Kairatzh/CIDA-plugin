@@ -226,3 +226,9 @@ class CIDAPluginConfig:
         with open(config_file, "r", encoding="utf-8") as f:
             config_dict = json.load(f)
         return cls.from_dict(config_dict)
+
+    @classmethod
+    def from_json_file(cls, json_file: str):
+        with open(json_file, "r", encoding="utf-8") as f:
+            config_dict = json.load(f)
+        return cls.from_dict(config_dict)
