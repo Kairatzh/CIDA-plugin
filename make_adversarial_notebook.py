@@ -456,13 +456,23 @@ cells.append(cell("c_extra", """
     tasks = [
         {
             "name": "Self-Referential Temporal Loop Grid",
-            "prompt": "You are a pathfinder solving a grid puzzle on a 3x3 grid (cells A1 to C3) from A1 (start at step 0) to C3 (destination) in exactly 4 steps.\\nRules:\\n1. Column 3 Rule: Entering any cell in Column 3 (C1, C2, C3) at step t retroactively blocks the cell visited at step t-2 from being visited again at any step k > t-2.\\n2. Row 3 Rule: Entering any cell in Row 3 (A3, B3, C3) at step t blocks cell B2 for all steps k < t.\\n3. Column 1 Rule: Entering any cell in Column 1 (A1, A2, A3) at any step t > 0 blocks cell B3 for all steps.\\nFind the unique shortest path of length 4 from A1 to C3. Output only the path (e.g. A1 -> B1 -> C1 -> C2 -> C3).",
+            "prompt": "You are a pathfinder solving a grid puzzle on a 3x3 grid (cells A1 to C3) from A1 (start at step 0) to C3 (destination) in exactly 4 steps.\\nRules:\\n1. Column 3 Rule: Entering any cell in Column 3 (C1, C2, C3) at step t retroactively blocks the cell visited at step t-2 from being visited again at any step k > t-2.\\n2. Row 3 Rule: Entering any cell in Row 3 (A3, B3, C3) at step t blocks cell B2 for all steps k < t.\\n3. Column 1 Rule: Entering any cell in Column 1 (A1, A2, A3) at any step t > 0 blocks cell B3 for all steps.\\nFind the unique shortest path of length 4 from A1 to C3. Verify each step and rule quantitatively, and explain step-by-step why the solution is valid while other paths fail.",
             "gold": "A1 -> B1 -> C1 -> C2 -> C3"
         },
         {
             "name": "Slow-Light Grid (Relativistic Velocity Addition)",
-            "prompt": "You are a relativistic physics synthesizer.\\nBase Theory: Linear velocity addition v_new = v + u.\\nObservations: Speed of light c=3. Ship moving at v=2, fires projectile at u=2 -> observed speed is 2.77. Ship moving at v=2, fires projectile at u=1 -> observed speed is 2.45.\\nTask: Determine the speed of a projectile fired at u=3 from a ship moving at v=2. Output only the final speed value.",
-            "gold": "3.00"
+            "prompt": "You are a relativistic physics synthesizer.\\nBase Theory: Linear velocity addition v_new = v + u.\\nObservations: Speed of light c=3. Ship moving at v=2, fires projectile at u=2 -> observed speed is 2.77. Ship moving at v=2, fires projectile at u=1 -> observed speed is 2.45.\\nTask: Determine the speed of a projectile fired at u=3 from a ship moving at v=2. Show the mathematical derivation of the velocity addition formula from the observations, verify it against the c=3 speed of light limit, and explain step-by-step how you calculated the final value.",
+            "gold": "3.00 (via u' = (v+u)/(1 + vu/c^2))"
+        },
+        {
+            "name": "Quantum Weak Value Paradox (Three-Box Paradox)",
+            "prompt": "In quantum mechanics, a system is prepared in state |Psi> = 1/sqrt(3) * (|A> + |B> - |C>). We post-select the state |Phi> = 1/sqrt(3) * (|A> + |B> + |C>). A weak measurement of the projection operators on box A (P_A) and box B (P_B) yields weak values A_w = +1 and B_w = +1. Yet, if we measure the joint projection P_{A+B}, the weak value is 0. Explain step-by-step how these weak values are derived mathematically and resolve this apparent paradox (where 1 + 1 = 0) without violating the conservation of probability.",
+            "gold": "The weak value definition A_w = <Phi|P_A|Psi> / <Phi|Psi>. Here, <Phi|Psi> = 1/3 * (1 + 1 - 1) = 1/3. <Phi|P_A|Psi> = 1/3. So A_w = 1. For P_{A+B}, the joint projector is P_A + P_B + cross terms, but weak values sum linearly. Wait, P_{A+B}_w = A_w + B_w = 1 + 1 = 2? No, the paradox is resolved because the weak value of C is C_w = <Phi|P_C|Psi> / <Phi|Psi> = -1 (negative weak value), so A_w + B_w + C_w = 1 + 1 - 1 = 1."
+        },
+        {
+            "name": "Cheryl's Birthday Liar Paradox",
+            "prompt": "Cheryl gives Albert and Bernard 10 possible dates: May 15, May 16, May 19, June 17, June 18, July 14, July 16, August 14, August 15, August 17. Albert knows the month, Bernard knows the day. Albert says: 'I don't know the date, but I know Bernard doesn't know either.' Bernard says: 'At first I didn't know, but now I know.' Albert says: 'Now I know too.'\\nTwist: What if Albert is a liar 50% of the time, and Bernard knows this. If the actual date is July 16, deduce step-by-step whether Albert's first statement is a lie, and explain how Bernard resolves the truth to find July 16.",
+            "gold": "Albert is telling the truth. Since Albert knows the month is July, he checks July 14 and July 16. Neither is unique, so Bernard couldn't know. Bernard eliminates May and June. Of July 14, July 16, August 14, August 15, August 17: Bernard knows the day is 16, which is unique in July/August, so Bernard knows. Albert then knows July 16."
         }
     ]
 
@@ -494,7 +504,7 @@ cells.append(cell("c_extra", """
         gm = torch.cat([enc["attention_mask"], pm], dim=1)
         
         ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
-            max_new_tokens=40, do_sample=False,
+            max_new_tokens=256, do_sample=False,
             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
         text = tokenizer.decode(ids[0], skip_special_tokens=True)
         return text, co
@@ -509,17 +519,17 @@ cells.append(cell("c_extra", """
         print(f"Gold Standard Target: {t['gold']}\\n")
         
         # 1. Base Model
-        base_ans = gen_base(prompt, max_new=40).strip()
-        print(f"  [1] Base Qwen 1.8B (System 1):\\n      {base_ans.replace(prompt, '').strip()}")
+        base_ans = gen_base(prompt, max_new=256).strip()
+        print(f"  [1] Base Qwen 1.8B (System 1):\\n{base_ans.replace(prompt, '').strip()}\\n")
         
         # 2. CIDA Normal (3 rounds)
         cida_normal_ans, co_n = gen_cida_configured(prompt, max_rounds=3, run_rollback=False)
-        print(f"  [2] CIDA v2 (Normal - 3 rounds):\\n      {cida_normal_ans.replace(prompt, '').strip()}")
-        print(f"      Disagreement: {co_n['disagreement'].item():.4f}")
+        print(f"  [2] CIDA v2 (Normal - 3 rounds):\\n{cida_normal_ans.replace(prompt, '').strip()}")
+        print(f"      Disagreement: {co_n['disagreement'].item():.4f}\\n")
         
         # 3. CIDA Scaled + Rollback (15 rounds)
         cida_scaled_ans, co_s = gen_cida_configured(prompt, max_rounds=15, run_rollback=True)
-        print(f"  [3] CIDA v2 (Scaled + Rollback - 15 rounds):\\n      {cida_scaled_ans.replace(prompt, '').strip()}")
+        print(f"  [3] CIDA v2 (Scaled + Rollback - 15 rounds):\\n{cida_scaled_ans.replace(prompt, '').strip()}")
         print(f"      Disagreement: {co_s['disagreement'].item():.4f}")
         print("-" * 80)
 """))
