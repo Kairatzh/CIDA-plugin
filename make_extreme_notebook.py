@@ -184,7 +184,7 @@ cells.append(cell("c3", """
         gm = torch.cat([enc["attention_mask"], pm], dim=1)
         
         ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
-            max_new_tokens=40, do_sample=False,
+            max_new_tokens=128, do_sample=False,
             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
         text = tokenizer.decode(ids[0], skip_special_tokens=True)
         return text, co
@@ -257,7 +257,7 @@ cells.append(cell("c3", """
             gm = torch.cat([enc_concise["attention_mask"], pm], dim=1)
             
             ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
-                max_new_tokens=40, do_sample=False,
+                max_new_tokens=128, do_sample=False,
                 pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
             text_short = tokenizer.decode(ids[0], skip_special_tokens=True)
             short_ans = text_short.replace(prompt_concise, "").strip()
