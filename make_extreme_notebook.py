@@ -115,7 +115,7 @@ cells.append(cell("c2", """
     # Load core configuration
     config = CIDAPluginConfig.from_pretrained(model_repo)
     config.d_input = LLM_HIDDEN
-    config.d_hidden = 256
+    config.d_hidden = 512
     
     # Instantiate models
     cida = CIDAPlugin(config)
