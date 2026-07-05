@@ -308,6 +308,11 @@ cells.append(cell("c4", """
             "name": "Cheryl's Birthday Liar Paradox",
             "prompt": "Cheryl gives Albert and Bernard 10 possible dates: May 15, May 16, May 19, June 17, June 18, July 14, July 16, August 14, August 15, August 17. Albert knows the month, Bernard knows the day. Albert says: 'I don't know the date, but I know Bernard doesn't know either.' Bernard says: 'At first I didn't know, but now I know.' Albert says: 'Now I know too.'\\nTwist: What if Albert is a liar 50% of the time, and Bernard knows this. If the actual date is July 16, deduce step-by-step whether Albert's first statement is a lie, and explain how Bernard resolves the truth to find July 16.",
             "gold": "Albert is telling the truth. Since Albert knows the month is July, he checks July 14 and July 16. Neither is unique, so Bernard couldn't know. Bernard eliminates May and June. Of July 14, July 16, August 14, August 15, August 17: Bernard knows the day is 16, which is unique in July/August, so Bernard knows. Albert then knows July 16."
+        },
+        {
+            "name": "Alice in Wonderland Relation Paradox (AIW)",
+            "prompt": "Alice has 4 brothers and she also has 3 sisters. How many sisters does Alice's brother have? Explain your reasoning step-by-step.",
+            "gold": "4 sisters. Alice is a girl (sister). If Alice has 3 sisters, there are 4 girls total in the family (Alice + 3 sisters). Each of Alice's brothers has all 4 girls as his sisters."
         }
     ]
 
