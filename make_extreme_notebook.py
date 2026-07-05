@@ -295,7 +295,7 @@ cells.append(cell("c4", """
         },
         {
             "name": "Alice in Wonderland Relation Paradox (AIW)",
-            "prompt": "Example:\\nProblem: Bob has 2 brothers and also has 3 sisters. How many sisters does Bob's sister have?\\nReasoning: Bob is a boy. The girls in the family are Bob's 3 sisters. Bob's sister is one of these 3 girls, so her sisters are the other 2 girls. Therefore, Bob's sister has 2 sisters.\\nAnswer: 2\\n\\nProblem: Alice has 4 brothers and she also has 3 sisters. How many sisters does Alice's brother have?\\nReasoning:",
+            "prompt": "Alice has 4 brothers and she also has 3 sisters. How many sisters does Alice's brother have? Explain your reasoning step-by-step.",
             "gold": "4 sisters. Alice is a girl (sister). If Alice has 3 sisters, there are 4 girls total in the family (Alice + 3 sisters). Each of Alice's brothers has all 4 girls as his sisters."
         }
     ]
