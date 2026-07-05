@@ -33,11 +33,19 @@ cells.append(cell("c0", """
     # 1. Install prerequisites
     !pip install -q torch transformers datasets accelerate bitsandbytes torchdiffeq huggingface_hub
     
-    # 2. Clone CIDA repository
-    import sys
-    !git clone https://github.com/Kairatzh/CIDA-plugin.git
-    sys.path.append("CIDA-plugin")
-    !pip install -e CIDA-plugin
+    # 2. Get GitHub Personal Access Token (PAT) securely for private repo cloning
+    import getpass, os, sys
+    token = getpass.getpass("Enter your GitHub Personal Access Token (PAT): ").strip()
+    
+    if token:
+        !git clone https://{token}@github.com/Kairatzh/CIDA-plugin.git
+        sys.path.append("CIDA-plugin")
+        !pip install -q -e CIDA-plugin
+    else:
+        # Fallback
+        !git clone https://github.com/Kairatzh/CIDA-plugin.git
+        sys.path.append("CIDA-plugin")
+        !pip install -q -e CIDA-plugin
     
     import torch
     print(f"PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}")
