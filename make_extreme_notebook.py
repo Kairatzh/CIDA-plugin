@@ -192,13 +192,13 @@ cells.append(cell("c3", """
     # Extreme Inference Pipeline
     def gen_cida_extreme(prompt_raw, max_rounds=15, mcts_branches=4, lsa_steps=8, lsa_lr=0.03):
         flush()
-        enc = tokenizer(prompt_raw, return_tensors="pt").to(DEVICE)
+        enc = tokenizer(chat_format(prompt_raw), return_tensors="pt").to(DEVICE)
+        p_emb = embed_tokens(enc["input_ids"]).detach().float()
         
         with torch.no_grad():
             out = llm(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
                       output_hidden_states=True, use_cache=False)
             h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
-            p_emb = embed_tokens(enc["input_ids"]).detach().float()
             
         # ── 1. Latent MCTS Branching ──
         best_h = h_base.clone()
@@ -241,38 +241,22 @@ cells.append(cell("c3", """
         for p in cida.parameters(): p.requires_grad = True
         for p in proj.parameters(): p.requires_grad = True
         
-        # ── 3. Dual-Pass Generation ──
+        # ── 3. Single-Pass CIDA-Guided CoT Generation ──
         with torch.no_grad():
-            # Pass 1: Concise target Generation
             h_final = best_h + delta
             co_final = cida(pooled=h_final)
             plan = proj(co_final["state_final"].s)
             
-            prompt_concise = chat_format(prompt_raw + "\\nOutput only the final answer concisely (e.g. the path, the value, or the key fact) without explanations.")
-            enc_concise = tokenizer(prompt_concise, return_tensors="pt").to(DEVICE)
-            p_emb_concise = embed_tokens(enc_concise["input_ids"]).detach().float()
-            
-            cat = torch.cat([p_emb_concise, plan], dim=1).to(llm.dtype)
-            pm = torch.ones(1, NUM_PLAN, dtype=enc_concise["attention_mask"].dtype, device=DEVICE)
-            gm = torch.cat([enc_concise["attention_mask"], pm], dim=1)
+            cat = torch.cat([p_emb, plan], dim=1).to(llm.dtype)
+            pm = torch.ones(1, NUM_PLAN, dtype=enc["attention_mask"].dtype, device=DEVICE)
+            gm = torch.cat([enc["attention_mask"], pm], dim=1)
             
             ids = llm.generate(inputs_embeds=cat, attention_mask=gm,
-                max_new_tokens=128, do_sample=False,
+                max_new_tokens=256, do_sample=False,
                 pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
-            text_short = tokenizer.decode(ids[0], skip_special_tokens=True)
-            short_ans = text_short.replace(prompt_concise, "").strip()
+            text = tokenizer.decode(ids[0], skip_special_tokens=True)
             
-            # Pass 2: Base model post-hoc rationalization
-            explain_prompt = chat_format(
-                f"Problem:\\n{prompt_raw}\\n\\n"
-                f"The correct final answer is: {short_ans}.\\n\\n"
-                f"Provide a step-by-step mathematical and logical explanation showing exactly why this answer is correct, verifying all rules and equations."
-            )
-            explanation = gen_base(explain_prompt, max_new=256).strip()
-            final_explanation = explanation.replace(explain_prompt, "").strip()
-            
-        merged_text = f"Final Answer: {short_ans}\\n\\nStep-by-step Rationalization:\\n{final_explanation}"
-        return merged_text, co_final, lsa_losses
+        return text, co_final, lsa_losses
     
     print("Extreme inference engine successfully defined!")
 """))
