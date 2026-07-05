@@ -119,7 +119,7 @@ cells.append(cell("c2", """
     
     # Instantiate models
     cida = CIDAPlugin(config)
-    proj = PlanProjector(d_hidden=config.d_hidden, num_plan_tokens=NUM_PLAN, hidden_size=LLM_HIDDEN)
+    proj = PlanProjector(num_plan_tokens=NUM_PLAN, hidden_size=LLM_HIDDEN)
     
     # Load weights
     cida.load_state_dict(torch.load(plugin_path, map_location="cpu"))
