@@ -154,7 +154,7 @@ cells.append(cell("c3", """
             return score, hint
             
     # 2. RL Optimizer
-    optimizer = optim.Adam(list(cida.parameters()) + list(proj.parameters()), lr=1e-4)
+    optimizer = optim.Adam(list(cida.parameters()) + list(proj.parameters()), lr=2e-5)
     
     def train_rl_step(sample):
         q = sample["question"]
@@ -198,10 +198,12 @@ cells.append(cell("c3", """
         cosine_sim = torch.nn.functional.cosine_similarity(plan_mean, hint_emb)
         align_loss = 1.0 - cosine_sim.mean()
         
-        # Optimize: Combined Policy Gradient and Critique Alignment
-        # This provides dense, high-dimensional gradients to CIDA to prevent getting stuck!
+        # Compute L2 Regularization to keep plan vector within natural embedding manifold
+        reg_loss = torch.mean(plan ** 2)
+        
+        # Optimize: Combined Policy Gradient, Critique Alignment, and L2 Embedding Regularization
         optimizer.zero_grad()
-        rl_loss = disagreement * (1.0 - reward) + 0.3 * align_loss
+        rl_loss = disagreement * (1.0 - reward) + 0.05 * align_loss + 0.01 * reg_loss
         rl_loss.backward()
         optimizer.step()
         
