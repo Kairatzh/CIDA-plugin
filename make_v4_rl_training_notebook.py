@@ -139,22 +139,25 @@ cells.append(cell("c3", """
             t_ids = teacher_llm.generate(**t_enc, max_new_tokens=60, do_sample=False)
             t_ans = tokenizer.decode(t_ids[0, t_enc.input_ids.size(1):], skip_special_tokens=True).strip()
             
-        # Parse JSON output
+        # Parse JSON output with robust regex fallback
         try:
-            # Find JSON block using regex if any extra characters were output
-            match = re.search(r'\\{.*\\}', t_ans, re.DOTALL)
-            data = json.loads(match.group(0) if match else t_ans)
+            # Clean markdown formatting if present
+            t_ans_clean = t_ans.replace("```json", "").replace("```", "").strip()
+            match = re.search(r'\\{.*\\}', t_ans_clean, re.DOTALL)
+            data = json.loads(match.group(0) if match else t_ans_clean)
             score = min(max(float(data.get("score", 0.0)), 0.0), 1.0)
             hint = data.get("hint", "Focus on the logical constraints of the question.").strip()
             return score, hint
-        except:
-            # Fallback
-            score = 0.5 if correct_answer in student_response else 0.0
+        except Exception as parse_err:
+            # Regex fallback extraction for 'score'
+            score_match = re.search(r'"score":\\s*([0-9.]+)', t_ans)
+            score = float(score_match.group(1)) if score_match else (0.5 if correct_answer in student_response else 0.0)
             hint = "Focus on the logical constraints of the question."
             return score, hint
             
-    # 2. RL Optimizer
+    # 2. RL Optimizer & Cosine Annealing Scheduler
     optimizer = optim.Adam(list(cida.parameters()) + list(proj.parameters()), lr=2e-5)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=5000, eta_min=1e-6)
     
     def train_rl_step(sample):
         q = sample["question"]
@@ -188,7 +191,6 @@ cells.append(cell("c3", """
         reward, hint_text = evaluate_with_teacher(q, student_ans, correct_ans)
         
         # Get embedding of the teacher's hint under the student's embedding layer
-        # This gives a dense target direction for CIDA's plan vector!
         hint_tokens = tokenizer(hint_text, return_tensors="pt").input_ids.to(DEVICE)
         with torch.no_grad():
             hint_emb = student_llm.get_input_embeddings()(hint_tokens).mean(dim=1).float() # shape: (1, d_llm)
@@ -207,22 +209,30 @@ cells.append(cell("c3", """
         rl_loss.backward()
         optimizer.step()
         
+        # Step the learning rate scheduler
+        scheduler.step()
+        
         return reward, hint_text, rl_loss.item(), student_ans
         
     print("✅ RL Policy Training Engine with Critique Alignment compiled!")
+
 """))
 
 # ── Cell 4: SOTA Dataset Load & Training Loop ──
 cells.append(cell("c4", """
     from datasets import load_dataset
     import random
+    import gc
     
-    print("Loading OpenThoughts-114k (SOTA reasoning traces)...")
+    # 1. Dataset loading (Scales up to 5000 samples for the full RL run)
+    MAX_SAMPLES = 5000
+    
+    print(f"Loading up to {MAX_SAMPLES} OpenThoughts-114k SOTA tasks...")
     try:
         ot_dataset = load_dataset("open-thoughts/OpenThoughts-114k", "metadata", split="train", streaming=True)
         rl_dataset = []
         for i, item in enumerate(ot_dataset):
-            if len(rl_dataset) >= 1000: break
+            if len(rl_dataset) >= MAX_SAMPLES: break
             q = item.get("problem", "")
             cot = item.get("deepseek_reasoning", "")
             ans = item.get("deepseek_solution", "")
@@ -245,17 +255,27 @@ cells.append(cell("c4", """
         ]
         
     print("Starting Teacher-Guided RL Policy training on OpenThoughts...")
-    for epoch in range(3):
-        total_reward = 0.0
-        # Run on 100 samples per epoch to demonstrate training speedup
-        for idx, sample in enumerate(rl_dataset[:100]):
-            reward, hint_text, loss, ans = train_rl_step(sample)
-            total_reward += reward
-            if (idx + 1) % 10 == 0:
-                print(f"Epoch {epoch+1}/3 | Step {idx+1}/100 | Avg Reward: {total_reward/(idx+1):.2f} | Loss: {loss:.4f}")
-                print(f"  -> Teacher Hint: '{hint_text}'")
-                print(f"  -> Sample Student Answer: {ans[:80]}...")
-                print("-" * 50)
+    # Put CIDA models explicitly in training mode
+    cida.train()
+    proj.train()
+    
+    total_reward = 0.0
+    for idx, sample in enumerate(rl_dataset):
+        reward, hint_text, loss, ans = train_rl_step(sample)
+        total_reward += reward
+        
+        # Log training status every 50 steps
+        if (idx + 1) % 50 == 0:
+            current_lr = scheduler.get_last_lr()[0]
+            print(f"Step {idx+1}/{len(rl_dataset)} | Avg Reward: {total_reward/(idx+1):.2f} | Loss: {loss:.4f} | LR: {current_lr:.2e}")
+            print(f"  -> Teacher Hint: '{hint_text}'")
+            print(f"  -> Sample Student Answer: {ans[:120]}...")
+            print("-" * 60)
+            
+        # Periodic memory reclamation to prevent OOM fragmentation on long 5000-sample runs
+        if (idx + 1) % 100 == 0:
+            gc.collect()
+            torch.cuda.empty_cache()
 """))
 
 # ── Cell 5: Side-by-Side Comparison (Base vs CIDA v4 vs CIDA v5) ──
