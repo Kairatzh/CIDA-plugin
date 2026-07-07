@@ -216,16 +216,17 @@ cells.append(cell("c4", """
     
     print("Loading OpenThoughts-114k (SOTA reasoning traces)...")
     try:
-        ot_dataset = load_dataset("open-thoughts/OpenThoughts-114k", split="train", streaming=True)
+        ot_dataset = load_dataset("open-thoughts/OpenThoughts-114k", "metadata", split="train", streaming=True)
         rl_dataset = []
         for i, item in enumerate(ot_dataset):
             if len(rl_dataset) >= 1000: break
-            q = item.get("instruction", item.get("prompt", ""))
-            cot = item.get("thought", "")
-            ans = item.get("output", item.get("response", ""))
+            q = item.get("problem", "")
+            cot = item.get("deepseek_reasoning", "")
+            ans = item.get("deepseek_solution", "")
+            domain = item.get("domain", "")
             
-            # Keep reasoning/logic tasks with verifiable answers
-            if len(q) > 30 and len(ans) > 0 and len(cot) > 100:
+            # Keep reasoning/logic tasks with verifiable answers from math, logic, puzzles or science domains
+            if domain in ["math", "puzzles", "logic", "science"] and len(q) > 30 and len(ans) > 0 and len(cot) > 100:
                 rl_dataset.append({
                     "question": q,
                     "answer": ans
