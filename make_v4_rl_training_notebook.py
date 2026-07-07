@@ -166,6 +166,7 @@ cells.append(cell("c3", """
         # Student Forward Pass
         with torch.no_grad():
             out = student_llm(input_ids=enc.input_ids, attention_mask=enc.attention_mask, output_hidden_states=True)
+            compute_dtype = out.hidden_states[-1].dtype
             h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
             p_emb = student_llm.get_input_embeddings()(enc.input_ids).detach()
             
@@ -177,7 +178,7 @@ cells.append(cell("c3", """
         
         # Generate answer from student model
         with torch.no_grad():
-            cat = torch.cat([p_emb, plan.to(p_emb.dtype)], dim=1).to(p_emb.dtype)
+            cat = torch.cat([p_emb.to(compute_dtype), plan.to(compute_dtype)], dim=1).to(compute_dtype)
             pm = torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=DEVICE)
             gm = torch.cat([enc.attention_mask, pm], dim=1)
             ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=100, do_sample=True, temperature=0.7)
