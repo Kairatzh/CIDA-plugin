@@ -33,6 +33,7 @@ from .diagnostics import DebateDiagnostics
 from .ttt import TestTimeTrainer
 from .liquid_dynamics import LiquidDeliberationSolver
 from .hf import wrap_hf_model, HFModelWithCIDA, wrap_hf_causal_lm, HFModelForCausalLMWithCIDA
+from .projector import LatentAEProjector, TargetEncoder
 
 __all__ = [
     # Главный интерфейс
@@ -43,6 +44,8 @@ __all__ = [
     "CidaModel",
     "CidaConfig",
     "PlanProjector",
+    "LatentAEProjector",
+    "TargetEncoder",
     "wrap_hf_model",
     "HFModelWithCIDA",
     "wrap_hf_causal_lm",
