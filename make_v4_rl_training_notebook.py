@@ -329,7 +329,7 @@ cells.append(cell("c5", """
         
         # 1. Base LLM generation (No CIDA)
         with torch.no_grad():
-            ids = student_llm.generate(**enc, max_new_tokens=100, do_sample=False)
+            ids = student_llm.generate(**enc, max_new_tokens=100, do_sample=True, temperature=0.7)
             ans_base = tokenizer.decode(ids[0, enc.input_ids.size(1):], skip_special_tokens=True).strip()
             score_base, _ = evaluate_with_teacher(q, ans_base, correct_ans)
             
@@ -349,7 +349,7 @@ cells.append(cell("c5", """
                 pm = torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=DEVICE)
                 gm = torch.cat([enc.attention_mask, pm], dim=1)
                 
-                ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=100, do_sample=False)
+                ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=100, do_sample=True, temperature=0.7)
                 ans_v4 = tokenizer.decode(ids[0], skip_special_tokens=True).strip()
                 score_v4, _ = evaluate_with_teacher(q, ans_v4, correct_ans)
                 
@@ -366,7 +366,7 @@ cells.append(cell("c5", """
             pm = torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=DEVICE)
             gm = torch.cat([enc.attention_mask, pm], dim=1)
             
-            ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=100, do_sample=False)
+            ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=100, do_sample=True, temperature=0.7)
             ans_v5 = tokenizer.decode(ids[0], skip_special_tokens=True).strip()
             score_v5, _ = evaluate_with_teacher(q, ans_v5, correct_ans)
             
@@ -420,7 +420,16 @@ cells.append(cell("c6", """
         samples = list(ds_folio)
         random.seed(42)
         random.shuffle(samples)
-        datasets_eval["FOLIO (FOL)"] = [{"q": f"Premises:\\n" + "\\n".join(s['premises']) + f"\\nConclusion: {s['conclusion']}\\nIs the conclusion True, False, or Unknown? Answer with just the word.", "a": s['label'].strip()} for s in samples[:EVAL_SAMPLES]]
+        
+        folio_formatted = []
+        for s in samples[:EVAL_SAMPLES]:
+            prems = s['premises']
+            prems_str = "\n".join(prems) if isinstance(prems, list) else str(prems)
+            folio_formatted.append({
+                "q": f"Premises:\n{prems_str}\nConclusion: {s['conclusion']}\nIs the conclusion True, False, or Unknown? Answer with just the word.",
+                "a": s['label'].strip()
+            })
+        datasets_eval["FOLIO (FOL)"] = folio_formatted
         print(f"Loaded {len(datasets_eval['FOLIO (FOL)'])} FOLIO samples.")
     except Exception as e:
         print(f"Error loading FOLIO: {e}")
@@ -440,7 +449,7 @@ cells.append(cell("c6", """
         else: # FOLIO
             if "TRUE" in text: return "TRUE"
             if "FALSE" in text: return "FALSE"
-            return "UNKNOWN"
+            return "UNCERTAIN"
             
     # Evaluate active models in memory
     results = {"base": {}, "cida_v5": {}}
@@ -461,7 +470,7 @@ cells.append(cell("c6", """
             
             # Base generation
             with torch.no_grad():
-                ids = student_llm.generate(**enc, max_new_tokens=40, do_sample=False)
+                ids = student_llm.generate(**enc, max_new_tokens=60, do_sample=True, temperature=0.7)
                 ans_base = tokenizer.decode(ids[0, enc.input_ids.size(1):], skip_special_tokens=True).strip()
                 parsed_base = extract_ans(ans_base, ds_name)
                 if parsed_base == s['a'].upper():
@@ -480,7 +489,7 @@ cells.append(cell("c6", """
                 pm = torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=DEVICE)
                 gm = torch.cat([enc.attention_mask, pm], dim=1)
                 
-                ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=40, do_sample=False)
+                ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=60, do_sample=True, temperature=0.7)
                 ans_v5 = tokenizer.decode(ids[0], skip_special_tokens=True).strip()
                 parsed_v5 = extract_ans(ans_v5, ds_name)
                 if parsed_v5 == s['a'].upper():
