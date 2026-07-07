@@ -439,7 +439,7 @@ cells.append(cell("c6", """
         prompt = (
             f"<|im_start|>system\\n"
             f"You are a precise grading assistant. Evaluate if the answers of Model A and Model B are correct according to the Reference Correct Answer.\\n"
-            f"Respond ONLY with a JSON object in this format: {{"base_correct": 0 or 1, "cida_correct": 0 or 1}}\\n"
+            f"Respond ONLY with a JSON object in this format: {{'base_correct': 0 or 1, 'cida_correct': 0 or 1}}\\n"
             f"<|im_end|>\\n"
             f"<|im_start|>user\\n"
             f"Question:\\n{q}\\n\\n"
