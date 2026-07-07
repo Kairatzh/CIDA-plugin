@@ -66,21 +66,20 @@ cells.append(cell("c2", """
     datasets_eval = {}
     EVAL_SAMPLES = 30  # Statistically valid size for rapid zero-shot comparison in Colab
     
-    # 1. LogiQA (Logical Comprehension)
+    # 1. BBH (Formal Fallacies)
     try:
-        ds_logiqa = load_dataset("lucasmccabe/logiqa", split="test")
-        samples = list(ds_logiqa)
+        ds_fallacy = load_dataset("lukaemon/bbh", "formal_fallacies", split="test")
+        samples = list(ds_fallacy)
         random.seed(42)
         random.shuffle(samples)
         parsed = []
         for s in samples[:EVAL_SAMPLES]:
-            options = f"A) {s['options'][0]}\\nB) {s['options'][1]}\\nC) {s['options'][2]}\\nD) {s['options'][3]}"
-            q = f"Context: {s['context']}\\nQuestion: {s['query']}\\nOptions:\\n{options}\\nJust answer with the correct letter."
-            parsed.append({"q": q, "a": ["A", "B", "C", "D"][s["correct_option"]]})
-        datasets_eval["LogiQA"] = parsed
-        print(f"Loaded {len(parsed)} LogiQA samples.")
+            q = f"Deductive Argument: {s['input']}\\nIs this argument valid or invalid? Answer with just the word."
+            parsed.append({"q": q, "a": s['target'].strip()})
+        datasets_eval["BBH (Fallacies)"] = parsed
+        print(f"Loaded {len(parsed)} BBH Fallacies samples.")
     except Exception as e:
-        print(f"Error loading LogiQA: {e}")
+        print(f"Error loading BBH Fallacies: {e}")
         
     # 2. BIG-Bench Hard (Logical Deduction - Five Objects)
     try:
@@ -179,11 +178,15 @@ cells.append(cell("c3", """
             
     def extract_answer(text, ds_type):
         text = text.upper().strip()
-        if ds_type in ["LogiQA", "BBH (Logical)"]:
+        if ds_type in ["BBH (Logical)"]:
             m = re.search(r'\\b([A-D])\\b', text)
             if m: return m.group(1)
             m2 = re.search(r'([A-D])', text)
             return m2.group(1) if m2 else text
+        elif ds_type == "BBH (Fallacies)":
+            if "INVALID" in text: return "INVALID"
+            if "VALID" in text: return "VALID"
+            return text
         else: # FOLIO
             if "TRUE" in text: return "TRUE"
             if "FALSE" in text: return "FALSE"

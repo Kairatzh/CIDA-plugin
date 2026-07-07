@@ -256,6 +256,97 @@ cells.append(cell("c4", """
                 print("-" * 50)
 """))
 
+# ── Cell 5: Side-by-Side Comparison (Base vs CIDA v4 vs CIDA v5) ──
+cells.append(cell("c5", """
+    import copy
+    
+    print("Loading pre-trained CIDA v4 (SFT) for comparison...")
+    # Initialize a duplicate of the architecture
+    cida_v4 = copy.deepcopy(cida)
+    proj_v4 = copy.deepcopy(proj)
+    
+    # Locate CIDA v4 SFT weights (either local or drive)
+    drive_path = "/content/drive/MyDrive/cida_v4_universal_weights"
+    local_path = "cida_v4_universal_weights"
+    v4_dir = drive_path if os.path.exists(os.path.join(drive_path, "pytorch_model.bin")) else (local_path if os.path.exists(os.path.join(local_path, "pytorch_model.bin")) else None)
+    
+    if v4_dir:
+        try:
+            cida_v4.load_state_dict(torch.load(os.path.join(v4_dir, "pytorch_model.bin"), map_location="cpu"))
+            proj_v4.load_state_dict(torch.load(os.path.join(v4_dir, "projector.pt"), map_location="cpu"))
+            print("✅ CIDA v4 (SFT) weights loaded successfully.")
+        except Exception as e:
+            print(f"Failed to load CIDA v4: {e}. Will compare Base vs CIDA v5 only.")
+            cida_v4 = None
+    else:
+        print("⚠️ CIDA v4 SFT weights not found. Will compare Base vs CIDA v5 RL only.")
+        cida_v4 = None
+
+    # Grab 5 fresh logic questions from OpenThoughts (out-of-distribution, from step 150 onwards)
+    eval_samples = rl_dataset[150:155] if len(rl_dataset) > 155 else rl_dataset[:5]
+    
+    print("\\n" + "="*80)
+    print("      🏆 SIDE-BY-SIDE EVALUATION: BASE vs CIDA V4 (SFT) vs CIDA V5 (RL) 🏆")
+    print("="*80)
+    
+    for idx, sample in enumerate(eval_samples):
+        q = sample["question"]
+        correct_ans = sample["answer"]
+        
+        prompt = f"<|im_start|>system\\nSolve logically.\\n<|im_end|>\\n<|im_start|>user\\n{q}\\n<|im_end|>\\n<|im_start|>assistant\\n"
+        enc = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        
+        # 1. Base LLM generation (No CIDA)
+        with torch.no_grad():
+            ids = student_llm.generate(**enc, max_new_tokens=100, do_sample=False)
+            ans_base = tokenizer.decode(ids[0, enc.input_ids.size(1):], skip_special_tokens=True).strip()
+            score_base, _ = evaluate_with_teacher(q, ans_base, correct_ans)
+            
+        # 2. CIDA v4 (SFT) generation
+        score_v4 = 0.0
+        ans_v4 = "N/A"
+        if cida_v4:
+            with torch.no_grad():
+                out = student_llm(input_ids=enc.input_ids, attention_mask=enc.attention_mask, output_hidden_states=True)
+                h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
+                co = cida_v4(pooled=h_base)
+                plan = proj_v4(co["state_final"].s)
+                
+                p_emb = student_llm.get_input_embeddings()(enc.input_ids).detach()
+                cat = torch.cat([p_emb.to(compute_dtype), plan.to(compute_dtype)], dim=1).to(compute_dtype)
+                pm = torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=DEVICE)
+                gm = torch.cat([enc.attention_mask, pm], dim=1)
+                
+                ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=100, do_sample=False)
+                ans_v4 = tokenizer.decode(ids[0], skip_special_tokens=True).strip()
+                score_v4, _ = evaluate_with_teacher(q, ans_v4, correct_ans)
+                
+        # 3. CIDA v5 (RL-aligned) generation
+        with torch.no_grad():
+            out = student_llm(input_ids=enc.input_ids, attention_mask=enc.attention_mask, output_hidden_states=True)
+            h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
+            co = cida(pooled=h_base)
+            plan = proj(co["state_final"].s)
+            
+            p_emb = student_llm.get_input_embeddings()(enc.input_ids).detach()
+            cat = torch.cat([p_emb.to(compute_dtype), plan.to(compute_dtype)], dim=1).to(compute_dtype)
+            pm = torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=DEVICE)
+            gm = torch.cat([enc.attention_mask, pm], dim=1)
+            
+            ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=100, do_sample=False)
+            ans_v5 = tokenizer.decode(ids[0], skip_special_tokens=True).strip()
+            score_v5, _ = evaluate_with_teacher(q, ans_v5, correct_ans)
+            
+        print(f"\\n📝 QUESTION {idx+1}: {q[:120]}...")
+        print(f"🎯 CORRECT ANSWER: {correct_ans}")
+        print("-" * 50)
+        print(f"🔹 [Base LLM] Score: {score_base:.2f} | Answer: {ans_base[:150]}...")
+        if cida_v4:
+            print(f"🔸 [CIDA v4 SFT] Score: {score_v4:.2f} | Answer: {ans_v4[:150]}...")
+        print(f"🟢 [CIDA v5 RL] Score: {score_v5:.2f} | Answer: {ans_v5[:150]}...")
+        print("="*80)
+"""))
+
 nb = {
     "cells": cells,
     "metadata": {
