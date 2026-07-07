@@ -380,6 +380,158 @@ cells.append(cell("c5", """
         print("="*80)
 """))
 
+# ── Cell 6: Rapid OOD Benchmarking Dashboard ──
+cells.append(cell("c6", """
+    import random
+    import re
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from datasets import load_dataset
+    
+    print("Loading OOD Benchmarks (BBH & FOLIO)...")
+    datasets_eval = {}
+    EVAL_SAMPLES = 20  # Fast evaluation size to run in 3-4 minutes
+    
+    # 1. BBH Fallacies
+    try:
+        ds_fallacy = load_dataset("lukaemon/bbh", "formal_fallacies", split="test")
+        samples = list(ds_fallacy)
+        random.seed(42)
+        random.shuffle(samples)
+        datasets_eval["BBH (Fallacies)"] = [{"q": f"Deductive Argument:\\n{s['input']}\\nIs this argument valid or invalid? Answer with just the word.", "a": s['target'].strip()} for s in samples[:EVAL_SAMPLES]]
+        print(f"Loaded {len(datasets_eval['BBH (Fallacies)'])} BBH Fallacies samples.")
+    except Exception as e:
+        print(f"Error loading BBH Fallacies: {e}")
+        
+    # 2. BBH Logical Deduction
+    try:
+        ds_bbh = load_dataset("lukaemon/bbh", "logical_deduction_five_objects", split="test")
+        samples = list(ds_bbh)
+        random.seed(42)
+        random.shuffle(samples)
+        datasets_eval["BBH (Logical)"] = [{"q": f"Logic Puzzle:\\n{s['input']}\\nJust answer with the correct letter.", "a": s['target'].strip("()")} for s in samples[:EVAL_SAMPLES]]
+        print(f"Loaded {len(datasets_eval['BBH (Logical)'])} BBH Logical samples.")
+    except Exception as e:
+        print(f"Error loading BBH: {e}")
+        
+    # 3. FOLIO
+    try:
+        ds_folio = load_dataset("tasksource/folio", split="validation")
+        samples = list(ds_folio)
+        random.seed(42)
+        random.shuffle(samples)
+        datasets_eval["FOLIO (FOL)"] = [{"q": f"Premises:\\n" + "\\n".join(s['premises']) + f"\\nConclusion: {s['conclusion']}\\nIs the conclusion True, False, or Unknown? Answer with just the word.", "a": s['label'].strip()} for s in samples[:EVAL_SAMPLES]]
+        print(f"Loaded {len(datasets_eval['FOLIO (FOL)'])} FOLIO samples.")
+    except Exception as e:
+        print(f"Error loading FOLIO: {e}")
+        
+    # Extract answers helper function
+    def extract_ans(text, ds_type):
+        text = text.upper().strip()
+        if ds_type == "BBH (Logical)":
+            m = re.search(r'\\b([A-E])\\b', text)
+            if m: return m.group(1)
+            m2 = re.search(r'([A-E])', text)
+            return m2.group(1) if m2 else text
+        elif ds_type == "BBH (Fallacies)":
+            if "INVALID" in text: return "INVALID"
+            if "VALID" in text: return "VALID"
+            return text
+        else: # FOLIO
+            if "TRUE" in text: return "TRUE"
+            if "FALSE" in text: return "FALSE"
+            return "UNKNOWN"
+            
+    # Evaluate active models in memory
+    results = {"base": {}, "cida_v5": {}}
+    
+    # Temporarily set models to eval mode
+    student_llm.eval()
+    cida.eval()
+    proj.eval()
+    
+    for ds_name, samples in datasets_eval.items():
+        print(f"\\nEvaluating {ds_name}...")
+        correct_base = 0
+        correct_cida = 0
+        
+        for idx, s in enumerate(samples):
+            prompt = f"<|im_start|>system\\nSolve logically.\\n<|im_end|>\\n<|im_start|>user\\n{s['q']}\\n<|im_end|>\\n<|im_start|>assistant\\n"
+            enc = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+            
+            # Base generation
+            with torch.no_grad():
+                ids = student_llm.generate(**enc, max_new_tokens=40, do_sample=False)
+                ans_base = tokenizer.decode(ids[0, enc.input_ids.size(1):], skip_special_tokens=True).strip()
+                parsed_base = extract_ans(ans_base, ds_name)
+                if parsed_base == s['a'].upper():
+                    correct_base += 1
+                    
+            # CIDA generation
+            with torch.no_grad():
+                out = student_llm(input_ids=enc.input_ids, attention_mask=enc.attention_mask, output_hidden_states=True)
+                compute_dtype = out.hidden_states[-1].dtype
+                h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
+                co = cida(pooled=h_base)
+                plan = proj(co["state_final"].s)
+                
+                p_emb = student_llm.get_input_embeddings()(enc.input_ids).detach()
+                cat = torch.cat([p_emb.to(compute_dtype), plan.to(compute_dtype)], dim=1).to(compute_dtype)
+                pm = torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=DEVICE)
+                gm = torch.cat([enc.attention_mask, pm], dim=1)
+                
+                ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=40, do_sample=False)
+                ans_v5 = tokenizer.decode(ids[0], skip_special_tokens=True).strip()
+                parsed_v5 = extract_ans(ans_v5, ds_name)
+                if parsed_v5 == s['a'].upper():
+                    correct_cida += 1
+                    
+        acc_base = (correct_base / len(samples)) * 100
+        acc_cida = (correct_cida / len(samples)) * 100
+        results["base"][ds_name] = acc_base
+        results["cida_v5"][ds_name] = acc_cida
+        print(f"📊 {ds_name} -> Base: {acc_base:.1f}% | CIDA v5: {acc_cida:.1f}% (Delta: {acc_cida - acc_base:+.1f}%)")
+        
+    # Plot dashboard
+    datasets_names = list(datasets_eval.keys())
+    base_accs = [results["base"][d] for d in datasets_names]
+    cida_accs = [results["cida_v5"][d] for d in datasets_names]
+    deltas = [cida_accs[i] - base_accs[i] for i in range(len(datasets_names))]
+    
+    plt.figure(figsize=(12, 5))
+    plt.style.use('dark_background')
+    
+    x = np.arange(len(datasets_names))
+    width = 0.35
+    
+    # Subplot 1: Absolute Accuracies
+    ax1 = plt.subplot(1, 2, 1)
+    ax1.bar(x - width/2, base_accs, width, label="Base LLM (1.5B)", color="#475569")
+    ax1.bar(x + width/2, cida_accs, width, label="CIDA v5 (RL)", color="#10b981", edgecolor="#34d399", linewidth=1.5)
+    ax1.set_ylabel('Accuracy (%)')
+    ax1.set_title('Absolute Performance')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(datasets_names)
+    ax1.legend(loc='upper left', facecolor='#1e293b')
+    ax1.set_ylim(0, 100)
+    ax1.grid(axis='y', linestyle='--', alpha=0.1)
+    
+    # Subplot 2: Deltas
+    ax2 = plt.subplot(1, 2, 2)
+    colors = ['#10b981' if d >= 0 else '#ef4444' for d in deltas]
+    ax2.bar(datasets_names, deltas, color=colors, width=0.4)
+    ax2.set_ylabel('Net Gain Delta (%)')
+    ax2.set_title('Logic Improvement Delta (CIDA v5 - Base)')
+    ax2.set_ylim(-20, 50)
+    ax2.axhline(0, color='gray', linestyle='-', linewidth=0.8)
+    ax2.grid(axis='y', linestyle='--', alpha=0.1)
+    
+    plt.tight_layout()
+    plt.savefig("cida_v5_benchmark_dashboard.png")
+    plt.show()
+    print("📈 Saved dashboard to: cida_v5_benchmark_dashboard.png")
+"""))
+
 nb = {
     "cells": cells,
     "metadata": {
