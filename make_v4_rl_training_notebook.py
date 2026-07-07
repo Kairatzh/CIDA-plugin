@@ -424,9 +424,9 @@ cells.append(cell("c6", """
         folio_formatted = []
         for s in samples[:EVAL_SAMPLES]:
             prems = s['premises']
-            prems_str = "\n".join(prems) if isinstance(prems, list) else str(prems)
+            prems_str = "\\n".join(prems) if isinstance(prems, list) else str(prems)
             folio_formatted.append({
-                "q": f"Premises:\n{prems_str}\nConclusion: {s['conclusion']}\nIs the conclusion True, False, or Unknown? Answer with just the word.",
+                "q": f"Premises:\\n{prems_str}\\nConclusion: {s['conclusion']}\\nIs the conclusion True, False, or Unknown? Answer with just the word.",
                 "a": s['label'].strip()
             })
         datasets_eval["FOLIO (FOL)"] = folio_formatted
