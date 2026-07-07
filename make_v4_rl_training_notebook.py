@@ -390,7 +390,7 @@ cells.append(cell("c6", """
     
     print("Loading OOD Benchmarks (BBH & FOLIO)...")
     datasets_eval = {}
-    EVAL_SAMPLES = 20  # Fast evaluation size to run in 3-4 minutes
+    EVAL_SAMPLES = 10  # Fast evaluation size to run in 3-4 minutes
     
     # 1. BBH Fallacies
     try:
@@ -434,22 +434,47 @@ cells.append(cell("c6", """
     except Exception as e:
         print(f"Error loading FOLIO: {e}")
         
-    # Extract answers helper function
-    def extract_ans(text, ds_type):
-        text = text.upper().strip()
-        if ds_type == "BBH (Logical)":
-            m = re.search(r'\\b([A-E])\\b', text)
-            if m: return m.group(1)
-            m2 = re.search(r'([A-E])', text)
-            return m2.group(1) if m2 else text
-        elif ds_type == "BBH (Fallacies)":
-            if "INVALID" in text: return "INVALID"
-            if "VALID" in text: return "VALID"
-            return text
-        else: # FOLIO
-            if "TRUE" in text: return "TRUE"
-            if "FALSE" in text: return "FALSE"
-            return "UNCERTAIN"
+    # Teacher Grading Helper Function
+    def evaluate_answers_with_teacher(q, correct_ans, ans_base, ans_v5):
+        prompt = (
+            f"<|im_start|>system\\n"
+            f"You are a precise grading assistant. Evaluate if the answers of Model A and Model B are correct according to the Reference Correct Answer.\\n"
+            f"Respond ONLY with a JSON object in this format: {{"base_correct": 0 or 1, "cida_correct": 0 or 1}}\\n"
+            f"<|im_end|>\\n"
+            f"<|im_start|>user\\n"
+            f"Question:\\n{q}\\n\\n"
+            f"Reference Correct Answer:\\n{correct_ans}\\n\\n"
+            f"Model A's Answer:\\n{ans_base}\\n\\n"
+            f"Model B's Answer:\\n{ans_v5}\\n"
+            f"<|im_end|>\\n"
+            f"<|im_start|>assistant\\n"
+        )
+        t_enc = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            t_ids = teacher_llm.generate(**t_enc, max_new_tokens=40, do_sample=False)
+            t_ans = tokenizer.decode(t_ids[0, t_enc.input_ids.size(1):], skip_special_tokens=True).strip()
+            
+        base_correct = 0
+        cida_correct = 0
+        try:
+            t_ans_clean = t_ans.replace("```json", "").replace("```", "").strip()
+            match = re.search(r'\\{.*\\}', t_ans_clean, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+            else:
+                data = json.loads(t_ans_clean)
+            base_correct = int(data.get("base_correct", 0))
+            cida_correct = int(data.get("cida_correct", 0))
+        except Exception:
+            # Fallback regex
+            base_match = re.search(r'"base_correct":\\s*([01])', t_ans)
+            cida_match = re.search(r'"cida_correct":\\s*([01])', t_ans)
+            if base_match: base_correct = int(base_match.group(1))
+            if cida_match: cida_correct = int(cida_match.group(1))
+            if not base_match and not cida_match:
+                if "base_correct\\": 1" in t_ans or "base_correct\\":1" in t_ans: base_correct = 1
+                if "cida_correct\\": 1" in t_ans or "cida_correct\\":1" in t_ans: cida_correct = 1
+        return base_correct, cida_correct
             
     # Evaluate active models in memory
     results = {"base": {}, "cida_v5": {}}
@@ -472,9 +497,6 @@ cells.append(cell("c6", """
             with torch.no_grad():
                 ids = student_llm.generate(**enc, max_new_tokens=60, do_sample=True, temperature=0.7)
                 ans_base = tokenizer.decode(ids[0, enc.input_ids.size(1):], skip_special_tokens=True).strip()
-                parsed_base = extract_ans(ans_base, ds_name)
-                if parsed_base == s['a'].upper():
-                    correct_base += 1
                     
             # CIDA generation
             with torch.no_grad():
@@ -491,16 +513,18 @@ cells.append(cell("c6", """
                 
                 ids = student_llm.generate(inputs_embeds=cat, attention_mask=gm, max_new_tokens=60, do_sample=True, temperature=0.7)
                 ans_v5 = tokenizer.decode(ids[0], skip_special_tokens=True).strip()
-                parsed_v5 = extract_ans(ans_v5, ds_name)
-                if parsed_v5 == s['a'].upper():
-                    correct_cida += 1
+            
+            # Teacher Evaluation
+            base_correct, cida_correct = evaluate_answers_with_teacher(s['q'], s['a'], ans_base, ans_v5)
+            correct_base += base_correct
+            correct_cida += cida_correct
             
             # Print debug for first 3 samples
             if idx < 3:
                 print(f"  [Sample {idx+1}] Q: {s['q'][:100]}...")
-                print(f"    Base Raw: '{ans_base}' -> Parsed: '{parsed_base}'")
-                print(f"    CIDA Raw: '{ans_v5}' -> Parsed: '{parsed_v5}'")
-                print(f"    Target:   '{s['a'].upper()}'")
+                print(f"    Base: '{ans_base}' -> Graded: {base_correct}")
+                print(f"    CIDA: '{ans_v5}' -> Graded: {cida_correct}")
+                print(f"    Target: '{s['a']}'")
                 print("-" * 40)
                     
         acc_base = (correct_base / len(samples)) * 100
