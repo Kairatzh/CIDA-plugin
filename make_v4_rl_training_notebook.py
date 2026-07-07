@@ -485,6 +485,14 @@ cells.append(cell("c6", """
                 parsed_v5 = extract_ans(ans_v5, ds_name)
                 if parsed_v5 == s['a'].upper():
                     correct_cida += 1
+            
+            # Print debug for first 3 samples
+            if idx < 3:
+                print(f"  [Sample {idx+1}] Q: {s['q'][:100]}...")
+                print(f"    Base Raw: '{ans_base}' -> Parsed: '{parsed_base}'")
+                print(f"    CIDA Raw: '{ans_v5}' -> Parsed: '{parsed_v5}'")
+                print(f"    Target:   '{s['a'].upper()}'")
+                print("-" * 40)
                     
         acc_base = (correct_base / len(samples)) * 100
         acc_cida = (correct_cida / len(samples)) * 100
