@@ -69,14 +69,23 @@ cells.append(cell("c2", """
     tokenizer = AutoTokenizer.from_pretrained(STUDENT_NAME, padding_side="left")
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
     
-    bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16, bnb_4bit_quant_type="nf4")
+    # Config for teacher quantization
+    bnb_teacher = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4")
     
-    print("Loading Student LLM (1.5B)...")
-    student_llm = AutoModelForCausalLM.from_pretrained(STUDENT_NAME, quantization_config=bnb, device_map="auto")
+    print("Loading Student LLM (1.5B) in native bfloat16 (Fast & Accurate)...")
+    student_llm = AutoModelForCausalLM.from_pretrained(
+        STUDENT_NAME, 
+        torch_dtype=torch.bfloat16, 
+        device_map="auto"
+    )
     student_llm.eval()
     
-    print("Loading Teacher LLM (7B)...")
-    teacher_llm = AutoModelForCausalLM.from_pretrained(TEACHER_NAME, quantization_config=bnb, device_map="auto")
+    print("Loading Teacher LLM (7B) in 4-bit NF4...")
+    teacher_llm = AutoModelForCausalLM.from_pretrained(
+        TEACHER_NAME, 
+        quantization_config=bnb_teacher, 
+        device_map="auto"
+    )
     teacher_llm.eval()
     
     # Initialize CIDA config
