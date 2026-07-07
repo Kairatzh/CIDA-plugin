@@ -308,6 +308,7 @@ cells.append(cell("c5", """
         if cida_v4:
             with torch.no_grad():
                 out = student_llm(input_ids=enc.input_ids, attention_mask=enc.attention_mask, output_hidden_states=True)
+                compute_dtype = out.hidden_states[-1].dtype
                 h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
                 co = cida_v4(pooled=h_base)
                 plan = proj_v4(co["state_final"].s)
@@ -324,6 +325,7 @@ cells.append(cell("c5", """
         # 3. CIDA v5 (RL-aligned) generation
         with torch.no_grad():
             out = student_llm(input_ids=enc.input_ids, attention_mask=enc.attention_mask, output_hidden_states=True)
+            compute_dtype = out.hidden_states[-1].dtype
             h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
             co = cida(pooled=h_base)
             plan = proj(co["state_final"].s)
