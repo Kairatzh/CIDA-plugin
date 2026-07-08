@@ -156,3 +156,87 @@ def test_latent_reasoner_state_propagation():
     # Final wrapper input should be 1.5, whereas base h was 0.5
     final_input = received_inputs[0]
     assert torch.allclose(final_input, torch.ones(1, d_model) * 1.5)
+
+
+def test_latent_agent_dynamic_features():
+    d_model = 8
+
+    class MockCore:
+        def __call__(self, pooled):
+            class FinalState:
+                def __init__(self):
+                    # Set states with zero variance to test simple task classification
+                    self.s = torch.ones(1, 4, d_model) * 1.0
+            return {"state_final": FinalState()}
+
+    class MockWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cida_core = MockCore()
+            self.base_projector = lambda s: s
+            self.d_llm = d_model
+        def forward(self, h):
+            return h.unsqueeze(1).expand(-1, 8, -1)
+
+    class MockLLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = nn.Parameter(torch.zeros(1))
+        def get_input_embeddings(self):
+            class Embed:
+                def __call__(self, ids):
+                    return torch.ones(1, ids.shape[1], d_model)
+            return Embed()
+        def forward(self, input_ids, attention_mask, output_hidden_states=True):
+            class Out:
+                def __init__(self):
+                    # We return hidden state matching base
+                    self.hidden_states = [None, torch.ones(1, 4, d_model) * 0.5]
+            return Out()
+        def generate(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+            return torch.tensor([[100, 101]])
+
+    class MockTokenizer:
+        def __call__(self, text, return_tensors):
+            class Enc:
+                def __init__(self):
+                    self.input_ids = torch.tensor([[1, 2, 3]])
+                    self.attention_mask = torch.tensor([[1, 1, 1]])
+                def to(self, device):
+                    return self
+            return Enc()
+        def decode(self, ids, skip_special_tokens):
+            return "Final Answer: Done."
+        @property
+        def pad_token_id(self): return 0
+        @property
+        def eos_token_id(self): return 1
+        def convert_tokens_to_ids(self, tok): return 1
+
+    wrapper = MockWrapper()
+    llm = MockLLM()
+    tokenizer = MockTokenizer()
+
+    # Initialize agent with guardrails
+    agent = LatentAgent(
+        wrapper=wrapper,
+        llm=llm,
+        tokenizer=tokenizer,
+        default_reasoning_rounds=4,
+        guardrails=["Never delete database"]
+    )
+
+    # 1. Verify guardrail pre-embedding
+    assert len(agent.guardrail_embeds) == 1
+    assert agent.guardrail_embeds[0].shape == (1, d_model)
+
+    # 2. Run first time (populates plan cache, performs adaptive compute check)
+    res = agent.run("Task prompt", max_turns=1)
+    assert "Final Answer: Done." in res
+    assert len(agent.plan_cache) == 1
+
+    # 3. Run second time with same prompt (triggers Plan Cache HIT)
+    # Clear cache hit status by using self.plan_cache and check retrieval
+    res2 = agent.run("Task prompt", max_turns=1)
+    assert "Final Answer: Done." in res2
+

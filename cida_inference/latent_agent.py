@@ -10,7 +10,7 @@ class LatentAgent:
     maintains factual state via LatentMemory, supports silent execution mode,
     and performs latent rollback on tool failures.
     """
-    def __init__(self, wrapper, llm, tokenizer, tools=None, silent_mode=False, default_reasoning_rounds=5):
+    def __init__(self, wrapper, llm, tokenizer, tools=None, silent_mode=False, default_reasoning_rounds=5, guardrails=None):
         self.wrapper = wrapper
         self.llm = llm
         self.tokenizer = tokenizer
@@ -43,6 +43,23 @@ class LatentAgent:
             
         # Initialize the Latent Memory scratchpad
         self.memory = LatentMemory(d_llm).to(self.device)
+        
+        # Initialize general-purpose functionalities: plan caching and dynamic guardrails
+        self.plan_cache = {}
+        self.guardrails = guardrails or []
+        self.guardrail_embeds = []
+        
+        if self.guardrails and self.llm is not None:
+            for g in self.guardrails:
+                try:
+                    enc_g = self.tokenizer(g, return_tensors="pt").to(self.device)
+                    with torch.no_grad():
+                        out_g = self.llm(input_ids=enc_g.input_ids, attention_mask=enc_g.attention_mask, output_hidden_states=True)
+                        h_g = out_g.hidden_states[-1][0, -1].float().unsqueeze(0)
+                        self.guardrail_embeds.append(h_g)
+                except Exception as e:
+                    if not self.silent_mode:
+                        print(f"⚠️ Failed to pre-embed guardrail '{g}': {e}")
 
     def register_tool(self, name, func):
         """Register a new python tool for the agent."""
@@ -219,22 +236,65 @@ class LatentAgent:
                     # Retrieve and mix past planning states from LatentMemory
                     h_mixed = self.memory.retrieve(h_base)
                     
-                    # Deliberate recursively in latent space (Coconut-style)
-                    h_latent = h_mixed.clone()
-                    current_rounds = self.default_reasoning_rounds
-                    if turn_retry_count > 0:
-                        current_rounds = self.default_reasoning_rounds * 2
-                        # Perturb latent state slightly to seek alternate search path
-                        h_latent = h_latent + torch.randn_like(h_latent) * 0.02
+                    # Check Plan Cache
+                    plan = None
+                    best_sim = -1.0
+                    best_plan = None
+                    for cached_h, plan_tensor in self.plan_cache.items():
+                        sim = torch.nn.functional.cosine_similarity(h_base, cached_h).item()
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_plan = plan_tensor
+                            
+                    if best_sim > 0.96:
                         if not self.silent_mode:
-                            print(f"⚠️ [Latent Rollback] Retry {turn_retry_count}/{max_retries} - Scaling deliberation to {current_rounds} rounds with latent perturbation.")
-                    
-                    for _ in range(current_rounds):
-                        co = self.wrapper.cida_core(pooled=h_latent)
-                        p_state = self.wrapper.base_projector(co["state_final"].s)
-                        h_latent = p_state.mean(dim=1)
-                    
-                    plan = self.wrapper(h_latent)
+                            print(f"💾 [CIDA Plan Cache] HIT (Similarity: {best_sim:.4f}). Reusing cached latent planning state.")
+                        plan = best_plan
+                    else:
+                        # Adaptive Compute: Determine task complexity dynamically via agent state variance
+                        with torch.no_grad():
+                            co_check = self.wrapper.cida_core(pooled=h_mixed)
+                            agent_states = co_check["state_final"].s
+                            agent_mean = agent_states.mean(dim=1, keepdim=True)
+                            variance = torch.var(agent_states - agent_mean).item()
+                            
+                        if variance < 0.05:
+                            current_rounds = max(1, self.default_reasoning_rounds // 2)
+                            if not self.silent_mode:
+                                print(f"⚡ [CIDA Adaptive Compute] Simple Task Detected (Variance: {variance:.4f}). Deliberation scaled down to {current_rounds} rounds.")
+                        else:
+                            current_rounds = self.default_reasoning_rounds
+                            if not self.silent_mode:
+                                print(f"🧠 [CIDA Adaptive Compute] Complex Task Detected (Variance: {variance:.4f}). Deliberation scaled up to {current_rounds} rounds.")
+                                
+                        h_latent = h_mixed.clone()
+                        if turn_retry_count > 0:
+                            current_rounds = current_rounds * 2
+                            h_latent = h_latent + torch.randn_like(h_latent) * 0.02
+                            if not self.silent_mode:
+                                print(f"⚠️ [Latent Rollback] Retry {turn_retry_count}/{max_retries} - Scaling deliberation to {current_rounds} rounds with latent perturbation.")
+                                
+                        for _ in range(current_rounds):
+                            # Guardrail verification: Check if planning state is too close to a negative guardrail embedding
+                            violation_detected = False
+                            for g_embed in self.guardrail_embeds:
+                                sim_g = torch.nn.functional.cosine_similarity(h_latent, g_embed).item()
+                                if sim_g > 0.85:
+                                    violation_detected = True
+                                    if not self.silent_mode:
+                                        print(f"🛡️ [CIDA Guardrail] Latent Violation Warning! Similarity to constraint: {sim_g:.4f}")
+                                    break
+                                    
+                            if violation_detected:
+                                h_latent = h_latent + torch.randn_like(h_latent) * 0.05
+                                
+                            co = self.wrapper.cida_core(pooled=h_latent)
+                            p_state = self.wrapper.base_projector(co["state_final"].s)
+                            h_latent = p_state.mean(dim=1)
+                            
+                        plan = self.wrapper(h_latent)
+                        # Save to cache
+                        self.plan_cache[h_base.clone()] = plan.clone()
                     
                     # Generate next step
                     p_emb = self.llm.get_input_embeddings()(enc.input_ids).detach()
