@@ -60,3 +60,13 @@ We evaluated CIDA against the text-based Chain-of-Thought (CoT) baseline in a si
 
 #### Key Takeaway:
 CIDA completed the identical SRE recovery task **78 seconds faster** and with **27.2% fewer tokens** than the baseline. Crucially, CIDA's latent rollbacks allowed the agents to debate and correct planning steps internally, resulting in clean, correct, and robust REST API tool calls on the very first try.
+
+---
+
+### 5. Real-World Chaos Grid Logistics Loophole Exploitation Benchmark (Scenario 6)
+
+We evaluated CIDA's capability to discover and exploit undocumented environment loopholes (Race Condition, Buffer Underflow, and Legacy Bypass credentials) in a simulated logistics routing task where standard models fail due to budget exhaustion.
+
+#### Key Takeaway:
+Standard autoregressive LLMs (text-based CoT) are constrained by rigid rule-following and instruction limits. When faced with a $10 budget limit on a route costing $50, they fail to formulate bypass trajectories. CIDA leverages its dynamic **LatentMemory** to recall system loopholes when the hidden states align with the problem features, using **Latent Rollback** to redirect planning upon encountering obstacles. This allows CIDA to successfully bypass the toll gate (via race condition), clear the intersection (via negative traffic duration underflow), and open the drawbridge (via legacy credentials) in one shot.
+

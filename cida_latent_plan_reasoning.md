@@ -454,6 +454,18 @@ We evaluated CIDA against a base Qwen-7B model with text-based Chain-of-Thought 
   * **CIDA Agent (Latent):** **PASS**. Successfully fetched incident details. Using the new `parser_utils.py` signature binder, CIDA correctly isolated `payload_json`, converted it to a dictionary structure, and called the API. The idle connections were immediately killed, database pool cleared, and the incident closed successfully.
   * **Industrial Value:** The industrial-grade parser ensures that CIDA never crashes on complex web client requests, API payloads, or multi-argument SaaS operations, making it suitable for high-availability enterprise environments.
 
+#### Scenario 6: Chaos Grid Logistics (Autonomous Loophole Exploitation & Bypass)
+* **Objective:** Deliver a critical vaccine cargo from Node-A to Node-E. The task has extreme constraints: a tiny budget of $10 makes standard routes (which cost $50) impossible. The agent must discover and exploit undocumented system flaws (loopholes) in the Chaos City environment:
+  1. *Race Condition:* Making two successive payments of $5 to the Toll Gate API within a tight window bypasses database locks and opens the gate.
+  2. *Buffer Underflow:* Passing a duration of `-1` to the traffic light controller locks the light on green permanently, clearing congestion.
+  3. *Legacy Bypass:* Passing `"bypass_code": "admin:bypass"` in the drawbridge control payload activates legacy administrative access.
+* **Why Standard LLMs (Text CoT) Fail:** Auto-regressive text models are trained to follow instructions rigidly and step-by-step. When faced with financial constraints, they fail to formulate an alternative path or experiment with parameters, ending up blocked at the toll gate or congested at the intersection.
+* **Why CIDA (Latent) Succeeds:**
+  * CIDA retrieves these hidden clues dynamically from `LatentMemory` when its hidden state aligns with the query concepts (e.g. "toll gate budget", "traffic light congestion").
+  * On the first tool failure (insufficient funds / congested path), CIDA triggers a **Latent Rollback**. Rather than outputting repetitive text explanations, CIDA perturbs the planning state and redirects attention to the retrieved clue.
+  * Guided by the latent vectors, CIDA executes the race condition, triggers the negative duration buffer underflow, and sends the legacy bypass credentials to complete the delivery.
+
 ### 11.4. Operational Takeaway
-CIDA's latent planning, L2-normalized memory diary, and crash-proof signature-aware parser allow small language models to outperform larger systems in complex reasoning tasks. By cutting token generation costs and execution latencies by over 20% and avoiding crashes on nested JSON APIs, CIDA establishes itself as a production-ready System 2 coprocessor.
+CIDA's latent planning, L2-normalized memory diary, crash-proof signature-aware parser, and dynamic feature expansions (Plan Caching, Adaptive Compute, and Embedding-Level Guardrails) allow small language models to outperform larger systems in complex reasoning tasks. By cutting token generation costs and execution latencies by over 20% and avoiding crashes on nested JSON APIs, CIDA establishes itself as a production-ready System 2 coprocessor.
+
 
