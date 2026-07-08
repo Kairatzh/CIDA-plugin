@@ -131,6 +131,49 @@ class LatentAgent:
 
     def _parse_and_run_tool(self, response: str) -> str:
         """Parses the LLM response for tool calls and runs them safely supporting keyword arguments and nested brackets."""
+        import json as json_lib
+        
+        # 1. First, check if the model tried to call HTTP methods directly
+        http_match = re.search(r"Action:\s*(GET|POST|PUT|DELETE)\s+(https?://[^\s\)]+)", response, re.IGNORECASE)
+        if http_match:
+            method = http_match.group(1).upper()
+            full_url = http_match.group(2)
+            
+            # Clean trailing quotes, parentheses, or brackets from URL
+            full_url = full_url.rstrip(")'\"")
+            
+            # Check if there is query parameter or JSON payload in the URL
+            url_parts = full_url.split("?", 1)
+            url = url_parts[0]
+            payload_json = None
+            
+            if len(url_parts) > 1:
+                query = url_parts[1]
+                # Try to extract payload_json
+                pj_match = re.search(r"payload_json=['\"]?(.*?)['\"]?$", query)
+                if pj_match:
+                    payload_json = pj_match.group(1)
+                else:
+                    # Parse generic query params as payload_json dict
+                    from urllib.parse import parse_qs
+                    params = parse_qs(query)
+                    # Convert to flat dict
+                    flat_params = {k: v[0] for k, v in params.items()}
+                    if flat_params:
+                        payload_json = json_lib.dumps(flat_params)
+            
+            # Also check if payload_json is specified in payload_json='{...}' inside the response
+            payload_inline_match = re.search(r"payload_json\s*=\s*['\"]?(.*?)['\"]?$", response)
+            if payload_inline_match and not payload_json:
+                payload_json = payload_inline_match.group(1)
+            
+            if not self.silent_mode:
+                print(f"🔄 Auto-redirecting raw HTTP Action to call_web_api(method='{method}', url='{url}', payload_json={payload_json})")
+            
+            obs = self.call_web_api(method=method, url=url, payload_json=payload_json)
+            return "call_web_api", obs
+
+        # 2. Standard tool call parsing
         action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", response)
         if not action_match:
             return None, None
