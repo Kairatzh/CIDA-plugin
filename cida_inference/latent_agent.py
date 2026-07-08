@@ -154,6 +154,7 @@ class LatentAgent:
             "<|im_start|>system\n"
             "You are a helpful assistant equipped with tools. Solve the task step-by-step.\n"
             "Stop generation immediately after closing the code/action block. Do not simulate observations.\n"
+            "IMPORTANT: If a tool call fails or returns an error, do not give up. Check your history for alternative options, correct any mistakes, and try another path until you successfully complete the user's task.\n"
             "IMPORTANT: You MUST match the exact tool signatures. Do not pass extra arguments or guess argument names. If a tool takes no arguments, call it with empty parentheses (e.g. tool_name()).\n\n"
             f"You have access to the following tools:\n{tools_desc}\n\n"
             "Format:\n"
