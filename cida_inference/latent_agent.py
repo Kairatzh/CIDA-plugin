@@ -196,11 +196,17 @@ class LatentAgent:
                 p_emb = self.llm.get_input_embeddings()(enc.input_ids).detach()
                 gm = torch.cat([enc.attention_mask, torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=self.device)], dim=1)
                 
+                eos_ids = [self.tokenizer.eos_token_id] if self.tokenizer.eos_token_id is not None else []
+                im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+                if im_end_id is not None and not isinstance(im_end_id, list):
+                    eos_ids.append(im_end_id)
+                
                 ids = self.llm.generate(
                     inputs_embeds=torch.cat([p_emb.to(compute_dtype), plan.to(compute_dtype)], dim=1),
                     attention_mask=gm,
                     max_new_tokens=250,
-                    pad_token_id=self.tokenizer.pad_token_id
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=eos_ids
                 )
                 
                 response = self.tokenizer.decode(ids[0], skip_special_tokens=True).strip()

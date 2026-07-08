@@ -247,17 +247,22 @@ class BaseCoTAgent:
             enc = self.tokenizer(history, return_tensors="pt").to(self.device)
             
             with torch.no_grad():
+                eos_ids = [self.tokenizer.eos_token_id] if self.tokenizer.eos_token_id is not None else []
+                im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+                if im_end_id is not None and not isinstance(im_end_id, list):
+                    eos_ids.append(im_end_id)
+
                 ids = self.llm.generate(
                     input_ids=enc.input_ids,
                     attention_mask=enc.attention_mask,
                     max_new_tokens=350,  # Give base model plenty of space to write CoT
-                    pad_token_id=self.tokenizer.pad_token_id
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=eos_ids
                 )
-                # Count generated tokens
+                # Count actual generated tokens by tokenizing the decoded string
                 gen_len = ids.shape[1] - enc.input_ids.shape[1]
-                total_tokens += gen_len
-                
                 response = self.tokenizer.decode(ids[0][-gen_len:], skip_special_tokens=True).strip()
+                total_tokens += len(self.tokenizer.encode(response))
             
             action_match = re.search(r"(Action:\s*\w+\([^)]*\))", response)
             if action_match:
@@ -357,10 +362,15 @@ if __name__ == "__main__":
     def patched_generate(*args, **kwargs):
         global total_tokens_cida
         res = original_generate(*args, **kwargs)
+        # Decode the generated token IDs and count actual text tokens
+        text = tokenizer.decode(res[0], skip_special_tokens=True)
         if "inputs_embeds" in kwargs:
-            total_tokens_cida += res.shape[1]  # Generated tokens length
+            total_tokens_cida += len(tokenizer.encode(text))
         else:
-            total_tokens_cida += (res.shape[1] - args[0].shape[1] if args else 0)
+            prompt_len = args[0].shape[1] if args else kwargs.get("input_ids").shape[1]
+            gen_tokens = res[0][prompt_len:]
+            gen_text = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+            total_tokens_cida += len(tokenizer.encode(gen_text))
         return res
     llm.generate = patched_generate
     
