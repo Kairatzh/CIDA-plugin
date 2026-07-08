@@ -49,7 +49,9 @@ class CalendarEnv:
         return f"Alternative free slots for {participant}: " + ", ".join(free)
     def schedule_meeting(self, participant: str, day_time: str) -> str:
         """Schedule a meeting with participant at specified day and time."""
-        status = self.slots.get(day_time, "Unknown slot")
+        if day_time not in self.slots:
+            return f"Error: Cannot schedule. '{day_time}' is not a valid calendar slot. Available slots: " + ", ".join(self.slots.keys())
+        status = self.slots[day_time]
         if "Occupied" in status:
             return f"Error: Cannot schedule. Slot '{day_time}' is occupied."
         self.slots[day_time] = f"Booked with {participant}"

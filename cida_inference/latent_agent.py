@@ -44,10 +44,37 @@ class LatentAgent:
         if tool_name not in self.tools:
             return tool_name, f"Error: Tool '{tool_name}' not found."
             
-        print(f"⚙️ Calling Tool: {tool_name}({args})")
+        # Dynamically cast arguments using inspect.signature annotations
+        func = self.tools[tool_name]
+        sig = inspect.signature(func)
+        params = list(sig.parameters.values())
+        
+        cast_args = []
+        for idx, arg in enumerate(args):
+            if idx < len(params):
+                param = params[idx]
+                annotation = param.annotation
+                if annotation == float:
+                    try:
+                        cast_args.append(float(arg))
+                    except ValueError:
+                        cast_args.append(arg)
+                elif annotation == int:
+                    try:
+                        cast_args.append(int(arg))
+                    except ValueError:
+                        cast_args.append(arg)
+                elif annotation == bool:
+                    cast_args.append(arg.lower() in ("true", "1", "yes"))
+                else:
+                    cast_args.append(arg)
+            else:
+                cast_args.append(arg)
+            
+        print(f"⚙️ Calling Tool: {tool_name}({cast_args})")
         try:
             # Execute python tool
-            obs = self.tools[tool_name](*args)
+            obs = func(*cast_args)
             return tool_name, obs
         except TypeError as te:
             return tool_name, f"Error: Tool call parameters mismatch: {te}"
