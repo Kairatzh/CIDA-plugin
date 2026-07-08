@@ -57,10 +57,14 @@ class LatentAgent:
         """Runs the ReAct loop with latent memory integration."""
         self.memory.clear()
         
+        # List the available tool names dynamically in the system prompt
+        tools_desc = "\n".join([f"- {name}" for name in self.tools.keys()])
+        
         system_prompt = (
             "<|im_start|>system\n"
             "You are a helpful assistant equipped with tools. Solve the task step-by-step.\n"
             "Stop generation immediately after closing the code/action block. Do not simulate observations.\n\n"
+            f"You have access to the following tools:\n{tools_desc}\n\n"
             "Format:\n"
             "Thought: <reasoning>\n"
             "Action: <tool_name>(args)\n<|im_end|>\n"
