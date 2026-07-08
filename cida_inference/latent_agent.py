@@ -115,7 +115,12 @@ class LatentAgent:
                 
                 response = self.tokenizer.decode(ids[0], skip_special_tokens=True).strip()
             
-            if "Observation:" in response:
+            # Truncate response to keep only up to the first action call, preventing model simulation
+            action_match = re.search(r"(Action:\s*\w+\([^)]*\))", response)
+            if action_match:
+                action_end_idx = response.find(action_match.group(1)) + len(action_match.group(1))
+                response = response[:action_end_idx].strip()
+            elif "Observation:" in response:
                 response = response.split("Observation:")[0].strip()
                 
             print(response)
