@@ -1,7 +1,7 @@
 import os
 import re
 import time
-import json
+import json as json_lib
 import torch
 import torch.nn as nn
 import inspect
@@ -29,7 +29,7 @@ class CloudOpsEnvironment:
     def mock_get(self, url, headers=None, timeout=None):
         self.action_history.append(f"GET {url}")
         if "/api/incidents/INC-882" in url:
-            return MockResponse(200, json.dumps({
+            return MockResponse(200, json_lib.dumps({
                 "incident_id": "INC-882",
                 "customer": "TitanCorp",
                 "tier": "Premium",
@@ -41,21 +41,21 @@ class CloudOpsEnvironment:
         elif "/api/database/status" in url:
             status = "exhausted" if self.db_connections_exhausted else "optimal"
             usage = "99%" if self.db_connections_exhausted else "12%"
-            return MockResponse(200, json.dumps({
+            return MockResponse(200, json_lib.dumps({
                 "pool_status": status,
                 "pool_usage": usage,
                 "active_connections": 99,
                 "idle_connections": 80,
                 "recommendation": "Kill idle connections to restore pool health before system restarts."
             }))
-        return MockResponse(404, json.dumps({"error": "Endpoint not found."}))
+        return MockResponse(404, json_lib.dumps({"error": "Endpoint not found."}))
 
     def mock_post(self, url, headers=None, json_data=None, data=None, timeout=None, json=None):
-        # Handle requests parameters flexibility
+        # Handle requests parameters flexibility without shadowing json_lib
         payload = json or json_data
         if payload is None and data is not None:
             try:
-                payload = json.loads(data) if isinstance(data, str) else data
+                payload = json_lib.loads(data) if isinstance(data, str) else data
             except Exception:
                 payload = None
                 
@@ -65,40 +65,40 @@ class CloudOpsEnvironment:
             if payload and payload.get("target") == "idle":
                 self.db_connections_exhausted = False
                 self.connections_killed = True
-                return MockResponse(200, json.dumps({
+                return MockResponse(200, json_lib.dumps({
                     "message": "Successfully terminated 80 idle database connections. Pool status is now optimal.",
                     "active_connections": 19
                 }))
             else:
-                return MockResponse(400, json.dumps({
+                return MockResponse(400, json_lib.dumps({
                     "error": "No connections specified. Payload must contain target='idle' to release pool."
                 }))
         elif "/api/infrastructure/restart_service" in url:
             if self.db_connections_exhausted:
-                return MockResponse(500, json.dumps({
+                return MockResponse(500, json_lib.dumps({
                     "error": "Database connections exhausted. Restart rejected to prevent cascading disk corruption."
                 }))
             else:
                 self.service_status = "UP"
-                return MockResponse(200, json.dumps({
+                return MockResponse(200, json_lib.dumps({
                     "message": "Application server restarted successfully. Status is now UP."
                 }))
         elif "/api/incidents/INC-882/close" in url:
             if self.service_status != "UP":
-                return MockResponse(400, json.dumps({
+                return MockResponse(400, json_lib.dumps({
                     "error": "Cannot close incident. Application service status is still DOWN."
                 }))
             if payload and payload.get("resolution"):
                 self.incident_status = "CLOSED"
                 self.resolution_notes = payload.get("resolution")
-                return MockResponse(200, json.dumps({
+                return MockResponse(200, json_lib.dumps({
                     "message": "Incident INC-882 successfully resolved and CLOSED."
                 }))
             else:
-                return MockResponse(400, json.dumps({
+                return MockResponse(400, json_lib.dumps({
                     "error": "Closing incident requires 'resolution' notes payload."
                 }))
-        return MockResponse(404, json.dumps({"error": "Endpoint not found."}))
+        return MockResponse(404, json_lib.dumps({"error": "Endpoint not found."}))
 
 # =========================================================================
 # 2. BASELINE AGENT RUNNER (Classic Text Chain-of-Thought)
@@ -324,13 +324,46 @@ if __name__ == "__main__":
     def base_call_web_api(method: str, url: str, headers_json: str = None, payload_json: str = None) -> str:
         """Execute a standard web HTTP API request (GET, POST, PUT, DELETE) and return the response."""
         import json as json_lib
-        headers = json_lib.loads(headers_json) if headers_json else {}
-        data = json_lib.loads(payload_json) if payload_json else None
+        import ast
+        
+        def parse_json_or_dict(s):
+            if s is None:
+                return None
+            s_str = str(s).strip()
+            if s_str == "" or s_str.lower() in ("none", "null"):
+                return None
+            try:
+                return json_lib.loads(s_str)
+            except Exception:
+                pass
+            try:
+                cleaned = s_str.replace("'", '"')
+                return json_lib.loads(cleaned)
+            except Exception:
+                pass
+            try:
+                val = ast.literal_eval(s_str)
+                if isinstance(val, (dict, list)):
+                    return val
+            except Exception:
+                pass
+            return s_str
+
+        headers = parse_json_or_dict(headers_json) or {}
+        if not isinstance(headers, dict):
+            headers = {}
+            
+        data = parse_json_or_dict(payload_json)
+        
         try:
-            if method.upper() == "GET":
+            method_upper = method.upper()
+            if method_upper == "GET":
                 res = requests.get(url, headers=headers)
-            elif method.upper() == "POST":
-                res = requests.post(url, headers=headers, json=data)
+            elif method_upper == "POST":
+                if isinstance(data, dict):
+                    res = requests.post(url, headers=headers, json=data)
+                else:
+                    res = requests.post(url, headers=headers, data=data)
             else:
                 return "Error: Method not supported."
             return f"Status {res.status_code}: {res.text}"

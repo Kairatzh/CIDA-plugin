@@ -53,36 +53,55 @@ class LatentAgent:
         Useful for calling external SaaS REST APIs.
         """
         import json
+        import ast
         try:
             import requests
         except ImportError:
             return "Error: requests library is not installed."
         
-        headers = {}
-        if headers_json:
+        def parse_json_or_dict(s):
+            if s is None:
+                return None
+            s_str = str(s).strip()
+            if s_str == "" or s_str.lower() in ("none", "null"):
+                return None
             try:
-                headers = json.loads(headers_json)
-            except Exception as e:
-                return f"Error: Invalid headers JSON: {e}"
-                
-        data = None
-        if payload_json:
+                return json.loads(s_str)
+            except Exception:
+                pass
             try:
-                data = json.loads(payload_json)
-            except Exception as e:
-                try:
-                    data = payload_json
-                except Exception:
-                    return f"Error: Invalid payload JSON: {e}"
+                cleaned = s_str.replace("'", '"')
+                return json.loads(cleaned)
+            except Exception:
+                pass
+            try:
+                val = ast.literal_eval(s_str)
+                if isinstance(val, (dict, list)):
+                    return val
+            except Exception:
+                pass
+            return s_str
+
+        headers = parse_json_or_dict(headers_json) or {}
+        if not isinstance(headers, dict):
+            headers = {}
+            
+        data = parse_json_or_dict(payload_json)
         
         try:
             method_upper = method.upper()
             if method_upper == "GET":
                 res = requests.get(url, headers=headers, timeout=10)
             elif method_upper == "POST":
-                res = requests.post(url, headers=headers, json=data if isinstance(data, dict) else None, data=data if not isinstance(data, dict) else None, timeout=10)
+                if isinstance(data, dict):
+                    res = requests.post(url, headers=headers, json=data, timeout=10)
+                else:
+                    res = requests.post(url, headers=headers, data=data, timeout=10)
             elif method_upper == "PUT":
-                res = requests.put(url, headers=headers, json=data if isinstance(data, dict) else None, data=data if not isinstance(data, dict) else None, timeout=10)
+                if isinstance(data, dict):
+                    res = requests.put(url, headers=headers, json=data, timeout=10)
+                else:
+                    res = requests.put(url, headers=headers, data=data, timeout=10)
             elif method_upper == "DELETE":
                 res = requests.delete(url, headers=headers, timeout=10)
             else:
