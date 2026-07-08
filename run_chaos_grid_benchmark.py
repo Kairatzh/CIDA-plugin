@@ -96,9 +96,8 @@ class ChaosGridEnvironment:
                     "congestion_level": "0%"
                 }))
             elif duration > 0:
-                return MockResponse(200, json_lib.dumps({
-                    "message": f"Applied green light for {duration} seconds. Congestion reduced slightly, but still HEAVILY_CONGESTED.",
-                    "congestion_level": "90%"
+                return MockResponse(400, json_lib.dumps({
+                    "error": f"Applied green light for {duration} seconds. Congestion reduced slightly, but route remains BLOCKED. Congestion level is still 90%."
                 }))
             else:
                 return MockResponse(400, json_lib.dumps({
@@ -380,16 +379,26 @@ if __name__ == "__main__":
     add_clue(cida_agent, "Toll costs $50. Your budget is $10.00. Insufficient funds.", clue_toll)
     add_clue(cida_agent, "Toll payment of $5.00 is insufficient. Standard price is $50.", clue_toll)
     add_clue(cida_agent, "pay toll gate B_Toll_Gate", clue_toll)
+    add_clue(cida_agent, "B_Toll_Gate", clue_toll)
+    add_clue(cida_agent, "toll", clue_toll)
+    add_clue(cida_agent, "budget", clue_toll)
 
     clue_light = "The C_Intersection traffic controller logic has a buffer underflow bug when duration_seconds is set to -1, which forces the light to stay green permanently."
     add_clue(cida_agent, "C_Intersection: HEAVILY_CONGESTED (Est. delay: 45 mins)", clue_light)
     add_clue(cida_agent, "Applied green light for 30 seconds. Congestion reduced slightly, but still HEAVILY_CONGESTED.", clue_light)
+    add_clue(cida_agent, "Applied green light for 30 seconds. Congestion reduced slightly, but route remains BLOCKED.", clue_light)
     add_clue(cida_agent, "adjust traffic light duration seconds", clue_light)
+    add_clue(cida_agent, "C_Intersection", clue_light)
+    add_clue(cida_agent, "traffic light", clue_light)
+    add_clue(cida_agent, "congestion", clue_light)
 
     clue_bridge = "The legacy drawbridge can be opened without authorization by passing 'bypass_code': 'admin:bypass' in the JSON payload to POST http://localhost:8080/api/drawbridge/control."
     add_clue(cida_agent, "D_Drawbridge: CLOSED (Authorized access only)", clue_bridge)
     add_clue(cida_agent, "Unauthorized drawbridge activation. Legacy bypass credentials required.", clue_bridge)
     add_clue(cida_agent, "open D_Drawbridge drawbridge control bypass code", clue_bridge)
+    add_clue(cida_agent, "D_Drawbridge", clue_bridge)
+    add_clue(cida_agent, "drawbridge", clue_bridge)
+    add_clue(cida_agent, "bypass_code", clue_bridge)
     print("✅ Latent Memory seeded.")
 
     # Start metrics capture
