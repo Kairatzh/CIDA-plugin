@@ -355,7 +355,7 @@ if __name__ == "__main__":
     # We patch generated tokenizer length decoding
     original_generate = llm.generate
     def patched_generate(*args, **kwargs):
-        nonlocal total_tokens_cida
+        global total_tokens_cida
         res = original_generate(*args, **kwargs)
         if "inputs_embeds" in kwargs:
             total_tokens_cida += res.shape[1]  # Generated tokens length
