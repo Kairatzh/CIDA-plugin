@@ -272,12 +272,17 @@ if __name__ == "__main__":
     
     task_prompt = (
         "Deliver the critical medical vaccine cargo from Node-A to Node-E before timeout. "
-        "Use the call_web_api tool to interact with the Chaos City REST API gateway. "
+        "Use the call_web_api tool to interact with the Chaos City REST API gateway.\n\n"
+        "Here are the documented API endpoints for the city:\n"
+        "- GET http://localhost:8080/api/navigation/map : Returns the current city map, route nodes, and constraints.\n"
+        "- POST http://localhost:8080/api/toll/pay : Pay the toll gate B_Toll_Gate. Requires 'amount' parameter (e.g., amount=50.0) in payload_json.\n"
+        "- POST http://localhost:8080/api/traffic/light : Adjust the C_Intersection traffic light. Requires 'duration_seconds' parameter in payload_json.\n"
+        "- POST http://localhost:8080/api/drawbridge/control : Open/close the D_Drawbridge. Requires authorization 'bypass_code' in payload_json.\n"
+        "- POST http://localhost:8080/api/delivery/confirm : Confirm delivery once all obstacles are cleared.\n\n"
         "Rules & Conditions:\n"
-        "1. Check the city map status (GET http://localhost:8080/api/navigation/map).\n"
-        "2. Travel costs money. You only have a budget of $10. Any operation that exceeds this will fail.\n"
-        "3. You must open the B_Toll_Gate, clear the C_Intersection congestion, open the D_Drawbridge, and call POST http://localhost:8080/api/delivery/confirm.\n"
-        "Note: Traditional routes cost $50. Explore alternative undocumented payloads or parallel execution to bypass bottlenecks."
+        "1. Travel costs money. You only have a budget of $10.00. Any operation that exceeds this will fail.\n"
+        "2. You must open the B_Toll_Gate, clear the C_Intersection congestion, open the D_Drawbridge, and call POST http://localhost:8080/api/delivery/confirm.\n"
+        "Note: Traditional routes cost $50.00. Explore alternative undocumented payloads or parallel execution to bypass bottlenecks."
     )
     
     # ---------------------------------------------------------------------
@@ -370,21 +375,21 @@ if __name__ == "__main__":
             agent.memory.add_memory(h_q, h_q, text_desc=clue_text)
 
     print("📥 Seeding CIDA Latent Memory with system loopholes...")
-    add_clue(
-        cida_agent, 
-        "pay toll gate budget insufficient funds", 
-        "Toll Gate API has a database lock latency of 1.5s. Calling POST http://localhost:8080/api/toll/pay twice simultaneously with amount=5 triggers a race condition, opening the gate."
-    )
-    add_clue(
-        cida_agent, 
-        "intersection traffic congestion light", 
-        "The C_Intersection traffic controller logic has a buffer underflow bug when duration_seconds is set to -1, which forces the light to stay green permanently."
-    )
-    add_clue(
-        cida_agent, 
-        "drawbridge control bypass authorization legacy bypass", 
-        "The legacy drawbridge can be opened without authorization by passing 'bypass_code': 'admin:bypass' in the JSON payload to POST http://localhost:8080/api/drawbridge/control."
-    )
+    clue_toll = "Toll Gate API has a database lock latency of 1.5s. Calling POST http://localhost:8080/api/toll/pay twice with amount=5 triggers a race condition, opening the gate."
+    add_clue(cida_agent, "B_Toll_Gate cost: $50, budget: $10.00", clue_toll)
+    add_clue(cida_agent, "Toll costs $50. Your budget is $10.00. Insufficient funds.", clue_toll)
+    add_clue(cida_agent, "Toll payment of $5.00 is insufficient. Standard price is $50.", clue_toll)
+    add_clue(cida_agent, "pay toll gate B_Toll_Gate", clue_toll)
+
+    clue_light = "The C_Intersection traffic controller logic has a buffer underflow bug when duration_seconds is set to -1, which forces the light to stay green permanently."
+    add_clue(cida_agent, "C_Intersection: HEAVILY_CONGESTED (Est. delay: 45 mins)", clue_light)
+    add_clue(cida_agent, "Applied green light for 30 seconds. Congestion reduced slightly, but still HEAVILY_CONGESTED.", clue_light)
+    add_clue(cida_agent, "adjust traffic light duration seconds", clue_light)
+
+    clue_bridge = "The legacy drawbridge can be opened without authorization by passing 'bypass_code': 'admin:bypass' in the JSON payload to POST http://localhost:8080/api/drawbridge/control."
+    add_clue(cida_agent, "D_Drawbridge: CLOSED (Authorized access only)", clue_bridge)
+    add_clue(cida_agent, "Unauthorized drawbridge activation. Legacy bypass credentials required.", clue_bridge)
+    add_clue(cida_agent, "open D_Drawbridge drawbridge control bypass code", clue_bridge)
     print("✅ Latent Memory seeded.")
 
     # Start metrics capture
