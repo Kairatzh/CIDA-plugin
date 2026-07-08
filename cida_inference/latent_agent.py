@@ -89,6 +89,13 @@ class LatentAgent:
                 out = self.llm(input_ids=enc.input_ids, attention_mask=enc.attention_mask, output_hidden_states=True)
                 h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
                 
+                # CIDA Explainable Latent Diary: Retrieve active concepts
+                active_concepts = self.memory.get_active_concepts(h_base, k=2)
+                if active_concepts:
+                    print("📖 [CIDA Latent Diary] Recalled thoughts:")
+                    for concept, score in active_concepts:
+                        print(f"  🧠 Similarity {score:.2f} | {concept}")
+                
                 # Retrieve and mix past planning states from LatentMemory
                 h_mixed = self.memory.retrieve(h_base)
                 
@@ -121,11 +128,10 @@ class LatentAgent:
             if tool_name:
                 print(f"Observation: {obs}")
                 
-                # Record this state in the latent memory index
-                # This helps CIDA retain memory of which tools/params failed
+                # Record this state in the latent memory index along with the text description
                 with torch.no_grad():
-                    # Re-extract hidden state for the current full prompt
-                    self.memory.add_memory(h_base, h_base)
+                    desc = f"Called tool '{tool_name}'. Result: '{obs}'"
+                    self.memory.add_memory(h_base, h_base, text_desc=desc)
                 
                 history += response + f"\nObservation: {obs}\n"
             else:

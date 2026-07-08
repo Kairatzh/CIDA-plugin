@@ -12,6 +12,7 @@ class LatentMemory(nn.Module):
         self.d_model = d_model
         self.keys = []
         self.values = []
+        self.texts = []
         
         # Simple cross-attention mixing projection
         self.q_proj = nn.Linear(d_model, d_model)
@@ -24,14 +25,16 @@ class LatentMemory(nn.Module):
         """Reset the latent memory."""
         self.keys = []
         self.values = []
+        self.texts = []
 
-    def add_memory(self, key_tensor, value_tensor):
+    def add_memory(self, key_tensor, value_tensor, text_desc=""):
         """
-        Store a planning state key and value representation.
+        Store a planning state key and value representation along with a description.
         Expects shapes of (1, d_model) or (d_model,).
         """
         self.keys.append(key_tensor.detach().cpu().squeeze().float())
         self.values.append(value_tensor.detach().cpu().squeeze().float())
+        self.texts.append(text_desc)
 
     def retrieve(self, query_tensor):
         """
@@ -64,3 +67,28 @@ class LatentMemory(nn.Module):
         mixed = gate_val * context + (1.0 - gate_val) * query_tensor
         
         return mixed
+
+    def get_active_concepts(self, query_tensor, k=3):
+        """
+        Retrieve the text descriptions of the top k matching memories
+        for explainability logging.
+        """
+        if not self.keys:
+            return []
+        
+        device = query_tensor.device
+        K_stack = torch.stack(self.keys).to(device) # (N, d_model)
+        
+        with torch.no_grad():
+            q = self.q_proj(query_tensor)
+            k_proj = self.k_proj(K_stack)
+            # Compute cosine similarities
+            scores = torch.matmul(q, k_proj.transpose(0, 1)).squeeze(0) # (N,)
+            
+            top_k = min(k, len(self.keys))
+            top_vals, top_idx = torch.topk(scores, top_k)
+            
+            active = []
+            for val, idx in zip(top_vals.tolist(), top_idx.tolist()):
+                active.append((self.texts[idx], val))
+            return active
