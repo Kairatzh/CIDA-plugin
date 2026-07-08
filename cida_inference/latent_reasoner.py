@@ -9,7 +9,16 @@ class LatentReasoner:
         self.wrapper = wrapper
         self.llm = llm
         self.tokenizer = tokenizer
-        self.device = next(wrapper.parameters()).device
+        # Safely determine device
+        self.device = "cpu"
+        try:
+            self.device = next(wrapper.parameters()).device
+        except StopIteration:
+            if llm is not None:
+                try:
+                    self.device = next(llm.parameters()).device
+                except StopIteration:
+                    pass
 
     def generate_latent(self, prompt: str, reasoning_rounds: int = 5, max_new_tokens: int = 250, **kwargs):
         """
@@ -17,7 +26,13 @@ class LatentReasoner:
         emits the final answer.
         """
         enc = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        compute_dtype = next(self.llm.parameters()).dtype
+        # Safely determine compute_dtype
+        compute_dtype = torch.float32
+        if self.llm is not None:
+            try:
+                compute_dtype = next(self.llm.parameters()).dtype
+            except StopIteration:
+                pass
 
         with torch.no_grad():
             # Get base prompt hidden states
@@ -35,8 +50,8 @@ class LatentReasoner:
                 plan = self.wrapper.base_projector(co["state_final"].s)
                 h_latent = plan.mean(dim=1) # Update working state recursively
             
-            # Project final optimized plan
-            final_plan = self.wrapper(h)
+            # Project final optimized plan using the refined latent state
+            final_plan = self.wrapper(h_latent)
             
             # Prepend the prompt embeddings with the 8-token latent plan
             gm = torch.cat([enc.attention_mask, torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=self.device)], dim=1)

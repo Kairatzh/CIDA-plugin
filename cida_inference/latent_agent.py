@@ -12,11 +12,28 @@ class LatentAgent:
         self.wrapper = wrapper
         self.llm = llm
         self.tokenizer = tokenizer
-        self.device = next(wrapper.parameters()).device
+        # Safely determine device
+        self.device = "cpu"
+        try:
+            self.device = next(wrapper.parameters()).device
+        except StopIteration:
+            if llm is not None:
+                try:
+                    self.device = next(llm.parameters()).device
+                except StopIteration:
+                    pass
+                    
+        # Safely determine d_model
+        d_llm = 4096
+        if hasattr(wrapper, "d_llm"):
+            d_llm = wrapper.d_llm
+        elif llm is not None and hasattr(llm, "config") and hasattr(llm.config, "hidden_size"):
+            d_llm = llm.config.hidden_size
+            
         self.tools = tools or {}
         
         # Initialize the Latent Memory scratchpad
-        self.memory = LatentMemory(wrapper.d_llm).to(self.device)
+        self.memory = LatentMemory(d_llm).to(self.device)
 
     def register_tool(self, name, func):
         """Register a new python tool for the agent."""
@@ -32,11 +49,45 @@ class LatentAgent:
         args_str = action_match.group(2)
         
         # Clean arguments: remove variable names (e.g. flight_id='FL-303' -> 'FL-303')
+        # We split by comma while respecting both single and double quotes
+        parts = []
+        current = []
+        in_double_quote = False
+        in_single_quote = False
+        for char in args_str:
+            if char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                current.append(char)
+            elif char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                current.append(char)
+            elif char == ',' and not in_double_quote and not in_single_quote:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(char)
+        if current:
+            parts.append("".join(current).strip())
+            
         args = []
-        for a in args_str.split(","):
+        for a in parts:
             a = a.strip()
             if "=" in a:
-                a = a.split("=")[1].strip()
+                # Remove keyword prefix, but respect it inside the string
+                # We split by '=' only outside of quotes
+                eq_idx = -1
+                in_dq = False
+                in_sq = False
+                for i, c in enumerate(a):
+                    if c == '"' and not in_sq:
+                        in_dq = not in_dq
+                    elif c == "'" and not in_dq:
+                        in_sq = not in_sq
+                    elif c == '=' and not in_dq and not in_sq:
+                        eq_idx = i
+                        break
+                if eq_idx != -1:
+                    a = a[eq_idx+1:].strip()
             a = a.strip('"').strip("'")
             if a:
                 args.append(a)

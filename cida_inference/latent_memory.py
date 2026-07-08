@@ -21,6 +21,20 @@ class LatentMemory(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.gate = nn.Linear(d_model * 2, 1)
 
+        # Initialize linear layers as Identity mappings (zero-shot ready)
+        with torch.no_grad():
+            nn.init.eye_(self.q_proj.weight)
+            nn.init.zeros_(self.q_proj.bias)
+            nn.init.eye_(self.k_proj.weight)
+            nn.init.zeros_(self.k_proj.bias)
+            nn.init.eye_(self.v_proj.weight)
+            nn.init.zeros_(self.v_proj.bias)
+            nn.init.eye_(self.out_proj.weight)
+            nn.init.zeros_(self.out_proj.bias)
+            
+            nn.init.zeros_(self.gate.weight)
+            nn.init.zeros_(self.gate.bias)
+
     def clear(self):
         """Reset the latent memory."""
         self.keys = []
