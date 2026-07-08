@@ -35,11 +35,24 @@ class LatentMemory(nn.Module):
             nn.init.zeros_(self.gate.weight)
             nn.init.zeros_(self.gate.bias)
 
-    def clear(self):
-        """Reset the latent memory."""
-        self.keys = []
-        self.values = []
-        self.texts = []
+    def clear(self, keep_seeded=True):
+        """Reset the latent memory, optionally preserving seeded clues."""
+        if keep_seeded:
+            new_keys = []
+            new_values = []
+            new_texts = []
+            for k, v, t in zip(self.keys, self.values, self.texts):
+                if not t.startswith("Called tool"):
+                    new_keys.append(k)
+                    new_values.append(v)
+                    new_texts.append(t)
+            self.keys = new_keys
+            self.values = new_values
+            self.texts = new_texts
+        else:
+            self.keys = []
+            self.values = []
+            self.texts = []
 
     def add_memory(self, key_tensor, value_tensor, text_desc=""):
         """

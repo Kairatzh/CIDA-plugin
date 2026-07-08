@@ -340,10 +340,19 @@ class LatentAgent:
                     if not self.silent_mode:
                         print(f"Observation: {obs}")
                     
-                    # Trigger Latent Rollback if an error occurs
-                    if str(obs).startswith("Error:") and turn_retry_count < max_retries - 1:
+                    # Trigger Latent Rollback if an error occurs (or non-200 HTTP status)
+                    is_error = str(obs).startswith("Error:") or not str(obs).startswith("Status 200:")
+                    if is_error and turn_retry_count < max_retries - 1:
                         turn_retry_count += 1
-                        # We do not commit this state to history, but we do attempt the turn generation again with perturbed latent planning
+                        # Retrieve the best clue matching the failed state
+                        active_concepts = self.memory.get_active_concepts(h_base, k=1)
+                        if active_concepts:
+                            concept, score = active_concepts[0]
+                            # Inject the clue text if it's a seeded loophole memory
+                            if score > 0.70 and not concept.startswith("Called tool"):
+                                history += f"\n[Latent Insight: {concept}]\n"
+                                if not self.silent_mode:
+                                    print(f"📖 [CIDA Latent Insight Injected] {concept}")
                         continue
                     
                     # Record this state in the latent memory index
