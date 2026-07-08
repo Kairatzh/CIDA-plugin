@@ -1,4 +1,5 @@
 import re
+import inspect
 import torch
 from .latent_memory import LatentMemory
 
@@ -57,8 +58,13 @@ class LatentAgent:
         """Runs the ReAct loop with latent memory integration."""
         self.memory.clear()
         
-        # List the available tool names dynamically in the system prompt
-        tools_desc = "\n".join([f"- {name}" for name in self.tools.keys()])
+        # Generate rich dynamic description with signatures and docstrings
+        tools_list = []
+        for name, func in self.tools.items():
+            sig = inspect.signature(func)
+            doc = func.__doc__.strip().split("\n")[0] if func.__doc__ else "Execute tool action."
+            tools_list.append(f"- {name}{sig}: {doc}")
+        tools_desc = "\n".join(tools_list)
         
         system_prompt = (
             "<|im_start|>system\n"

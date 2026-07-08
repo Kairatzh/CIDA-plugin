@@ -15,11 +15,13 @@ class FlightBookingEnv:
         self.bookings = []
         
     def search_flights(self, source: str, destination: str) -> str:
+        """Search available flights between source and destination."""
         return f"Flights found from {source} to {destination}:\n" + \
                "\n".join([f"- {fid}: Price ${f['price']}, Baggage Limit {f['baggage_limit']}kg, Transit: {f['transit']}"
                          for fid, f in self.flights.items()])
                
     def apply_coupon(self, flight_id: str, coupon_code: str) -> str:
+        """Apply promo coupon to a specific flight ID to reduce price."""
         if flight_id not in self.flights:
             return "Error: Flight not found."
         f = self.flights[flight_id]
@@ -30,6 +32,7 @@ class FlightBookingEnv:
         return "Error: Invalid coupon code."
         
     def book_ticket(self, flight_id: str, passenger_name: str, baggage_weight: float) -> str:
+        """Confirm ticket booking for passenger with baggage weight."""
         if flight_id not in self.flights:
             return "Error: Flight not found."
         f = self.flights[flight_id]
