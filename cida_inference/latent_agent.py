@@ -100,6 +100,12 @@ class LatentAgent:
         sig = inspect.signature(func)
         params = list(sig.parameters.values())
         
+        # Check if the function has variable arguments (*args or **kwargs)
+        has_var_args = any(p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for p in params)
+        if not has_var_args:
+            # Truncate extra arguments to match the expected signature length
+            args = args[:len(params)]
+            
         cast_args = []
         for idx, arg in enumerate(args):
             if idx < len(params):
@@ -147,11 +153,16 @@ class LatentAgent:
         system_prompt = (
             "<|im_start|>system\n"
             "You are a helpful assistant equipped with tools. Solve the task step-by-step.\n"
-            "Stop generation immediately after closing the code/action block. Do not simulate observations.\n\n"
+            "Stop generation immediately after closing the code/action block. Do not simulate observations.\n"
+            "IMPORTANT: You MUST match the exact tool signatures. Do not pass extra arguments or guess argument names. If a tool takes no arguments, call it with empty parentheses (e.g. tool_name()).\n\n"
             f"You have access to the following tools:\n{tools_desc}\n\n"
             "Format:\n"
             "Thought: <reasoning>\n"
-            "Action: <tool_name>(args)\n<|im_end|>\n"
+            "Action: <tool_name>(args)\n"
+            "Observation: <tool output>\n"
+            "... (repeat Thought/Action/Observation cycles as needed)\n"
+            "Thought: <reasoning>\n"
+            "Final Answer: <your final answer summarizing the result>\n<|im_end|>\n"
             f"<|im_start|>user\n{task_prompt}\n<|im_end|>\n"
             "<|im_start|>assistant\n"
         )

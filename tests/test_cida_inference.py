@@ -60,6 +60,12 @@ def test_latent_agent_csv_argument_parsing():
     assert name == "mock_tool"
     assert obs == "hello, world|test|12.0|10" # c cast to float, d uses default
 
+    # Case C: Extra argument truncation
+    resp_c = "Thought: test.\nAction: mock_tool('first', 'second', 12, d=5, extra_arg='should_be_dropped')"
+    name, obs = agent._parse_and_run_tool(resp_c)
+    assert name == "mock_tool"
+    assert obs == "first|second|12.0|5" # extra_arg is truncated and dropped
+
 def test_latent_reasoner_state_propagation():
     d_model = 8
     

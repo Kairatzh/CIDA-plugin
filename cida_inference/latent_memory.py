@@ -68,9 +68,16 @@ class LatentMemory(nn.Module):
         k = self.k_proj(K_stack) # (N, d_model)
         v = self.v_proj(V_stack) # (N, d_model)
 
-        # Compute cosine similarities / dot-product attention
-        scores = torch.matmul(q, k.transpose(0, 1)) / (self.d_model ** 0.5) # (1, N)
-        attn_weights = F.softmax(scores, dim=-1) # (1, N)
+        # L2 Normalize for true Cosine Similarity
+        q_norm = F.normalize(q, p=2, dim=-1)
+        k_norm = F.normalize(k, p=2, dim=-1)
+
+        # Compute cosine similarities (scores in range [-1.0, 1.0])
+        scores = torch.matmul(q_norm, k_norm.transpose(0, 1)) # (1, N)
+        
+        # Scale scores by temperature factor to prevent softmax flattening
+        scores_scaled = scores * 10.0
+        attn_weights = F.softmax(scores_scaled, dim=-1) # (1, N)
 
         # Retrieve weighted value representation
         context = torch.matmul(attn_weights, v) # (1, d_model)
@@ -85,7 +92,7 @@ class LatentMemory(nn.Module):
     def get_active_concepts(self, query_tensor, k=3):
         """
         Retrieve the text descriptions of the top k matching memories
-        for explainability logging.
+        for explainability logging using true cosine similarity.
         """
         if not self.keys:
             return []
@@ -96,8 +103,13 @@ class LatentMemory(nn.Module):
         with torch.no_grad():
             q = self.q_proj(query_tensor)
             k_proj = self.k_proj(K_stack)
+            
+            # L2 Normalize for true Cosine Similarity
+            q_norm = F.normalize(q, p=2, dim=-1)
+            k_norm = F.normalize(k_proj, p=2, dim=-1)
+            
             # Compute cosine similarities
-            scores = torch.matmul(q, k_proj.transpose(0, 1)).squeeze(0) # (N,)
+            scores = torch.matmul(q_norm, k_norm.transpose(0, 1)).squeeze(0) # (N,)
             
             top_k = min(k, len(self.keys))
             top_vals, top_idx = torch.topk(scores, top_k)
