@@ -8,6 +8,7 @@ import inspect
 import requests
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from cida_inference import CIDAWrapper, LatentAgent
+from cida_inference.parser_utils import split_arguments_safely, bind_arguments_to_signature
 
 # =========================================================================
 # 1. CLOUD OPERATIONS & ENVIRONMENT SIMULATOR (Mock REST API Gateway)
@@ -112,7 +113,6 @@ class BaseCoTAgent:
         
     def _parse_and_run_tool(self, response: str) -> tuple:
         """Parses the LLM response for tool calls and runs them safely supporting keyword arguments and nested brackets."""
-        import ast
         action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", response)
         if not action_match:
             return None, None
@@ -125,129 +125,13 @@ class BaseCoTAgent:
             
         func = self.tools[tool_name]
         sig = inspect.signature(func)
-        params = list(sig.parameters.values())
         
-        # Split args_str by comma, respecting quotes and curly/square brackets
-        parts = []
-        current = []
-        in_double_quote = False
-        in_single_quote = False
-        in_brackets = 0
+        parts = split_arguments_safely(args_str)
+        final_args, final_kwargs, err_msg = bind_arguments_to_signature(parts, sig)
         
-        for char in args_str:
-            if char == '"' and not in_single_quote:
-                in_double_quote = not in_double_quote
-                current.append(char)
-            elif char == "'" and not in_double_quote:
-                in_single_quote = not in_single_quote
-                current.append(char)
-            elif char in ('{', '[') and not in_double_quote and not in_single_quote:
-                in_brackets += 1
-                current.append(char)
-            elif char in ('}', ']') and not in_double_quote and not in_single_quote:
-                in_brackets = max(0, in_brackets - 1)
-                current.append(char)
-            elif char == ',' and not in_double_quote and not in_single_quote and in_brackets == 0:
-                parts.append("".join(current).strip())
-                current = []
-            else:
-                current.append(char)
-        if current:
-            parts.append("".join(current).strip())
+        if err_msg:
+            return tool_name, f"Error: {err_msg}"
             
-        args_list = []
-        kwargs_dict = {}
-        
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            
-            # Check if this is a keyword argument (has '=' outside of quotes and brackets)
-            eq_idx = -1
-            in_dq = False
-            in_sq = False
-            in_br = 0
-            for i, c in enumerate(part):
-                if c == '"' and not in_sq:
-                    in_dq = not in_dq
-                elif c == "'" and not in_dq:
-                    in_sq = not in_sq
-                elif c in ('{', '[') and not in_dq and not in_sq:
-                    in_br += 1
-                elif c in ('}', ']') and not in_dq and not in_sq:
-                    in_br = max(0, in_br - 1)
-                elif c == '=' and not in_dq and not in_sq and in_br == 0:
-                    eq_idx = i
-                    break
-            
-            if eq_idx != -1:
-                key = part[:eq_idx].strip()
-                val = part[eq_idx+1:].strip()
-                key = key.strip('"').strip("'")
-                kwargs_dict[key] = val
-            else:
-                args_list.append(part)
-                
-        # Bind according to signature
-        bound_args = {}
-        
-        def cast_value(val_str, param):
-            val_str = val_str.strip()
-            if (val_str.startswith('"') and val_str.endswith('"')) or (val_str.startswith("'") and val_str.endswith("'")):
-                val_str = val_str[1:-1]
-            annotation = param.annotation
-            if annotation == float:
-                try: return float(val_str)
-                except ValueError: return val_str
-            elif annotation == int:
-                try: return int(val_str)
-                except ValueError: return val_str
-            elif annotation == bool:
-                return val_str.lower() in ("true", "1", "yes")
-            return val_str
-
-        # Bind positional
-        for idx, arg_val in enumerate(args_list):
-            if idx < len(params):
-                param = params[idx]
-                bound_args[param.name] = cast_value(arg_val, param)
-                
-        # Bind keyword
-        for key, val_val in kwargs_dict.items():
-            found_param = None
-            for p in params:
-                if p.name == key:
-                    found_param = p
-                    break
-            if found_param:
-                bound_args[found_param.name] = cast_value(val_val, found_param)
-            else:
-                bound_args[key] = val_val
-                
-        # Fill defaults
-        for p in params:
-            if p.name not in bound_args:
-                if p.default != inspect.Parameter.empty:
-                    bound_args[p.name] = p.default
-                else:
-                    bound_args[p.name] = None
-                    
-        # Construct positional and keyword args for calling
-        final_args = []
-        final_kwargs = {}
-        for p in params:
-            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                final_args.append(bound_args.get(p.name))
-            elif p.kind == inspect.Parameter.KEYWORD_ONLY:
-                final_kwargs[p.name] = bound_args.get(p.name)
-            elif p.kind == inspect.Parameter.VAR_POSITIONAL:
-                pass
-            elif p.kind == inspect.Parameter.VAR_KEYWORD:
-                for k, v in bound_args.items():
-                    if k not in [param.name for param in params]:
-                        final_kwargs[k] = v
-                        
         print(f"⚙️ Calling Tool: {tool_name}(args={final_args}, kwargs={final_kwargs})")
         try:
             obs = func(*final_args, **final_kwargs)
