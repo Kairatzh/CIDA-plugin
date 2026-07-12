@@ -84,6 +84,8 @@ class LatentMemory(nn.Module):
         the attention scores are dynamically scaled based on historical tool reliability.
         """
         device = query_tensor.device
+        self.to(device)
+        
         if not self.keys:
             # Return zero vector if no memories are stored yet
             return torch.zeros_like(query_tensor)

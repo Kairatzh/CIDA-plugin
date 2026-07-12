@@ -66,19 +66,25 @@ class LatentReasoner:
             self.callbacks.on_deliberation_start(max_rounds, variance)
             
             actual_rounds = 0
-            for r in range(max_rounds):
-                actual_rounds = r + 1
-                co = self.wrapper.cida_core(pooled=h_latent)
-                disagreement_val = co.get("disagreement", torch.tensor([0.0])).mean().item()
-                
-                self.callbacks.on_deliberation_step(r, disagreement_val)
-                
-                if r >= min_rounds and disagreement_val < target_disagreement:
-                    break
-                
-                # Extract consensus state and project back to LLM space
-                plan = self.wrapper.base_projector(co["state_final"].s)
-                h_latent = plan.mean(dim=1) # Update working state recursively
+            
+            # --- FAST PATH EARLY EXIT ---
+            if variance < 0.05:
+                # Task is trivial, agents are in near-perfect agreement instantly.
+                self.callbacks.on_deliberation_step(0, variance)
+            else:
+                for r in range(max_rounds):
+                    actual_rounds = r + 1
+                    co = self.wrapper.cida_core(pooled=h_latent)
+                    disagreement_val = co.get("disagreement", torch.tensor([0.0])).mean().item()
+                    
+                    self.callbacks.on_deliberation_step(r, disagreement_val)
+                    
+                    if r >= min_rounds and disagreement_val < target_disagreement:
+                        break
+                    
+                    # Extract consensus state and project back to LLM space
+                    plan = self.wrapper.base_projector(co["state_final"].s)
+                    h_latent = plan.mean(dim=1) # Update working state recursively
             
             self.callbacks.on_deliberation_end(actual_rounds)
             

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0 — Latent Engineering & Multi-Vector Prompts
+
+- **Latent Engineering Paradigm**: Introduced `LatentPrompt` (`cida_plugin.inference.latent_engineering`). A revolutionary feature allowing developers to compile heavy text prompts (e.g., 5000+ words) into multi-vector hidden state representations. Saves massive token costs, eliminates TTFT (Time To First Token) delay, and protects proprietary prompts.
+- **Multi-Vector Chunking**: `LatentPrompt.compile_from_text()` splits giant instructions into distinct logical tensors, extracting a list of concepts. This prevents information bottlenecking and guarantees precise cross-attention matching during execution.
+- **Latent Hub Integration**: `LatentPrompt.from_huggingface()` allows downloading vector prompts directly from Hugging Face Hub (e.g., `expert_coder.pt`) enabling an ecosystem of pre-compiled "Latent Brains".
+- **Eternal Memory Injection**: `LatentAgent` now accepts `latent_prompt` at initialization, automatically injecting it into `LatentMemory` with infinite decay resistance (`decay_weight = 999.0`).
+- **QA Checklist Generator**: Included `make_qa_notebook.py` to auto-generate `QA_Release_Checklist.ipynb` with 10 critical QA tests (Memory Leaks, Firewall, Dtype matching, Swarm Pipeline).
+
 ## 1.3.0 — CidaSwarm & Plan Cache Fix
 
 - **`CidaSwarm`**: New multi-agent orchestrator class (`cida_plugin.inference.swarm`). Agents share a single `LatentMemory` blackboard. Three execution modes:

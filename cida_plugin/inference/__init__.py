@@ -3,6 +3,7 @@ from .latent_memory import LatentMemory
 from .latent_reasoner import LatentReasoner
 from .latent_agent import LatentAgent
 from .swarm import CidaSwarm, SwarmCallbackHandler
+from .latent_engineering import LatentPrompt
 
 __all__ = [
     "CIDAWrapper",
@@ -11,4 +12,5 @@ __all__ = [
     "LatentAgent",
     "CidaSwarm",
     "SwarmCallbackHandler",
+    "LatentPrompt"
 ]

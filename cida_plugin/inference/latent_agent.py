@@ -15,7 +15,8 @@ class LatentAgent:
     """
     def __init__(self, wrapper, llm, tokenizer, tools=None, silent_mode=False, 
                  default_reasoning_rounds=5, guardrails=None, callbacks=None,
-                 uncertainty_threshold=0.85, compress_history_limit=2, memory=None):
+                 uncertainty_threshold=0.85, compress_history_limit=2, memory=None,
+                 latent_prompt=None):
         self.wrapper = wrapper
         
         # Check and wrap llm using HuggingFaceBackbone if it's not already an LLMBackbone
@@ -67,6 +68,16 @@ class LatentAgent:
             self.memory = memory
         else:
             self.memory = LatentMemory(d_llm).to(self.device)
+            
+        # Inject Latent Prompt if provided (Zero-Shot Latent Steering & Exemplar Distillation)
+        self.latent_prompt = latent_prompt
+        if self.latent_prompt is not None:
+            for i, tensor in enumerate(self.latent_prompt.tensors):
+                tensor = tensor.to(self.device)
+                desc = self.latent_prompt.metadata.get("description", f"Injected Latent Concept #{i+1}")
+                self.memory.add_memory(tensor, tensor, text_desc=desc, tool_name="SYSTEM_LATENT_PROMPT")
+                # Force it to never decay (Latent Prior should stay active forever)
+                self.memory.decay_weights[-1] = 999.0
             
         self.history_turns = []
         
@@ -327,12 +338,13 @@ class LatentAgent:
             history += "Thought:"
         return history
 
-    def run(self, task_prompt: str, max_turns: int = 6, silent_mode: bool = None) -> str:
+    def run(self, task_prompt: str, max_turns: int = 6, silent_mode: bool = None, clear_memory: bool = True) -> str:
         """Runs the ReAct loop with latent memory integration, silent mode support, and latent rollback."""
         if silent_mode is not None:
             self.silent_mode = silent_mode
             
-        self.memory.clear()
+        if clear_memory:
+            self.memory.clear(keep_seeded=True)
         self.history_turns = []
         
         # Generate rich dynamic description with signatures and docstrings
@@ -536,8 +548,8 @@ class LatentAgent:
                     if not self.silent_mode:
                         print(f"Observation: {obs}")
                     
-                    # Trigger Latent Rollback if an error occurs (or non-200 HTTP status)
-                    is_error = str(obs).startswith("Error:") or not str(obs).startswith("Status 200:")
+                    # Trigger Latent Rollback if an error occurs
+                    is_error = str(obs).strip().startswith("Error:") or str(obs).strip().startswith("Failed:")
                     if is_error and turn_retry_count < max_retries - 1:
                         turn_retry_count += 1
                         self.callbacks.on_rollback(turn_retry_count, f"Tool failure or bad HTTP status: {obs[:100]}")

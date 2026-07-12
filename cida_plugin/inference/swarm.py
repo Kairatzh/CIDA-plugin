@@ -199,6 +199,7 @@ class CidaSwarm:
 
         if pipeline:
             # Sequential pipeline: each agent runs in order, building on shared memory
+            is_first = True
             for agent_name in pipeline:
                 if agent_name not in self.agents:
                     raise ValueError(f"Agent '{agent_name}' not found in swarm. Available: {list(self.agents.keys())}")
@@ -212,8 +213,9 @@ class CidaSwarm:
                     f"Task: {task}"
                 )
 
-                result = agent.run(agent_prompt, max_turns=max_turns)
+                result = agent.run(agent_prompt, max_turns=max_turns, clear_memory=is_first)
                 results[agent_name] = result
+                is_first = False
 
                 # If not the last agent, fire handoff callback
                 idx = pipeline.index(agent_name)
@@ -233,7 +235,7 @@ class CidaSwarm:
                 f"Task: {task}"
             )
 
-            result = agent.run(agent_prompt, max_turns=max_turns)
+            result = agent.run(agent_prompt, max_turns=max_turns, clear_memory=True)
             results[chosen] = result
 
         for cb in self.callbacks:
@@ -268,6 +270,7 @@ class CidaSwarm:
         str : Final merged result.
         """
         # Fan-out: each agent runs on the task
+        is_first = True
         for name in agent_names:
             if name not in self.agents:
                 raise ValueError(f"Agent '{name}' not found in swarm.")
@@ -275,7 +278,8 @@ class CidaSwarm:
             agent = self.agents[name]
             role_desc = self._agent_configs[name].get("role", name)
             agent_prompt = f"Your role: {role_desc}. Task: {task}"
-            agent.run(agent_prompt, max_turns=max_turns)
+            agent.run(agent_prompt, max_turns=max_turns, clear_memory=is_first)
+            is_first = False
 
         # Fan-in: merge agent reads all shared memory and produces final output
         if merge_agent not in self.agents:
@@ -291,7 +295,7 @@ class CidaSwarm:
             f"Original task: {task}"
         )
 
-        result = agent.run(merge_prompt, max_turns=max_turns)
+        result = agent.run(merge_prompt, max_turns=max_turns, clear_memory=False)
         return result
 
     def clear(self):
