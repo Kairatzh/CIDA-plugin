@@ -1,6 +1,6 @@
 import pytest
 import inspect
-from cida_inference.parser_utils import (
+from cida_plugin.inference.parser_utils import (
     parse_literal_robustly,
     split_arguments_safely,
     bind_arguments_to_signature
@@ -61,3 +61,26 @@ def test_bind_arguments_to_signature():
     parts = ["payload={'target': 'idle'}", "headers=None"]
     args, kwargs, err = bind_arguments_to_signature(parts, sig_api)
     assert args == [{"target": "idle"}, None]
+
+def test_find_first_balanced_action():
+    from cida_plugin.inference.parser_utils import find_first_balanced_action
+    
+    # Simple action
+    t, a = find_first_balanced_action("Action: my_tool(1, 'hello')")
+    assert t == "my_tool"
+    assert a == "1, 'hello'"
+    
+    # Nested parentheses inside string quotes
+    t, a = find_first_balanced_action("Some text... Action: process(data='a(b)c') rest...")
+    assert t == "process"
+    assert a == "data='a(b)c'"
+    
+    # Nested brackets/parentheses inside arguments
+    t, a = find_first_balanced_action("Action: complex_tool(dict(a=1, b=dict(c=2)))")
+    assert t == "complex_tool"
+    assert a == "dict(a=1, b=dict(c=2))"
+    
+    # No match
+    t, a = find_first_balanced_action("Thought: no action here")
+    assert t is None
+    assert a is None

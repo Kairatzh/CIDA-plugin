@@ -2,38 +2,59 @@ import re
 import inspect
 import torch
 from .latent_memory import LatentMemory
-from .parser_utils import split_arguments_safely, bind_arguments_to_signature
+from .parser_utils import split_arguments_safely, bind_arguments_to_signature, find_first_balanced_action
+from .backbone import LLMBackbone, HuggingFaceBackbone
+from .callbacks import BaseCallbackHandler, AgentCallbackManager, StdOutCallbackHandler
 
 class LatentAgent:
     """
     Agentic execution framework that integrates CIDA with custom python tools,
-    maintains factual state via LatentMemory, supports silent execution mode,
-    and performs latent rollback on tool failures.
+    maintains factual state via LatentMemory (supports Shared Latent Workspace),
+    performs adaptive latent compute (elastic thinking depth), implements a Intent-level Latent Firewall,
+    applies Reliability-weighted EMA tool tracking, and supports silent mode/callbacks.
     """
-    def __init__(self, wrapper, llm, tokenizer, tools=None, silent_mode=False, default_reasoning_rounds=5, guardrails=None):
+    def __init__(self, wrapper, llm, tokenizer, tools=None, silent_mode=False, 
+                 default_reasoning_rounds=5, guardrails=None, callbacks=None,
+                 uncertainty_threshold=0.85, compress_history_limit=2, memory=None):
         self.wrapper = wrapper
-        self.llm = llm
+        
+        # Check and wrap llm using HuggingFaceBackbone if it's not already an LLMBackbone
+        if llm is not None and not isinstance(llm, LLMBackbone):
+            self.llm = HuggingFaceBackbone(llm)
+        else:
+            self.llm = llm
+            
         self.tokenizer = tokenizer
         self.silent_mode = silent_mode
         self.default_reasoning_rounds = default_reasoning_rounds
+        self.uncertainty_threshold = uncertainty_threshold
+        self.compress_history_limit = compress_history_limit
+        self.enable_fast_path = True
         
+        # Callbacks
+        if callbacks is None:
+            self.callbacks = AgentCallbackManager([StdOutCallbackHandler()])
+        elif isinstance(callbacks, list):
+            self.callbacks = AgentCallbackManager(callbacks)
+        else:
+            self.callbacks = callbacks
+            
         # Safely determine device
         self.device = "cpu"
-        try:
-            self.device = next(wrapper.parameters()).device
-        except StopIteration:
-            if llm is not None:
-                try:
-                    self.device = next(llm.parameters()).device
-                except StopIteration:
-                    pass
-                    
+        if self.llm is not None:
+            self.device = self.llm.device
+        elif wrapper is not None:
+            try:
+                self.device = next(wrapper.parameters()).device
+            except StopIteration:
+                pass
+                
         # Safely determine d_model
         d_llm = 4096
         if hasattr(wrapper, "d_llm"):
             d_llm = wrapper.d_llm
-        elif llm is not None and hasattr(llm, "config") and hasattr(llm.config, "hidden_size"):
-            d_llm = llm.config.hidden_size
+        elif self.llm is not None and hasattr(self.llm, "config") and hasattr(self.llm.config, "hidden_size"):
+            d_llm = self.llm.config.hidden_size
             
         self.tools = tools or {}
         
@@ -41,8 +62,19 @@ class LatentAgent:
         if "call_web_api" not in self.tools:
             self.tools["call_web_api"] = self.call_web_api
             
-        # Initialize the Latent Memory scratchpad
-        self.memory = LatentMemory(d_llm).to(self.device)
+        # Shared Latent Workspace support: use provided memory instance, or create a new one
+        if memory is not None:
+            self.memory = memory
+        else:
+            self.memory = LatentMemory(d_llm).to(self.device)
+            
+        self.history_turns = []
+        
+        # Reliability-weighted tool trust: initialize reliability tracker
+        self.tool_reliability = {name: 1.0 for name in self.tools.keys()}
+        self.reliability_alpha = 0.9 # EMA smoothing factor
+        self.tool_failure_streaks = {name: 0 for name in self.tools.keys()}
+        self.tool_validators = {}
         
         # Initialize general-purpose functionalities: plan caching and dynamic guardrails
         self.plan_cache = {}
@@ -54,16 +86,18 @@ class LatentAgent:
                 try:
                     enc_g = self.tokenizer(g, return_tensors="pt").to(self.device)
                     with torch.no_grad():
-                        out_g = self.llm(input_ids=enc_g.input_ids, attention_mask=enc_g.attention_mask, output_hidden_states=True)
-                        h_g = out_g.hidden_states[-1][0, -1].float().unsqueeze(0)
+                        h_g = self.llm.get_last_hidden(input_ids=enc_g.input_ids, attention_mask=enc_g.attention_mask)
                         self.guardrail_embeds.append(h_g)
                 except Exception as e:
                     if not self.silent_mode:
                         print(f"⚠️ Failed to pre-embed guardrail '{g}': {e}")
 
-    def register_tool(self, name, func):
-        """Register a new python tool for the agent."""
+    def register_tool(self, name, func, validator=None):
+        """Register a new python tool for the agent with an optional heuristic validator."""
         self.tools[name] = func
+        self.tool_reliability[name] = 1.0
+        self.tool_failure_streaks[name] = 0
+        self.tool_validators[name] = validator
 
     def call_web_api(self, method: str, url: str, headers_json: str = None, payload_json: str = None) -> str:
         """
@@ -129,7 +163,49 @@ class LatentAgent:
         except Exception as e:
             return f"Error: Failed to connect to API: {e}"
 
-    def _parse_and_run_tool(self, response: str) -> str:
+    def check_guardrail(self, plan_pooled, threshold=0.85) -> bool:
+        """
+        Latent Firewall: Verify that the latent planning/intent representation
+        is not too close to the embedded negative/safety constraints.
+        Returns True if safe, False if unsafe.
+        """
+        if not self.guardrail_embeds:
+            return True
+        for g_embed in self.guardrail_embeds:
+            # pool/average if necessary, make sure shapes align
+            sim = torch.nn.functional.cosine_similarity(plan_pooled.view(1, -1), g_embed.view(1, -1)).item()
+            if sim > threshold:
+                self.callbacks.on_guardrail_violation(sim)
+                return False
+        return True
+
+    def _update_tool_reliability(self, tool_name: str, success: bool):
+        """Update EMA tool reliability and manage Tool Exhaustion Circuit Breaker."""
+        if tool_name not in self.tool_reliability:
+            self.tool_reliability[tool_name] = 1.0
+            self.tool_failure_streaks[tool_name] = 0
+            
+        val = 1.0 if success else 0.0
+        self.tool_reliability[tool_name] = self.tool_reliability[tool_name] * self.reliability_alpha + (1.0 - self.reliability_alpha) * val
+        
+        if success:
+            self.tool_failure_streaks[tool_name] = 0
+        else:
+            self.tool_failure_streaks[tool_name] += 1
+            # Circuit Breaker: Inject negative constraint if tool fails 3 times consecutively
+            if self.tool_failure_streaks[tool_name] == 3:
+                guard_str = f"Action: {tool_name} is broken and forbidden."
+                try:
+                    enc_g = self.tokenizer(guard_str, return_tensors="pt").to(self.device)
+                    with torch.no_grad():
+                        h_g = self.llm.get_last_hidden(input_ids=enc_g.input_ids, attention_mask=enc_g.attention_mask)
+                        self.guardrail_embeds.append(h_g)
+                    if not self.silent_mode:
+                        print(f"🚫 [Tool Exhaustion Circuit Breaker] Tool '{tool_name}' failed 3 times. Added to Latent Firewall.")
+                except Exception:
+                    pass
+
+    def _parse_and_run_tool(self, response: str) -> tuple[str, str]:
         """Parses the LLM response for tool calls and runs them safely supporting keyword arguments and nested brackets."""
         import json as json_lib
         
@@ -170,16 +246,19 @@ class LatentAgent:
             if not self.silent_mode:
                 print(f"🔄 Auto-redirecting raw HTTP Action to call_web_api(method='{method}', url='{url}', payload_json={payload_json})")
             
+            self.callbacks.on_tool_call("call_web_api", [], {"method": method, "url": url, "payload_json": payload_json})
             obs = self.call_web_api(method=method, url=url, payload_json=payload_json)
+            self.callbacks.on_tool_result("call_web_api", obs)
+            
+            # Update reliability
+            success = not (str(obs).startswith("Error:") or not str(obs).startswith("Status 200:"))
+            self._update_tool_reliability("call_web_api", success)
             return "call_web_api", obs
 
-        # 2. Standard tool call parsing
-        action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", response)
-        if not action_match:
+        # 2. Standard tool call parsing using balanced bracket logic
+        tool_name, args_str = find_first_balanced_action(response)
+        if not tool_name:
             return None, None
-            
-        tool_name = action_match.group(1)
-        args_str = action_match.group(2)
         
         if tool_name not in self.tools:
             return tool_name, f"Error: Tool '{tool_name}' not found."
@@ -191,17 +270,62 @@ class LatentAgent:
         final_args, final_kwargs, err_msg = bind_arguments_to_signature(parts, sig)
         
         if err_msg:
+            self._update_tool_reliability(tool_name, False)
             return tool_name, f"Error: {err_msg}"
             
         if not self.silent_mode:
             print(f"⚙️ Calling Tool: {tool_name}(args={final_args}, kwargs={final_kwargs})")
+            
+        self.callbacks.on_tool_call(tool_name, final_args, final_kwargs)
         try:
             obs = func(*final_args, **final_kwargs)
+            
+            # Heuristic Observation Validator check
+            validator = self.tool_validators.get(tool_name)
+            if validator is not None:
+                if not validator(obs):
+                    obs = f"Error: Validator rejected observation schema -> {str(obs)[:100]}"
+                    
+            self.callbacks.on_tool_result(tool_name, obs)
+            success = not str(obs).startswith("Error:")
+            self._update_tool_reliability(tool_name, success)
             return tool_name, obs
         except TypeError as te:
-            return tool_name, f"Error: Tool call parameters mismatch: {te}"
+            obs = f"Error: Tool call parameters mismatch: {te}"
+            self.callbacks.on_tool_result(tool_name, obs)
+            self._update_tool_reliability(tool_name, False)
+            return tool_name, obs
         except Exception as e:
-            return tool_name, f"Error: {e}"
+            obs = f"Error: {e}"
+            self.callbacks.on_tool_result(tool_name, obs)
+            self._update_tool_reliability(tool_name, False)
+            return tool_name, obs
+
+    def _reconstruct_history(self, system_prompt: str, task_prompt: str) -> str:
+        """
+        Reconstructs the prompt string, compressing older turns into Latent Memory 
+        if the number of turns exceeds self.compress_history_limit.
+        """
+        history = system_prompt
+        num_turns = len(self.history_turns)
+        
+        start_turn = 0
+        if num_turns > self.compress_history_limit:
+            start_turn = num_turns - self.compress_history_limit
+            history += "\n... [Older execution history compressed into Latent Memory] ...\n\n"
+            
+        for idx in range(start_turn, num_turns):
+            turn_data = self.history_turns[idx]
+            if self.silent_mode:
+                history += f"Action: {turn_data['action']}\nObservation: {turn_data['observation']}\n"
+            else:
+                history += f"Thought: {turn_data['thought']}\nAction: {turn_data['action']}\nObservation: {turn_data['observation']}\n\n"
+                
+        if self.silent_mode:
+            history += "Action:"
+        else:
+            history += "Thought:"
+        return history
 
     def run(self, task_prompt: str, max_turns: int = 6, silent_mode: bool = None) -> str:
         """Runs the ReAct loop with latent memory integration, silent mode support, and latent rollback."""
@@ -209,6 +333,7 @@ class LatentAgent:
             self.silent_mode = silent_mode
             
         self.memory.clear()
+        self.history_turns = []
         
         # Generate rich dynamic description with signatures and docstrings
         tools_list = []
@@ -231,7 +356,6 @@ class LatentAgent:
                 f"<|im_start|>user\n{task_prompt}\n<|im_end|>\n"
                 "<|im_start|>assistant\n"
             )
-            history = system_prompt + "Action:"
         else:
             system_prompt = (
                 "<|im_start|>system\n"
@@ -250,14 +374,16 @@ class LatentAgent:
                 f"<|im_start|>user\n{task_prompt}\n<|im_end|>\n"
                 "<|im_start|>assistant\n"
             )
-            history = system_prompt
         
-        compute_dtype = next(self.llm.parameters()).dtype if self.llm is not None else torch.float32
+        compute_dtype = self.llm.dtype if self.llm is not None else torch.float32
         
         turn = 0
         while turn < max_turns:
+            self.callbacks.on_turn_start(turn)
             if not self.silent_mode:
                 print(f"\n[Turn {turn + 1}] Processing plan...")
+            
+            history = self._reconstruct_history(system_prompt, task_prompt)
             enc = self.tokenizer(history, return_tensors="pt").to(self.device)
             
             turn_retry_count = 0
@@ -265,8 +391,7 @@ class LatentAgent:
             
             while turn_retry_count < max_retries:
                 with torch.no_grad():
-                    out = self.llm(input_ids=enc.input_ids, attention_mask=enc.attention_mask, output_hidden_states=True)
-                    h_base = out.hidden_states[-1][0, -1].float().unsqueeze(0)
+                    h_base = self.llm.get_last_hidden(input_ids=enc.input_ids, attention_mask=enc.attention_mask)
                     
                     # CIDA Explainable Latent Diary: Retrieve active concepts
                     if not self.silent_mode:
@@ -276,8 +401,8 @@ class LatentAgent:
                             for concept, score in active_concepts:
                                 print(f"  🧠 Similarity {score:.2f} | {concept}")
                     
-                    # Retrieve and mix past planning states from LatentMemory
-                    h_mixed = self.memory.retrieve(h_base)
+                    # Retrieve and mix past planning states using Reliability-weighted Tool Trust
+                    h_mixed = self.memory.retrieve(h_base, tool_reliability=self.tool_reliability)
                     
                     # Check Plan Cache
                     plan = None
@@ -294,21 +419,35 @@ class LatentAgent:
                             print(f"💾 [CIDA Plan Cache] HIT (Similarity: {best_sim:.4f}). Reusing cached latent planning state.")
                         plan = best_plan
                     else:
-                        # Adaptive Compute: Determine task complexity dynamically via agent state variance
+                        # Determine task complexity dynamically via agent state variance
                         with torch.no_grad():
                             co_check = self.wrapper.cida_core(pooled=h_mixed)
                             agent_states = co_check["state_final"].s
                             agent_mean = agent_states.mean(dim=1, keepdim=True)
                             variance = torch.var(agent_states - agent_mean).item()
                             
-                        if variance < 0.05:
-                            current_rounds = max(1, self.default_reasoning_rounds // 2)
+                        # Callback trigger
+                        self.callbacks.on_deliberation_start(self.default_reasoning_rounds, variance)
+                        
+                        # Uncertainty-based escalation check
+                        uncertainty_val = co_check.get("uncertainty", torch.tensor([0.0])).mean().item()
+                        if uncertainty_val > self.uncertainty_threshold:
+                            self.callbacks.on_uncertainty_high(uncertainty_val, self.uncertainty_threshold)
+                            if turn_retry_count < max_retries - 1:
+                                turn_retry_count += 1
+                                self.callbacks.on_rollback(turn_retry_count, f"High latent uncertainty: {uncertainty_val:.4f}")
+                                h_mixed = h_mixed + torch.randn_like(h_mixed) * 0.05
+                                continue
+                            
+                        if variance < 0.05 and self.enable_fast_path:
+                            # Fast-Path Heuristic: Extremely low variance means trivial task, skip heavy loop
+                            current_rounds = 0
                             if not self.silent_mode:
-                                print(f"⚡ [CIDA Adaptive Compute] Simple Task Detected (Variance: {variance:.4f}). Deliberation scaled down to {current_rounds} rounds.")
+                                print(f"⚡ [Fast-Path] Trivial task detected (variance {variance:.4f}). Bypassing Latent Deliberation.")
+                        elif variance < 0.15:
+                            current_rounds = max(1, self.default_reasoning_rounds // 2)
                         else:
                             current_rounds = self.default_reasoning_rounds
-                            if not self.silent_mode:
-                                print(f"🧠 [CIDA Adaptive Compute] Complex Task Detected (Variance: {variance:.4f}). Deliberation scaled up to {current_rounds} rounds.")
                                 
                         h_latent = h_mixed.clone()
                         if turn_retry_count > 0:
@@ -316,28 +455,41 @@ class LatentAgent:
                             h_latent = h_latent + torch.randn_like(h_latent) * 0.02
                             if not self.silent_mode:
                                 print(f"⚠️ [Latent Rollback] Retry {turn_retry_count}/{max_retries} - Scaling deliberation to {current_rounds} rounds with latent perturbation.")
-                                
-                        for _ in range(current_rounds):
-                            # Guardrail verification: Check if planning state is too close to a negative guardrail embedding
-                            violation_detected = False
-                            for g_embed in self.guardrail_embeds:
-                                sim_g = torch.nn.functional.cosine_similarity(h_latent, g_embed).item()
-                                if sim_g > 0.85:
-                                    violation_detected = True
-                                    if not self.silent_mode:
-                                        print(f"🛡️ [CIDA Guardrail] Latent Violation Warning! Similarity to constraint: {sim_g:.4f}")
-                                    break
-                                    
-                            if violation_detected:
+                        
+                        # Dynamic/Adaptive Deliberation with Latent Firewall constraint checking
+                        min_rounds = max(1, current_rounds // 3)
+                        max_rounds = current_rounds * 2
+                        target_disagreement = 0.15
+                        
+                        actual_rounds = 0
+                        for r in range(max_rounds):
+                            actual_rounds = r + 1
+                            
+                            # 1. Latent Firewall: Check intentions before step execution
+                            if not self.check_guardrail(h_latent):
+                                if not self.silent_mode:
+                                    print("🛡️ [CIDA Latent Firewall] Preventative constraint violation detected. Forcing intent perturbation.")
                                 h_latent = h_latent + torch.randn_like(h_latent) * 0.05
                                 
                             co = self.wrapper.cida_core(pooled=h_latent)
+                            disagreement_val = co.get("disagreement", torch.tensor([0.0])).mean().item()
+                            
+                            # Log step metrics
+                            self.callbacks.on_deliberation_step(r, disagreement_val)
+                            
+                            # Convergence check
+                            if r >= min_rounds and disagreement_val < target_disagreement:
+                                if not self.silent_mode:
+                                    print(f"🎯 [CIDA Adaptive Compute] Deliberation converged early at round {r+1} (Disagreement: {disagreement_val:.4f} < {target_disagreement})")
+                                break
+                                
                             p_state = self.wrapper.base_projector(co["state_final"].s)
                             h_latent = p_state.mean(dim=1)
                             
                         plan = self.wrapper(h_latent)
                         # Save to cache
                         self.plan_cache[h_base.clone()] = plan.clone()
+                        self.callbacks.on_deliberation_end(actual_rounds)
                     
                     # Generate next step
                     p_emb = self.llm.get_input_embeddings()(enc.input_ids).detach()
@@ -348,7 +500,7 @@ class LatentAgent:
                     if im_end_id is not None and not isinstance(im_end_id, list):
                         eos_ids.append(im_end_id)
                     
-                    ids = self.llm.generate(
+                    ids = self.llm.generate_from_embeds(
                         inputs_embeds=torch.cat([p_emb.to(compute_dtype), plan.to(compute_dtype)], dim=1),
                         attention_mask=gm,
                         max_new_tokens=250,
@@ -374,6 +526,7 @@ class LatentAgent:
                 if not self.silent_mode:
                     print(response)
                 
+                self.callbacks.on_turn_end(response)
                 if "Final Answer:" in response:
                     return response
                     
@@ -387,25 +540,44 @@ class LatentAgent:
                     is_error = str(obs).startswith("Error:") or not str(obs).startswith("Status 200:")
                     if is_error and turn_retry_count < max_retries - 1:
                         turn_retry_count += 1
+                        self.callbacks.on_rollback(turn_retry_count, f"Tool failure or bad HTTP status: {obs[:100]}")
+                        
+                        # Invalidate Plan Cache for this h_base to prevent stale HIT death-loops
+                        stale_keys = [k for k in self.plan_cache if torch.nn.functional.cosine_similarity(h_base, k).item() > 0.90]
+                        for sk in stale_keys:
+                            del self.plan_cache[sk]
+                        
                         # Retrieve the best clue matching the failed state
                         active_concepts = self.memory.get_active_concepts(h_base, k=1)
                         if active_concepts:
                             concept, score = active_concepts[0]
                             # Inject the clue text if it's a seeded loophole memory
                             if score > 0.70 and not concept.startswith("Called tool"):
-                                history += f"\n[Latent Insight: {concept}]\n"
                                 if not self.silent_mode:
-                                    print(f"📖 [CIDA Latent Insight Injected] {concept}")
+                                    print(f"📖 [CIDA Latent Clue] {concept}")
                         continue
                     
-                    # Record this state in the latent memory index
+                    # Record this state in the latent memory index with tool tracking
                     with torch.no_grad():
                         desc = f"Called tool '{tool_name}'. Result: '{obs}'"
-                        self.memory.add_memory(h_base, h_base, text_desc=desc)
+                        self.memory.add_memory(h_base, h_base, text_desc=desc, tool_name=tool_name)
                     
-                    history += response + f"\nObservation: {obs}\n"
-                    if self.silent_mode:
-                        history += "Action:"
+                    # Extract thought and action
+                    thought = ""
+                    action_str = response
+                    if not self.silent_mode:
+                        thought_match = re.search(r"Thought:\s*(.*?)\s*Action:", response, re.DOTALL)
+                        if thought_match:
+                            thought = thought_match.group(1).strip()
+                        action_match = re.search(r"Action:\s*(\w+\(.*\))", response, re.DOTALL)
+                        if action_match:
+                            action_str = action_match.group(1).strip()
+                    
+                    self.history_turns.append({
+                        "thought": thought,
+                        "action": action_str,
+                        "observation": obs
+                    })
                     break
                 else:
                     if not self.silent_mode:

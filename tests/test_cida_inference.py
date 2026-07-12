@@ -1,9 +1,9 @@
 import pytest
 import torch
 import torch.nn as nn
-from cida_inference.latent_memory import LatentMemory
-from cida_inference.latent_agent import LatentAgent
-from cida_inference.latent_reasoner import LatentReasoner
+from cida_plugin.inference.latent_memory import LatentMemory
+from cida_plugin.inference.latent_agent import LatentAgent
+from cida_plugin.inference.latent_reasoner import LatentReasoner
 
 def test_latent_memory_identity_and_retrieval():
     d_model = 16
@@ -101,13 +101,24 @@ def test_latent_reasoner_state_propagation():
                     return torch.ones(1, ids.shape[1], d_model)
             return Embed()
             
-        def forward(self, input_ids, attention_mask, output_hidden_states):
-            class Out:
-                def __init__(self):
-                    self.hidden_states = [None, torch.ones(1, 4, d_model) * 0.5]
-            return Out()
-            
-        def generate(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, **kwargs):
+        def get_last_hidden(self, input_ids, attention_mask):
+            return torch.ones(1, d_model) * 0.5
+
+        @property
+        def device(self):
+            return "cpu"
+
+        @property
+        def dtype(self):
+            return torch.float32
+
+        @property
+        def config(self):
+            class Config:
+                hidden_size = d_model
+            return Config()
+
+        def generate_from_embeds(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, **kwargs):
             return torch.tensor([[100, 101]])
             
     class MockTokenizer:
@@ -187,13 +198,20 @@ def test_latent_agent_dynamic_features():
                 def __call__(self, ids):
                     return torch.ones(1, ids.shape[1], d_model)
             return Embed()
-        def forward(self, input_ids, attention_mask, output_hidden_states=True):
-            class Out:
-                def __init__(self):
-                    # We return hidden state matching base
-                    self.hidden_states = [None, torch.ones(1, 4, d_model) * 0.5]
-            return Out()
-        def generate(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+        def get_last_hidden(self, input_ids, attention_mask):
+            return torch.ones(1, d_model) * 0.5
+        @property
+        def device(self):
+            return "cpu"
+        @property
+        def dtype(self):
+            return torch.float32
+        @property
+        def config(self):
+            class Config:
+                hidden_size = d_model
+            return Config()
+        def generate_from_embeds(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
             return torch.tensor([[100, 101]])
 
     class MockTokenizer:
@@ -237,6 +255,466 @@ def test_latent_agent_dynamic_features():
 
     # 3. Run second time with same prompt (triggers Plan Cache HIT)
     # Clear cache hit status by using self.plan_cache and check retrieval
+    # 3. Run second time with same prompt (triggers Plan Cache HIT)
+    # Clear cache hit status by using self.plan_cache and check retrieval
     res2 = agent.run("Task prompt", max_turns=1)
     assert "Final Answer: Done." in res2
 
+def test_latent_memory_persistence(tmp_path):
+    d_model = 8
+    memory = LatentMemory(d_model)
+    v = torch.ones(1, d_model)
+    memory.add_memory(v, v, "test memory")
+    
+    filepath = str(tmp_path / "memory.pt")
+    memory.save_to_file(filepath)
+    
+    new_memory = LatentMemory(d_model)
+    new_memory.load_from_file(filepath)
+    
+    assert new_memory.d_model == d_model
+    assert len(new_memory.keys) == 1
+    assert new_memory.texts[0] == "test memory"
+    assert torch.allclose(new_memory.keys[0], v.squeeze())
+
+def test_latent_agent_callbacks_and_compression():
+    d_model = 8
+    
+    class MockCore:
+        def __call__(self, pooled):
+            class FinalState:
+                def __init__(self):
+                    self.s = torch.ones(1, 4, d_model) * 1.0
+            return {"state_final": FinalState(), "uncertainty": torch.tensor([0.1])}
+
+    class MockWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cida_core = MockCore()
+            self.base_projector = lambda s: s
+            self.d_llm = d_model
+        def forward(self, h):
+            return h.unsqueeze(1).expand(-1, 8, -1)
+
+    class MockLLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = nn.Parameter(torch.zeros(1))
+        def get_input_embeddings(self):
+            class Embed:
+                def __call__(self, ids):
+                    return torch.ones(1, ids.shape[1], d_model)
+            return Embed()
+        def get_last_hidden(self, input_ids, attention_mask):
+            return torch.ones(1, d_model) * 0.5
+        @property
+        def device(self):
+            return "cpu"
+        @property
+        def dtype(self):
+            return torch.float32
+        @property
+        def config(self):
+            class Config:
+                hidden_size = d_model
+            return Config()
+        def generate_from_embeds(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+            return torch.tensor([[100, 101]])
+
+    class MockTokenizer:
+        def __call__(self, text, return_tensors):
+            class Enc:
+                def __init__(self):
+                    self.input_ids = torch.tensor([[1, 2, 3]])
+                    self.attention_mask = torch.tensor([[1, 1, 1]])
+                def to(self, device):
+                    return self
+            return Enc()
+        def decode(self, ids, skip_special_tokens):
+            return "Action: dummy_tool()\nObservation: Result: Ok"
+        @property
+        def pad_token_id(self): return 0
+        @property
+        def eos_token_id(self): return 1
+        def convert_tokens_to_ids(self, tok): return 1
+
+    from cida_plugin.inference.callbacks import BaseCallbackHandler
+    
+    class TrackingCallback(BaseCallbackHandler):
+        def __init__(self):
+            self.turns = 0
+            self.tools_called = []
+            self.deliberation_started = False
+            
+        def on_turn_start(self, turn_idx):
+            self.turns += 1
+            
+        def on_tool_call(self, tool_name, args, kwargs):
+            self.tools_called.append(tool_name)
+            
+        def on_deliberation_start(self, rounds, variance):
+            self.deliberation_started = True
+
+    tracker = TrackingCallback()
+    
+    agent = LatentAgent(
+        wrapper=MockWrapper(),
+        llm=MockLLM(),
+        tokenizer=MockTokenizer(),
+        tools={"dummy_tool": lambda: "Result: Ok"},
+        callbacks=[tracker],
+        compress_history_limit=1
+    )
+    
+    # Run 2 turns
+    # Turn 1:
+    res1 = agent._parse_and_run_tool("Action: dummy_tool()")
+    agent.history_turns.append({"thought": "", "action": "dummy_tool()", "observation": res1[1]})
+    
+    # Turn 2:
+    res2 = agent._parse_and_run_tool("Action: dummy_tool()")
+    agent.history_turns.append({"thought": "", "action": "dummy_tool()", "observation": res2[1]})
+    
+    # Reconstruct history should compress
+    hist = agent._reconstruct_history("System prompt", "Task prompt")
+    assert "... [Older execution history compressed into Latent Memory]" in hist
+    
+    # Verify callbacks
+    agent.run("Task prompt", max_turns=1)
+    assert tracker.turns > 0
+    assert tracker.deliberation_started
+
+
+def test_adaptive_latent_compute_and_firewall_and_reliability():
+    d_model = 8
+    
+    class MockCore:
+        def __call__(self, pooled):
+            class FinalState:
+                def __init__(self):
+                    self.s = torch.ones(1, 4, d_model) * 1.0
+            return {
+                "state_final": FinalState(),
+                "uncertainty": torch.tensor([0.1]),
+                "disagreement": torch.tensor([0.05])
+            }
+
+    class MockWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cida_core = MockCore()
+            self.base_projector = lambda s: s
+            self.d_llm = d_model
+        def forward(self, h):
+            return h.unsqueeze(1).expand(-1, 8, -1)
+
+    class MockLLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = nn.Parameter(torch.zeros(1))
+        def get_input_embeddings(self):
+            class Embed:
+                def __call__(self, ids):
+                    return torch.ones(1, ids.shape[1], d_model)
+            return Embed()
+        def get_last_hidden(self, input_ids, attention_mask):
+            return torch.ones(1, d_model) * 0.5
+        @property
+        def device(self): return "cpu"
+        @property
+        def dtype(self): return torch.float32
+        @property
+        def config(self):
+            class Config:
+                hidden_size = d_model
+            return Config()
+        def generate_from_embeds(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+            return torch.tensor([[100, 101]])
+
+    class MockTokenizer:
+        def __call__(self, text, return_tensors):
+            class Enc:
+                def __init__(self):
+                    self.input_ids = torch.tensor([[1, 2, 3]])
+                    self.attention_mask = torch.tensor([[1, 1, 1]])
+                def to(self, device): return self
+            return Enc()
+        def decode(self, ids, skip_special_tokens):
+            return "Action: test_tool()\nObservation: Done"
+        @property
+        def pad_token_id(self): return 0
+        @property
+        def eos_token_id(self): return 1
+        def convert_tokens_to_ids(self, tok): return 1
+
+    from cida_plugin.inference.callbacks import BaseCallbackHandler
+    
+    class TestCallback(BaseCallbackHandler):
+        def __init__(self):
+            self.steps = 0
+            self.guardrail_violations = 0
+        def on_deliberation_step(self, round_idx, disagreement):
+            self.steps += 1
+        def on_guardrail_violation(self, similarity):
+            self.guardrail_violations += 1
+
+    cb = TestCallback()
+    
+    # 1. Test Latent Firewall
+    guardrails = ["forbidden action"]
+    agent = LatentAgent(
+        wrapper=MockWrapper(),
+        llm=MockLLM(),
+        tokenizer=MockTokenizer(),
+        tools={"test_tool": lambda: "Result: Ok"},
+        guardrails=guardrails,
+        callbacks=[cb],
+        default_reasoning_rounds=5
+    )
+    
+    assert len(agent.guardrail_embeds) == 1
+    
+    h_base = torch.ones(1, d_model)
+    assert not agent.check_guardrail(h_base)
+    assert cb.guardrail_violations == 1
+    
+    # 2. Test Adaptive Latent Compute
+    agent.enable_fast_path = False
+    agent.run("do something", max_turns=1)
+    assert cb.steps > 0
+    
+    # 3. Test Reliability-Weighted Tool Trust
+    assert agent.tool_reliability["test_tool"] == 1.0
+    agent._parse_and_run_tool("Action: test_tool()")
+    assert agent.tool_reliability["test_tool"] == 1.0
+    
+    agent.tools["test_tool"] = lambda: "Error: something went wrong"
+    agent._parse_and_run_tool("Action: test_tool()")
+    assert agent.tool_reliability["test_tool"] < 1.0
+    
+    # 4. Test Shared Latent Workspace
+    agent_b = LatentAgent(
+        wrapper=MockWrapper(),
+        llm=MockLLM(),
+        tokenizer=MockTokenizer(),
+        tools={},
+        memory=agent.memory
+    )
+    assert agent_b.memory is agent.memory
+
+
+def test_cida_swarm_initialization_and_routing():
+    """Test that CidaSwarm initializes agents and routes tasks by cosine similarity."""
+    d_model = 8
+
+    class MockCore:
+        def __call__(self, pooled):
+            class FinalState:
+                def __init__(self):
+                    self.s = torch.ones(1, 4, d_model)
+            return {
+                "state_final": FinalState(),
+                "uncertainty": torch.tensor([0.1]),
+                "disagreement": torch.tensor([0.05])
+            }
+
+    class MockWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cida_core = MockCore()
+            self.base_projector = lambda s: s
+            self.d_llm = d_model
+        def forward(self, h):
+            return h.unsqueeze(1).expand(-1, 8, -1)
+
+    class MockLLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = nn.Parameter(torch.zeros(1))
+        def get_input_embeddings(self):
+            class Embed:
+                def __call__(self, ids):
+                    return torch.ones(1, ids.shape[1], d_model)
+            return Embed()
+        def get_last_hidden(self, input_ids, attention_mask):
+            return torch.ones(1, d_model) * 0.5
+        @property
+        def device(self): return "cpu"
+        @property
+        def dtype(self): return torch.float32
+        @property
+        def config(self):
+            class Config:
+                hidden_size = d_model
+            return Config()
+        def generate_from_embeds(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+            return torch.tensor([[100, 101]])
+
+    class MockTokenizer:
+        def __call__(self, text, return_tensors):
+            class Enc:
+                def __init__(self):
+                    self.input_ids = torch.tensor([[1, 2, 3]])
+                    self.attention_mask = torch.tensor([[1, 1, 1]])
+                def to(self, device): return self
+            return Enc()
+        def decode(self, ids, skip_special_tokens):
+            return "Final Answer: done"
+        @property
+        def pad_token_id(self): return 0
+        @property
+        def eos_token_id(self): return 1
+        def convert_tokens_to_ids(self, tok): return 1
+
+    from cida_plugin.inference.swarm import CidaSwarm, SwarmCallbackHandler
+
+    # Track routing decisions
+    class TestSwarmCB(SwarmCallbackHandler):
+        def __init__(self):
+            self.routed_to = None
+            self.completed = False
+        def on_route_decision(self, task, chosen, sim):
+            self.routed_to = chosen
+        def on_swarm_complete(self, results):
+            self.completed = True
+
+    cb = TestSwarmCB()
+
+    swarm = CidaSwarm(
+        wrapper=MockWrapper(),
+        llm=MockLLM(),
+        tokenizer=MockTokenizer(),
+        agent_configs={
+            "researcher": {
+                "role": "search the web for information",
+                "tools": {"web_search": lambda q: f"Result for {q}"},
+            },
+            "writer": {
+                "role": "write reports and documents",
+                "tools": {"write_doc": lambda text: f"Wrote: {text}"},
+            },
+        },
+        callbacks=[cb],
+    )
+
+    # 1. Test initialization
+    assert len(swarm.agents) == 2
+    assert "researcher" in swarm.agents
+    assert "writer" in swarm.agents
+    assert len(swarm.role_embeddings) == 2
+
+    # 2. Test shared memory
+    assert swarm.agents["researcher"].memory is swarm.agents["writer"].memory
+    assert swarm.agents["researcher"].memory is swarm.shared_memory
+
+    # 3. Test routing returns a valid agent
+    chosen = swarm.route("search for CIDA benchmarks")
+    assert chosen in ("researcher", "writer")
+    assert cb.routed_to is not None
+
+    # 4. Test auto-route run
+    results = swarm.run("find some data", max_turns=1)
+    assert isinstance(results, dict)
+    assert len(results) >= 1
+    assert cb.completed
+
+    # 5. Test pipeline mode
+    results_pipe = swarm.run("research and write", max_turns=1, pipeline=["researcher", "writer"])
+    assert "researcher" in results_pipe
+    assert "writer" in results_pipe
+
+    # 6. Test clear
+    swarm.clear()
+    assert len(swarm.shared_memory.keys) == 0
+
+    # 7. Test repr
+    r = repr(swarm)
+    assert "CidaSwarm" in r
+
+
+def test_cida_swarm_fan_out_fan_in():
+    """Test the parallel fan-out / merge fan-in pattern."""
+    d_model = 8
+
+    class MockCore:
+        def __call__(self, pooled):
+            class FinalState:
+                def __init__(self):
+                    self.s = torch.ones(1, 4, d_model)
+            return {
+                "state_final": FinalState(),
+                "uncertainty": torch.tensor([0.1]),
+                "disagreement": torch.tensor([0.05])
+            }
+
+    class MockWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cida_core = MockCore()
+            self.base_projector = lambda s: s
+            self.d_llm = d_model
+        def forward(self, h):
+            return h.unsqueeze(1).expand(-1, 8, -1)
+
+    class MockLLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = nn.Parameter(torch.zeros(1))
+        def get_input_embeddings(self):
+            class Embed:
+                def __call__(self, ids):
+                    return torch.ones(1, ids.shape[1], d_model)
+            return Embed()
+        def get_last_hidden(self, input_ids, attention_mask):
+            return torch.ones(1, d_model) * 0.5
+        @property
+        def device(self): return "cpu"
+        @property
+        def dtype(self): return torch.float32
+        @property
+        def config(self):
+            class Config:
+                hidden_size = d_model
+            return Config()
+        def generate_from_embeds(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+            return torch.tensor([[100, 101]])
+
+    class MockTokenizer:
+        def __call__(self, text, return_tensors):
+            class Enc:
+                def __init__(self):
+                    self.input_ids = torch.tensor([[1, 2, 3]])
+                    self.attention_mask = torch.tensor([[1, 1, 1]])
+                def to(self, device): return self
+            return Enc()
+        def decode(self, ids, skip_special_tokens):
+            return "Final Answer: merged result"
+        @property
+        def pad_token_id(self): return 0
+        @property
+        def eos_token_id(self): return 1
+        def convert_tokens_to_ids(self, tok): return 1
+
+    from cida_plugin.inference.swarm import CidaSwarm
+
+    swarm = CidaSwarm(
+        wrapper=MockWrapper(),
+        llm=MockLLM(),
+        tokenizer=MockTokenizer(),
+        agent_configs={
+            "analyst_a": {"role": "financial analysis", "tools": {}},
+            "analyst_b": {"role": "risk assessment", "tools": {}},
+            "editor": {"role": "merge findings into report", "tools": {}},
+        },
+        callbacks=[],
+    )
+
+    result = swarm.run_parallel_then_merge(
+        task="Evaluate acquisition target",
+        agent_names=["analyst_a", "analyst_b"],
+        merge_agent="editor",
+        max_turns=1,
+    )
+
+    assert isinstance(result, str)
+    assert len(result) > 0

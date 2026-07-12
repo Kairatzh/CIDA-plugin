@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.0 — CidaSwarm & Plan Cache Fix
+
+- **`CidaSwarm`**: New multi-agent orchestrator class (`cida_plugin.inference.swarm`). Agents share a single `LatentMemory` blackboard. Three execution modes:
+  - **Auto-route**: cosine-similarity routing between task embedding and agent role embeddings.
+  - **Pipeline**: sequential agent execution (Agent A → Agent B → ...), each building on shared memory.
+  - **Fan-out / Fan-in**: parallel agents + a merge agent that synthesizes all findings.
+- **Plan Cache invalidation on tool error**: When a tool fails, stale cache entries (similarity > 0.90) are evicted. This prevents the "death loop" where the agent re-generates the same broken plan 3x within a single turn.
+- **`SwarmCallbackHandler`**: New callback base class for swarm-level events (`on_route_decision`, `on_handoff`, `on_swarm_complete`).
+- **Version bump**: `cida-plugin` → `1.3.0`.
+
+## 1.2.0 — Agentic Inference Engine Integration
+
+- **`cida_plugin.inference` is now canonical**: All agentic classes (`CIDAWrapper`, `LatentAgent`, `LatentMemory`, `LatentReasoner`) live inside the main package under `cida_plugin.inference`.
+- **Backward-compatible `cida_inference` alias**: The standalone `cida_inference` package is now a shim that re-exports from `cida_plugin.inference`. All existing scripts (`run_cloud_operations_benchmark.py`, etc.) continue to work without any changes.
+- **Latent Garbage Collector**: `LatentMemory` now tracks temporal `decay_weights` per stored vector. Unused memories decay by 10% per step; the top 2 retrieved memories are refreshed to 1.0. Prevents context pollution on long tasks.
+- **Fast-Path Heuristics**: `LatentAgent` detects trivial tasks via embedding variance (threshold 0.05). If variance is below threshold, CIDA deliberation is bypassed entirely (`current_rounds = 0`), delivering LangChain-speed responses for simple queries while preserving full latent compute for hard problems.
+- **Tool Exhaustion Circuit Breaker**: After 3 consecutive failures of the same tool, its identity vector is injected into the Latent Firewall, preventing the agent from calling it again. The broken tool is automatically unblocked on success.
+- **Heuristic Observation Validators**: `register_tool(name, func, validator=None)` now accepts an optional Python callable. If the validator returns `False`, the raw observation is replaced with a standardized error string before the agent sees it — preventing hallucinations from corrupt API responses.
+- **`requests` added to core dependencies**: Required for the built-in `call_web_api` tool.
+- **Version bump**: `cida-plugin` → `1.2.0`.
+
 ## 3.0.0
 
 - **Architecture Simplification**: Transitioned from 11-component Omega loss system to a 3-component `CIDALoss` (Task, Calibration, Anti-Collapse).

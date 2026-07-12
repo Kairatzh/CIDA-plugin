@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cida-plugin"
-version = "1.1.1"
-description = "Universal Evidence-Grounded Multi-Agent Deliberation Layer for any encoder"
+version = "1.3.0"
+description = "Universal Evidence-Grounded Deliberation Layer with Agentic Inference Engine & Multi-Agent Swarm"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -28,7 +28,8 @@ dependencies = [
   "torch>=2.1",
   "transformers>=4.0",
   "huggingface_hub>=0.14.0",
-  "torchdiffeq>=0.2.3"
+  "torchdiffeq>=0.2.3",
+  "requests>=2.28"
 ]
 
 [project.optional-dependencies]
@@ -46,7 +47,7 @@ Documentation = "https://github.com/Kairatzh/CIDA-plugin#readme"
 Issues = "https://github.com/Kairatzh/CIDA-plugin/issues"
 
 [tool.setuptools]
-packages = ["cida_plugin", "cida_latent_plugin"]
+packages = ["cida_plugin", "cida_plugin.inference", "cida_latent_plugin", "cida_inference"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

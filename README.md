@@ -127,51 +127,55 @@ Same model. Same weights. No prompt engineering required beyond specifying the d
 
 ---
 
-## 🚀 Quickstart
+## 🚀 CIDA v1.5 Agentic Quickstart
+
+We recently released `cida_inference`, our official developer-facing reasoning agent framework.
+
+### 🌟 Interactive Quickstart Notebook
+For immediate execution in Google Colab (with GPU acceleration), use our official:
+👉 **[Kairos_CIDA_Usage_Quickstart.ipynb](file:///c:/Users/User/Desktop/projects/CIDA-plugin/Kairos_CIDA_Usage_Quickstart.ipynb)**
+
+---
+
+### 📦 3-Line Quickstart
 
 ```bash
-pip install cida-plugin
+pip install git+https://github.com/Kairatzh/CIDA-plugin.git
 ```
 
 ```python
-import torch
-import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from cida_plugin import CIDAPlugin, CIDAPluginConfig
+from cida_inference.backbone import HuggingFaceBackbone
+from cida_inference.loader import CIDAWrapper
+from cida_inference.latent_agent import LatentAgent
 
-DEVICE = "cuda"
+# 1. Load your favorite chat model (e.g. Qwen)
+llm = AutoModelForCausalLM.from_pretrained("Qwen/Qwen1.5-7B-Chat", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-7B-Chat")
+backbone = HuggingFaceBackbone(llm)
 
-# Frozen backbone — nothing here is ever modified
-tokenizer = AutoTokenizer.from_pretrained(
-    "Qwen/Qwen1.5-7B-Chat", trust_remote_code=True, padding_side="left"
+# 2. Wrap it with CIDA adapters in one line
+wrapper = CIDAWrapper.from_pretrained(llm, cida_repo="kirtzh/Kairos-7B-CIDA-v1.0")
+
+# 3. Define and run your agent with elastic compute!
+agent = LatentAgent(
+    wrapper=wrapper,
+    llm=backbone,
+    tokenizer=tokenizer,
+    tools={"web_search": lambda q: f"Result for {q}: CIDA v1.5 released!"}
 )
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-llm = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen1.5-7B-Chat", trust_remote_code=True,
-    torch_dtype=torch.float16, device_map="auto", output_hidden_states=True,
-)
-for p in llm.parameters():
-    p.requires_grad = False
-llm.eval()
-
-# Load Kairos-CIDA adapter
-cida_cfg = CIDAPluginConfig.from_pretrained("Kairatzh/Kairos-CIDA-7B")
-cida     = CIDAPlugin(cida_cfg)
-
-# Load state dict
-sd = torch.hub.load_state_dict_from_url(
-    "https://huggingface.co/Kairatzh/Kairos-7B-CIDA-v2/resolve/main/pytorch_model.bin", 
-    map_location="cpu"
-)
-cida.load_state_dict(sd)
-cida = cida.to(DEVICE).float().eval()
-
-# See the full inference example in the repository notebooks
+response = agent.run("Task: Search the web for CIDA updates and output them.")
+print(response)
 ```
 
-*Full inference code, training notebooks, and the benchmark evaluation suite are available at [github.com/Kairatzh/CIDA-plugin](https://github.com/Kairatzh/CIDA-plugin).*
+---
+
+## ⚡ CIDA Core Developer Features
+
+* **Adaptive Latent Compute** — Deliberation loops automatically early-stop when agent consensus disagreement drops below a target threshold (default `0.15`), saving up to 80% on inference latency.
+* **Latent Safety Firewall** — Scans and blocks malicious inputs (prompt injections, unauthorized commands) directly in the hidden vector space *before* the model generates a single token.
+* **Reliability-Weighted Tool Trust** — Dynamic success/failure tracking inside memory. Flaky tools automatically trigger **Latent Rollback** to perturb hidden states and re-deliberate.
+* **Shared Latent Workspace** — Decoupled memory architecture allowing multiple agent instances to cooperate silently by reading/writing vector states to a shared latent workspace without chat overhead.
 
 ---
 

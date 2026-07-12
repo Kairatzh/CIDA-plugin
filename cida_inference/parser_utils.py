@@ -273,3 +273,60 @@ def bind_arguments_to_signature(parts: list[str], sig: inspect.Signature) -> tup
             final_kwargs.update(extra_keyword)
             
     return final_args, final_kwargs, error_msg
+
+def find_first_balanced_action(response: str) -> tuple[str, str]:
+    """
+    Finds the first action call of the form 'Action: tool_name(args)' in a response string,
+    respecting nested parentheses.
+    Returns (tool_name, args_str) if found, otherwise (None, None).
+    """
+    # Look for Action: followed by word and opening parenthesis
+    match = re.search(r"Action:\s*(\w+)\(", response)
+    if not match:
+        return None, None
+        
+    tool_name = match.group(1)
+    start_idx = match.end() # Index right after the opening '('
+    
+    depth = 1
+    in_double_quote = False
+    in_single_quote = False
+    escape = False
+    
+    args_chars = []
+    
+    for i in range(start_idx, len(response)):
+        char = response[i]
+        
+        if escape:
+            args_chars.append(char)
+            escape = False
+            continue
+            
+        if char == '\\':
+            args_chars.append(char)
+            escape = True
+            continue
+            
+        if char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            args_chars.append(char)
+        elif char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            args_chars.append(char)
+        elif not in_double_quote and not in_single_quote:
+            if char == '(':
+                depth += 1
+                args_chars.append(char)
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    return tool_name, "".join(args_chars)
+                else:
+                    args_chars.append(char)
+            else:
+                args_chars.append(char)
+        else:
+            args_chars.append(char)
+            
+    return None, None
