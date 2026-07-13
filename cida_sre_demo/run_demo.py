@@ -100,6 +100,8 @@ def run_evaluation():
     print("=" * 60)
     
     # Save results to disk
+    import os
+    os.makedirs("cida_sre_demo", exist_ok=True)
     with open("cida_sre_demo/evaluation_results.json", "w") as f:
         json.dump(results, f, indent=4)
     print("Results saved to cida_sre_demo/evaluation_results.json")
