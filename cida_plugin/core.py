@@ -484,7 +484,15 @@ class PlanProjector(nn.Module):
                 x = x[:, :in_features]
                 
         out = self.projector(x.float())
-        return out.view(B, self.num_plan_tokens, self.hidden_size)
+        actual_hidden_size = out.size(1) // self.num_plan_tokens
+        out_reshaped = out.view(B, self.num_plan_tokens, actual_hidden_size)
+        if actual_hidden_size != self.hidden_size:
+            if actual_hidden_size > self.hidden_size:
+                out_reshaped = out_reshaped[..., :self.hidden_size]
+            else:
+                padding_size = self.hidden_size - actual_hidden_size
+                out_reshaped = torch.nn.functional.pad(out_reshaped, (0, padding_size))
+        return out_reshaped
 
     def load_state_dict(self, state_dict: dict, strict: bool = True):
         # Dynamically rebuild the sequential layers based on state_dict shapes

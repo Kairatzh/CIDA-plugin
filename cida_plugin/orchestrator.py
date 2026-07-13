@@ -151,6 +151,17 @@ class KairosOrchestrator(nn.Module):
         seq_output = torch.cat(seq_list, dim=1)
         combined_mask = torch.cat(mask_list, dim=1)
 
+        # Handle CIDA input dimension mismatch (e.g. 3584 backbone vs 4096 CIDA adapter)
+        d_cida_input = getattr(self.cida.config, "d_input", pooled.size(-1))
+        if pooled.size(-1) != d_cida_input:
+            if pooled.size(-1) < d_cida_input:
+                padding_size = d_cida_input - pooled.size(-1)
+                pooled = torch.nn.functional.pad(pooled, (0, padding_size))
+                seq_output = torch.nn.functional.pad(seq_output, (0, padding_size))
+            else:
+                pooled = pooled[..., :d_cida_input]
+                seq_output = seq_output[..., :d_cida_input]
+
         # Deliberate inside CIDA v1
         cida_out = self.cida(
             pooled=pooled,
