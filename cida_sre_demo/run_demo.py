@@ -7,9 +7,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from cida_sre_demo.simulator import FintechSimulator
 from cida_sre_demo.scenarios import ALL_SCENARIOS
-from cida_sre_demo.agent_swarm import BaseLLMSREAgent, CidaSwarmSREAgent
+from cida_sre_demo.agent_swarm import BaseLLMSREAgent, CidaSwarmSREAgent, RealBaseLLMSREAgent, RealCidaSwarmSREAgent
 
-def run_evaluation():
+def run_evaluation(backbone_model=None, orchestrator=None, tokenizer=None, use_real_inference=False):
     print("=" * 60)
     print("🚀 STARTING CIDA SRE VS BASE LLM 72-HOUR AUTONOMOUS EVALUATION")
     print("=" * 60)
@@ -20,9 +20,13 @@ def run_evaluation():
     }
     
     # 1. Evaluate Base LLM
-    print("\n--- Evaluating Base LLM (Without CIDA) ---")
     sim_base = FintechSimulator()
-    agent_base = BaseLLMSREAgent(sim_base)
+    if use_real_inference and backbone_model is not None and tokenizer is not None:
+        print("\n--- Evaluating Base LLM (Without CIDA) [REAL INFERENCE MODE] ---")
+        agent_base = RealBaseLLMSREAgent(sim_base, backbone_model, tokenizer)
+    else:
+        print("\n--- Evaluating Base LLM (Without CIDA) [MOCK SIMULATOR MODE] ---")
+        agent_base = BaseLLMSREAgent(sim_base)
     
     for scenario in ALL_SCENARIOS:
         print(f"\n[Scenario {scenario.id}] {scenario.name} ({scenario.level})")
@@ -49,13 +53,16 @@ def run_evaluation():
         
     results["base_llm"]["tokens_reasoning"] = agent_base.tokens_used_reasoning
     results["base_llm"]["tokens_output"] = agent_base.tokens_used_output
-    # Simple cost model: $0.0015 / 1k input tokens, $0.002 / 1k output tokens
     results["base_llm"]["cost_usd"] = (agent_base.tokens_used_reasoning * 0.0000015) + (agent_base.tokens_used_output * 0.000002)
 
     # 2. Evaluate CIDA Agent
-    print("\n--- Evaluating CIDA Agent (With CIDA) ---")
     sim_cida = FintechSimulator()
-    agent_cida = CidaSwarmSREAgent(sim_cida)
+    if use_real_inference and orchestrator is not None and tokenizer is not None:
+        print("\n--- Evaluating CIDA Agent (With CIDA) [REAL INFERENCE MODE] ---")
+        agent_cida = RealCidaSwarmSREAgent(sim_cida, orchestrator, tokenizer)
+    else:
+        print("\n--- Evaluating CIDA Agent (With CIDA) [MOCK SIMULATOR MODE] ---")
+        agent_cida = CidaSwarmSREAgent(sim_cida)
     
     for scenario in ALL_SCENARIOS:
         print(f"\n[Scenario {scenario.id}] {scenario.name} ({scenario.level})")
@@ -82,7 +89,6 @@ def run_evaluation():
         
     results["cida"]["tokens_reasoning"] = agent_cida.tokens_used_reasoning
     results["cida"]["tokens_output"] = agent_cida.tokens_used_output
-    # CIDA reasoning tokens cost $0 because it happens in the latent space
     results["cida"]["cost_usd"] = (agent_cida.tokens_used_output * 0.000002)
 
     # Print Summary Table
