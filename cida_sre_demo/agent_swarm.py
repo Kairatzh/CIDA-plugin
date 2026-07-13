@@ -18,7 +18,7 @@ class SREAgent:
 
 class BaseLLMSREAgent(SREAgent):
     def __init__(self, sim: FintechSimulator):
-        super().__init__("BaseLLM-SRE-Agent (No CIDA)", sim)
+        super().__init__("Vanilla Qwen2.5-7B (No CIDA)", sim)
 
     def solve_scenario(self, scenario_id: int) -> list:
         steps = []
@@ -125,7 +125,7 @@ class BaseLLMSREAgent(SREAgent):
 
 class CidaSwarmSREAgent(SREAgent):
     def __init__(self, sim: FintechSimulator):
-        super().__init__("CIDA-Swarm SRE Agent (System-2)", sim)
+        super().__init__("Qwen2.5-7B + CIDA 1.5", sim)
 
     def solve_scenario(self, scenario_id: int) -> list:
         steps = []

@@ -89,7 +89,7 @@ def run_evaluation():
     print("\n" + "=" * 60)
     print("📊 EVALUATION SUMMARY")
     print("=" * 60)
-    print(f"Metric                 | Base LLM Agent | CIDA SRE Swarm")
+    print(f"Metric                 | Vanilla Qwen2.5-7B | Qwen2.5-7B + CIDA 1.5")
     print(f"-" * 60)
     print(f"Scenarios Solved       | {results['base_llm']['solved']}/20            | {results['cida']['solved']}/20")
     print(f"Critical Errors        | {results['base_llm']['errors']}              | {results['cida']['errors']}")
