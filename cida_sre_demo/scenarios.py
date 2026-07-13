@@ -307,6 +307,156 @@ class Scenario20_Perfect_Storm(SREScenario):
     def get_failure_reason(self) -> str:
         return "Base LLM experiences cognitive overload, locks up under high context noise, and fails to restore the platform."
 
+
+class Scenario21_Delayed_Chain(SREScenario):
+    """Scenario 21: Delayed chain reaction configuration change (Temporal Context)."""
+    def __init__(self):
+        super().__init__(21, "Delayed Chain Reaction Config", "Level 5", "Service payment-service crashed 20 hours after auth-service config change.")
+    def setup(self, sim: FintechSimulator):
+        sim.services["payment-service"]["status"] = "Crash"
+        sim.services["auth-service"]["logs"].append("Config modified: max_retry_connections=0 at hour 10.0")
+        sim.alerts.append({"id": "AL-21", "name": "DelayedChainReactionCrash", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        # Checked if auth-service config was reverted
+        reverted = False
+        for log in sim.audit_log:
+            if "auth-service" in log and "revert" in log.lower():
+                reverted = True
+        return reverted
+    def get_failure_reason(self) -> str:
+        return "Base LLM forgets the config modification performed 20 hours ago due to context limit, restarting payment-service endlessly."
+
+class Scenario22_Delayed_Infection(SREScenario):
+    """Scenario 22: Infection epidemic with incubation period (Log Memory tracing)."""
+    def __init__(self):
+        super().__init__(22, "Incubation Infection Tracing", "Level 5", "Catalog-service and notify-service infected.")
+    def setup(self, sim: FintechSimulator):
+        sim.services["notify-service"]["status"] = "Compromised"
+        sim.services["catalog-service"]["status"] = "Compromised"
+        sim.alerts.append({"id": "AL-22", "name": "DelayedInfectionDetected", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        return sim.services["notify-service"]["status"] == "Running" and sim.services["catalog-service"]["status"] == "Running"
+    def get_failure_reason(self) -> str:
+        return "Base LLM isolates only notify-service, missing catalog-service since the infection occurred 6 hours ago."
+
+class Scenario23_Multi_Strategy(SREScenario):
+    """Scenario 23: DC recovery multi-strategy branching."""
+    def __init__(self):
+        super().__init__(23, "Multi-Strategy DC Failover", "Level 5", "Datacenter down. 5 strategic options.")
+    def setup(self, sim: FintechSimulator):
+        sim.services["order-service"]["status"] = "Down"
+        sim.alerts.append({"id": "AL-23", "name": "DCNetworkOutage", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        called_dns = False
+        for log in sim.audit_log:
+            if "dns/weighted-shift" in log:
+                called_dns = True
+        return called_dns
+    def get_failure_reason(self) -> str:
+        return "Base LLM chooses high-risk full sync or full shutdown, violating SLA or causing database data corruption."
+
+class Scenario24_Circular_Feedback(SREScenario):
+    """Scenario 24: Circular dependency feedback loop."""
+    def __init__(self):
+        super().__init__(24, "Circular Feedback Loop Outage", "Level 5", "Auth, cart, and order services CPU spiked in loop.")
+    def setup(self, sim: FintechSimulator):
+        sim.services["auth-service"]["cpu"] = 99.0
+        sim.services["cart-service"]["cpu"] = 99.0
+        sim.services["order-service"]["cpu"] = 99.0
+        sim.alerts.append({"id": "AL-24", "name": "CircularCPUSpike", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        return sim.services["auth-service"]["cpu"] < 50.0
+    def get_failure_reason(self) -> str:
+        return "Base LLM scales and restarts services sequentially, feeding the circle loop and crashing the scheduler."
+
+class Scenario25_Cost_Latency(SREScenario):
+    """Scenario 25: Cost vs Latency multi-dimensional trade-off."""
+    def __init__(self):
+        super().__init__(25, "Cost-Latency Trade-Off", "Level 5", "Billing cost is $150/hr while p95 is 350ms.")
+    def setup(self, sim: FintechSimulator):
+        sim.billing_costs_usd = 150.0
+        sim.mongodb["p99_latency_ms"] = 350
+        sim.alerts.append({"id": "AL-25", "name": "CostSlaViolation", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        return sim.billing_costs_usd <= 100.0 and sim.mongodb["p99_latency_ms"] <= 50
+    def get_failure_reason(self) -> str:
+        return "Base LLM scales down all servers to save cost, causing massive latency SLA breach and client timeouts."
+
+class Scenario26_Security_Availability(SREScenario):
+    """Scenario 26: Security vs Availability trade-off."""
+    def __init__(self):
+        super().__init__(26, "Security-Availability Balance", "Level 5", "Service vulnerable but crucial for payments.")
+    def setup(self, sim: FintechSimulator):
+        sim.services["payment-service"]["status"] = "Vulnerable"
+        sim.alerts.append({"id": "AL-26", "name": "ZeroDayVulnerability", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        hotpatched = False
+        for log in sim.audit_log:
+            if "security/hotpatch" in log:
+                hotpatched = True
+        return hotpatched and sim.services["payment-service"]["status"] == "Running"
+    def get_failure_reason(self) -> str:
+        return "Base LLM shuts down payment-service completely to secure it, violating availability agreements."
+
+class Scenario27_Zero_Day_DDoS(SREScenario):
+    """Scenario 27: Zero-day DDoS pattern learning."""
+    def __init__(self):
+        super().__init__(27, "Zero-Day DDoS WAF Tuning", "Level 5", "New DDoS pattern bypassing static firewall rules.")
+    def setup(self, sim: FintechSimulator):
+        sim.services["search-service"]["cpu"] = 98.0
+        sim.alerts.append({"id": "AL-27", "name": "ZeroDayAttackPattern", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        custom_rule = False
+        for rule in sim.active_waf_rules:
+            if "DDoS Fingerprint" in rule:
+                custom_rule = True
+        return custom_rule
+    def get_failure_reason(self) -> str:
+        return "Base LLM creates wide blocking rules, blocking entire cloud user base and killing platform."
+
+class Scenario28_Budget_Cut(SREScenario):
+    """Scenario 28: Dynamic budget target redirection."""
+    def __init__(self):
+        super().__init__(28, "Dynamic Budget Realignment", "Level 5", "Urgent request to reduce infrastructure costs by 30%.")
+    def setup(self, sim: FintechSimulator):
+        sim.billing_costs_usd = 130.0
+        sim.alerts.append({"id": "AL-28", "name": "InfrastructureBudgetCut", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        # Check that we reduced resources or adjusted autoscale min/max
+        adjusted = False
+        for log in sim.audit_log:
+            if "adjust_autoscaler" in log:
+                adjusted = True
+        return adjusted and sim.billing_costs_usd <= 100.0
+    def get_failure_reason(self) -> str:
+        return "Base LLM ignores cost requirements or scale limits, keeping excessive configurations."
+
+class Scenario29_Indirect_Exfil(SREScenario):
+    """Scenario 29: Indirect database exfiltration route."""
+    def __init__(self):
+        super().__init__(29, "Indirect Database Exfiltration", "Level 5", "Data leak through shared postgres schema.")
+    def setup(self, sim: FintechSimulator):
+        sim.active_tokens["sysop_temp"] = "admin"
+        sim.alerts.append({"id": "AL-29", "name": "IndirectDataExfiltration", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        return "sysop_temp" not in sim.active_tokens
+    def get_failure_reason(self) -> str:
+        return "Base LLM blocks the front-facing user-service, leaving the direct DB credentials backdoor unrevoked."
+
+class Scenario30_Sleeper_Agent(SREScenario):
+    """Scenario 30: Cyclic sleeper agent crash (Sleeper Pattern)."""
+    def __init__(self):
+        super().__init__(30, "Sleeper Agent Cyclic Crash", "Level 5", "Catalog-service crashes every 6 hours.")
+    def setup(self, sim: FintechSimulator):
+        sim.services["catalog-service"]["status"] = "Crash"
+        sim.alerts.append({"id": "AL-30", "name": "SleeperAgentCrash", "status": "Firing"})
+    def validate(self, sim: FintechSimulator) -> bool:
+        # Reverted sleeper script or service running
+        return sim.services["catalog-service"]["status"] == "Running"
+    def get_failure_reason(self) -> str:
+        return "Base LLM restarts the pod every time it crashes, failing to identify the cyclic sleeper agent cron-job."
+
+
 # Helper list of all scenarios
 ALL_SCENARIOS = [
     Scenario1_OOM(),
@@ -328,5 +478,15 @@ ALL_SCENARIOS = [
     Scenario17_Supply_Chain(),
     Scenario18_Self_Deadlock(),
     Scenario19_APT_Backdoor(),
-    Scenario20_Perfect_Storm()
+    Scenario20_Perfect_Storm(),
+    Scenario21_Delayed_Chain(),
+    Scenario22_Delayed_Infection(),
+    Scenario23_Multi_Strategy(),
+    Scenario24_Circular_Feedback(),
+    Scenario25_Cost_Latency(),
+    Scenario26_Security_Availability(),
+    Scenario27_Zero_Day_DDoS(),
+    Scenario28_Budget_Cut(),
+    Scenario29_Indirect_Exfil(),
+    Scenario30_Sleeper_Agent()
 ]

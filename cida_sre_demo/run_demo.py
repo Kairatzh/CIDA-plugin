@@ -91,7 +91,7 @@ def run_evaluation():
     print("=" * 60)
     print(f"Metric                 | Vanilla Qwen2.5-7B | Qwen2.5-7B + CIDA 1.5")
     print(f"-" * 60)
-    print(f"Scenarios Solved       | {results['base_llm']['solved']}/20            | {results['cida']['solved']}/20")
+    print(f"Scenarios Solved       | {results['base_llm']['solved']}/30            | {results['cida']['solved']}/30")
     print(f"Critical Errors        | {results['base_llm']['errors']}              | {results['cida']['errors']}")
     print(f"Reasoning Tokens       | {results['base_llm']['tokens_reasoning']:,}      | {results['cida']['tokens_reasoning']}")
     print(f"Output Tokens          | {results['base_llm']['tokens_output']:,}        | {results['cida']['tokens_output']:,}")

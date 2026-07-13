@@ -363,8 +363,8 @@ if st.session_state.is_running and st.session_state.current_hour < 72.0:
     st.session_state.current_hour += speed
     
     # Dynamically trigger scenarios based on timeline hour
-    # 20 scenarios over 72 hours -> ~1 scenario every 3.6 hours
-    scenario_index = int(st.session_state.current_hour / 3.6)
+    # 30 scenarios over 72 hours -> ~1 scenario every 2.4 hours
+    scenario_index = int(st.session_state.current_hour / 2.4)
     if scenario_index < len(ALL_SCENARIOS):
         scen = ALL_SCENARIOS[scenario_index]
         if scen.id not in st.session_state.active_scenarios_triggered:
