@@ -50,9 +50,14 @@ class KairosOrchestrator(nn.Module):
         self.d_llm = self.llm.config.hidden_size
         self.embed_tokens = self.llm.get_input_embeddings()
 
-        # 2. Load trained CIDA v1 weights
-        print(f"[CIDA-OS] Loading CIDA v1 adapter from: {cida_model_path_or_repo}")
-        self.cida = CIDAPlugin.from_pretrained(cida_model_path_or_repo).to(device)
+        # 2. Load trained CIDA v1 weights (or initialize fresh if None)
+        if cida_model_path_or_repo is not None:
+            print(f"[CIDA-OS] Loading CIDA v1 adapter from: {cida_model_path_or_repo}")
+            self.cida = CIDAPlugin.from_pretrained(cida_model_path_or_repo).to(device)
+        else:
+            print("[CIDA-OS] No CIDA adapter path provided. Initializing fresh CIDA weights for testing.")
+            self.cida = CIDAPlugin(d_llm=self.d_llm).to(device)
+            
         self.cida.eval()
 
         # Load plan projector
