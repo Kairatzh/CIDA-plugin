@@ -86,7 +86,9 @@ class KairosOrchestrator(nn.Module):
                 # Dynamically set num_plan_tokens based on loaded weights shape
                 last_weight_key = [k for k in state_dict.keys() if k.endswith(".weight")][-1]
                 out_features = state_dict[last_weight_key].shape[0]
-                self.projector.num_plan_tokens = out_features // self.d_llm
+                # Extract the loaded hidden size from the first layer in state_dict
+                loaded_hidden_size = state_dict["projector.0.weight"].shape[1]
+                self.projector.num_plan_tokens = out_features // loaded_hidden_size
                 print(f"[CIDA-OS] Loaded plan_projector.pt successfully. Detected plan tokens: {self.projector.num_plan_tokens}")
             except Exception as e:
                 print(f"[CIDA-OS] Warning loading plan_projector.pt, using default: {e}")
