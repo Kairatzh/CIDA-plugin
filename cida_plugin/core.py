@@ -527,6 +527,9 @@ class PlanProjector(nn.Module):
 
         if modules:
             self.projector = nn.Sequential(*modules)
+            # Find the device of the tensors in state_dict and move to it
+            device = next(iter(state_dict.values())).device
+            self.projector.to(device)
             
         return super().load_state_dict(state_dict, strict=strict)
 
