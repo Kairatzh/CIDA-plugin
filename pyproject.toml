@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cida-plugin"
-version = "1.4.1"
+version = "1.4.2"
 description = "Universal Evidence-Grounded Deliberation Layer with Agentic Inference Engine & Multi-Agent Swarm"
 readme = "README.md"
 requires-python = ">=3.10"

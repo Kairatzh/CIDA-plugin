@@ -17,6 +17,7 @@ class KairosOrchestrator(nn.Module):
         cida_model_path_or_repo: str,
         device: str = "cuda",
         torch_dtype: torch.dtype = torch.float16,
+        **kwargs
     ):
         super().__init__()
         self.device = device
@@ -34,14 +35,16 @@ class KairosOrchestrator(nn.Module):
                 trust_remote_code=True,
                 torch_dtype=torch_dtype,
                 device_map={"": device} if device == "cuda" else None,
-                output_hidden_states=True
+                output_hidden_states=True,
+                **kwargs
             )
         except Exception:
             self.llm = AutoModelForCausalLM.from_pretrained(
                 backbone_model_name,
                 trust_remote_code=True,
                 torch_dtype=torch_dtype,
-                output_hidden_states=True
+                output_hidden_states=True,
+                **kwargs
             ).to(device)
         for p in self.llm.parameters():
             p.requires_grad = False
