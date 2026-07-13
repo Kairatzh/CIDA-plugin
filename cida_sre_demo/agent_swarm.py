@@ -490,11 +490,12 @@ class RealBaseLLMSREAgent(SREAgent):
 
     def execute_action(self, action: str, args: dict) -> str:
         try:
+            val_0 = list(args.values())[0] if args else None
             if action == "restart_pod":
-                return self.sim.restart_pod(args.get("service_name") or args.get("service") or list(args.values())[0])
+                return self.sim.restart_pod(args.get("service_name") or args.get("service") or val_0)
             elif action == "scale_deployment":
                 return self.sim.scale_deployment(
-                    service_name=args.get("service_name") or args.get("service") or list(args.values())[0],
+                    service_name=args.get("service_name") or args.get("service") or val_0,
                     replicas=args.get("replicas"),
                     cpu=args.get("cpu"),
                     memory=args.get("memory")
@@ -502,20 +503,20 @@ class RealBaseLLMSREAgent(SREAgent):
             elif action == "kill_db_connections":
                 return self.sim.kill_db_connections(target=args.get("target", "all"))
             elif action == "run_query":
-                return self.sim.run_query(args.get("query") or list(args.values())[0])
+                return self.sim.run_query(args.get("query") or val_0)
             elif action == "reset_offset":
                 return self.sim.reset_offset(
-                    topic_name=args.get("topic_name") or args.get("topic") or list(args.values())[0],
+                    topic_name=args.get("topic_name") or args.get("topic") or val_0,
                     to_earliest=args.get("to_earliest", True)
                 )
             elif action == "call_web_api":
-                return self.sim.call_web_api(args.get("endpoint") or args.get("url") or list(args.values())[0])
+                return self.sim.call_web_api(args.get("endpoint") or args.get("url") or val_0)
             elif action == "block_ip":
-                return self.sim.block_ip(args.get("ip_or_subnet") or args.get("ip") or list(args.values())[0])
+                return self.sim.block_ip(args.get("ip_or_subnet") or args.get("ip") or val_0)
             elif action == "revoke_token":
-                return self.sim.revoke_token(args.get("token") or list(args.values())[0])
+                return self.sim.revoke_token(args.get("token") or val_0)
             elif action == "apply_manifest":
-                return self.sim.apply_manifest(args.get("manifest_yaml_or_json") or args.get("manifest") or list(args.values())[0])
+                return self.sim.apply_manifest(args.get("manifest_yaml_or_json") or args.get("manifest") or val_0)
         except Exception as e:
             return f"Error: {e}"
         return "Unknown action"
@@ -614,9 +615,9 @@ class RealCidaSwarmSREAgent(RealBaseLLMSREAgent):
         steps.append("⚡ [CIDA Engine] Triggering Silent Deliberation Loop (0 input/output tokens used)...")
         
         # Extract debate steps and consensus
-        mock_agent = CidaSwarmSREAgent(self.sim)
         temp_sim = FintechSimulator()
         scenario.setup(temp_sim)
+        mock_agent = CidaSwarmSREAgent(temp_sim)
         mock_steps = mock_agent.solve_scenario(scenario_id)
         
         debate_steps = []
