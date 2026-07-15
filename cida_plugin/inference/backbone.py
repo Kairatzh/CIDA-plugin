@@ -67,7 +67,13 @@ class HuggingFaceBackbone:
 
     def get_last_hidden(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         out = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-        return out.hidden_states[-1][0, -1].float().unsqueeze(0)
+        last_hidden = out.hidden_states[-1]
+        batch_size = input_ids.size(0)
+        if batch_size == 1:
+            return last_hidden[0, -1].float().unsqueeze(0)
+        seq_len = attention_mask.sum(dim=1) - 1
+        batch_idx = torch.arange(batch_size, device=input_ids.device)
+        return last_hidden[batch_idx, seq_len].float()
 
     async def get_last_hidden_async(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         import asyncio
