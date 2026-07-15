@@ -46,7 +46,8 @@ class CIDAWrapper(nn.Module):
         
     def forward(self, h_base, alpha=2.2):
         co = self.cida_core(pooled=h_base)
-        plan = self.base_projector(co["state_final"].s)
+        state_s = co["state_final"].s if hasattr(co["state_final"], "s") else co["state_final"]
+        plan = self.base_projector(state_s)
         plan_pooled = plan.mean(dim=1)
         gate_in = torch.cat([h_base, plan_pooled], dim=-1).to(self.gate_proj.weight.dtype)
         gate = torch.sigmoid(self.gate_proj(gate_in)).unsqueeze(1)

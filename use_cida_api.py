@@ -83,7 +83,8 @@ def main():
     print(f"   - Deliberation Rounds: {cfg.max_rounds}")
     print(f"   - Agent Disagreement: {cida_out['disagreement'].mean().item():.4f} (low is better)")
     print(f"   - Uncertainty: {cida_out['uncertainty'].mean().item():.4f}")
-    print(f"   - Injected Plan Dimension: {proj(cida_out['state_final'].s).shape} (8 plan tokens)")
+    state_s = cida_out['state_final'].s if hasattr(cida_out['state_final'], 's') else cida_out['state_final']
+    print(f"   - Injected Plan Dimension: {proj(state_s).shape} (8 plan tokens)")
 
 if __name__ == "__main__":
     main()
