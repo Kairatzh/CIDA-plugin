@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VEIMO Research Lab — CIDA Cognitive OS</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        obsidian: '#030408',
+                        neonCyan: '#00f2fe',
+                        neonPurple: '#7f00ff',
+                        neonEmerald: '#00f5d4',
+                        neonGold: '#ffd700',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        display: ['Outfit', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="bg-obsidian text-slate-200 min-h-screen flex flex-col antialiased">
+
+    <!-- Causal Rollback Red Alert Overlay -->
+    <div id="contradictionOverlay" class="fixed inset-0 bg-red-950/40 backdrop-blur-sm z-50 flex items-center justify-center pointer-events-none opacity-0 transition-opacity duration-300">
+        <div class="glass-card border-red-500/50 p-8 max-w-md text-center bg-red-950/80 shadow-[0_0_50px_rgba(239,68,68,0.3)]">
+            <div class="flex justify-center mb-4">
+                <i data-lucide="alert-triangle" class="w-16 h-16 text-red-500 animate-bounce"></i>
+            </div>
+            <h3 class="text-2xl font-display font-extrabold text-red-500 mb-2 uppercase tracking-wider">Causal Contradiction</h3>
+            <p class="text-sm text-red-200 mb-4">Bistable state loop or paradox detected in agent belief layers. Initiating causal rollback sequence...</p>
+            <div class="w-full bg-red-900/50 h-1.5 rounded-full overflow-hidden">
+                <div class="bg-red-500 h-full w-full animate-[glitch_1s_infinite]"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Navigation -->
+    <header class="sticky top-0 z-40 w-full backdrop-blur-md bg-obsidian/75 border-b border-white/5 px-6 py-4 flex justify-between items-center">
+        <div class="flex items-center gap-3">
+            <div class="bg-gradient-to-r from-neonCyan to-neonPurple p-0.5 rounded-lg">
+                <div class="bg-obsidian px-3 py-1.5 rounded-md">
+                    <span class="font-display font-extrabold text-lg text-white tracking-widest">VEIMO</span>
+                </div>
+            </div>
+            <div class="h-6 w-[1px] bg-white/10"></div>
+            <span class="text-xs font-mono tracking-widest text-slate-400 uppercase">CIDA v1.5</span>
+        </div>
+        <nav class="hidden md:flex gap-8 text-sm font-medium text-slate-400">
+            <a href="#hero" class="hover:text-white transition-colors">Home</a>
+            <a href="#arena" class="hover:text-white transition-colors">Arena</a>
+            <a href="#api" class="hover:text-white transition-colors">API & SDK</a>
+            <a href="#benchmarks" class="hover:text-white transition-colors">Benchmarks</a>
+            <a href="#philosophy" class="hover:text-white transition-colors">Philosophy</a>
+        </nav>
+        <div>
+            <a href="#arena" class="border border-neonCyan/30 hover:border-neonCyan hover:shadow-[0_0_15px_rgba(0,242,254,0.3)] text-neonCyan px-4 py-2 rounded-xl text-xs font-mono uppercase tracking-widest transition-all duration-300">
+                Launch Arena
+            </a>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="flex-grow max-w-7xl mx-auto w-full px-6 py-12 space-y-24">
+
+        <!-- Hero Section -->
+        <section id="hero" class="relative flex flex-col items-center justify-center text-center py-16 space-y-8 min-h-[60vh]">
+            <div class="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_center,rgba(127,0,255,0.05),transparent_60%)]"></div>
+            
+            <div class="inline-flex items-center gap-2 border border-white/10 bg-white/5 px-3 py-1.5 rounded-full text-xs font-mono text-neonCyan mb-4">
+                <span class="flex h-2 w-2 relative">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-neonCyan opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-neonCyan"></span>
+                </span>
+                Now Live: System 2 Cognitive Co-Processor
+            </div>
+
+            <h1 class="text-5xl md:text-7xl font-display font-extrabold tracking-tight max-w-4xl text-white">
+                Continuous Latent <br/>
+                <span class="gradient-text-neon">Deliberation Agents</span>
+            </h1>
+            
+            <p class="text-lg text-slate-400 max-w-2xl mx-auto font-light leading-relaxed">
+                CIDA guides LLMs through recursive, high-dimensional deliberation loops on hidden states before token emission. Zero-latency coordination via math vectors instead of costly text tokens.
+            </p>
+
+            <div class="flex flex-col sm:flex-row gap-4 justify-center">
+                <a href="#arena" class="bg-gradient-to-r from-neonCyan to-neonPurple hover:opacity-90 text-white font-medium px-8 py-3.5 rounded-2xl transition-all duration-300 shadow-[0_4px_20px_rgba(127,0,255,0.3)]">
+                    Start Simulating
+                </a>
+                <a href="#api" class="bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-white font-medium px-8 py-3.5 rounded-2xl transition-all duration-300">
+                    Read Documentation
+                </a>
+            </div>
+        </section>
+
+        <!-- Deliberation Arena -->
+        <section id="arena" class="space-y-8 scroll-mt-24">
+            <div class="border-b border-white/5 pb-4">
+                <h2 class="text-3xl font-display font-extrabold text-white">Deliberation Arena</h2>
+                <p class="text-sm text-slate-400 mt-1">Witness real-time System 2 deliberation across three challenging reasoning tasks.</p>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Control Panel -->
+                <div class="glass-card p-6 flex flex-col justify-between space-y-6">
+                    <div class="space-y-4">
+                        <div class="flex items-center gap-2 text-xs font-mono tracking-widest text-slate-400 uppercase border-b border-white/5 pb-2">
+                            <i data-lucide="sliders" class="w-4 h-4"></i>
+                            Controls
+                        </div>
+                        
+                        <div class="space-y-2">
+                            <label class="block text-xs font-medium text-slate-400">Select Scenario Preset</label>
+                            <div class="grid grid-cols-1 gap-2">
+                                <button onclick="setScenario('temporal')" id="btn-scenario-temporal" class="text-left px-4 py-3 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 transition-all text-sm font-medium flex items-center justify-between group">
+                                    <span>Temporal Loop Paradox</span>
+                                    <i data-lucide="refresh-cw" class="w-4 h-4 text-neonCyan opacity-0 group-hover:opacity-100 transition-opacity"></i>
+                                </button>
+                                <button onclick="setScenario('monty')" id="btn-scenario-monty" class="text-left px-4 py-3 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 transition-all text-sm font-medium flex items-center justify-between group">
+                                    <span>Monty Hall Dilemma</span>
+                                    <i data-lucide="door-closed" class="w-4 h-4 text-neonPurple opacity-0 group-hover:opacity-100 transition-opacity"></i>
+                                </button>
+                                <button onclick="setScenario('transitive')" id="btn-scenario-transitive" class="text-left px-4 py-3 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 transition-all text-sm font-medium flex items-center justify-between group">
+                                    <span>Transitive Order Trap</span>
+                                    <i data-lucide="git-commit" class="w-4 h-4 text-neonEmerald opacity-0 group-hover:opacity-100 transition-opacity"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="space-y-2">
+                            <label class="block text-xs font-medium text-slate-400">Custom Text Prompt (Simulation Mode)</label>
+                            <textarea id="customPrompt" class="w-full bg-obsidian border border-white/10 rounded-xl p-3 text-sm focus:border-neonCyan focus:outline-none resize-none h-20 text-slate-200 placeholder-slate-600" placeholder="Type custom reasoning problem..."></textarea>
+                        </div>
+
+                        <div class="space-y-2">
+                            <div class="flex justify-between items-center">
+                                <label class="text-xs font-medium text-slate-400">Deliberation Speed</label>
+                                <span id="speedVal" class="text-xs font-mono text-neonCyan">1.0x</span>
+                            </div>
+                            <input type="range" id="speedSlider" min="0.1" max="2.0" step="0.1" value="1.0" class="w-full accent-neonCyan bg-white/10 h-1 rounded-lg cursor-pointer">
+                        </div>
+                    </div>
+
+                    <button id="btnStart" onclick="startDeliberation()" class="w-full bg-gradient-to-r from-neonCyan to-neonPurple hover:opacity-90 text-white font-medium py-3 rounded-xl flex items-center justify-center gap-2 transition-all shadow-[0_4px_15px_rgba(127,0,255,0.2)]">
+                        <i data-lucide="play" class="w-4 h-4"></i>
+                        Start Deliberation
+                    </button>
+                </div>
+
+                <!-- Neural Graph Map (Visualizer) -->
+                <div class="glass-card p-6 flex flex-col justify-between items-center relative overflow-hidden lg:col-span-2">
+                    <div class="absolute top-4 left-4 flex items-center gap-2 text-xs font-mono tracking-widest text-slate-400 uppercase">
+                        <i data-lucide="network" class="w-4 h-4"></i>
+                        Neural Blackboard State
+                    </div>
+                    
+                    <!-- SVG Neural Network Container -->
+                    <div class="w-full h-80 relative flex items-center justify-center mt-6">
+                        <svg id="networkSvg" class="absolute inset-0 w-full h-full"></svg>
+                        
+                        <!-- Nodes Placement -->
+                        <!-- Coordinator (Gold) - Top Center -->
+                        <div id="node-coordinator" class="absolute top-4 transition-all duration-300 z-10 node-hover flex flex-col items-center">
+                            <div class="w-16 h-16 rounded-full bg-obsidian border-2 border-neonGold/30 flex items-center justify-center transition-all duration-300">
+                                <i data-lucide="cpu" class="w-8 h-8 text-neonGold"></i>
+                            </div>
+                            <span class="text-[10px] font-mono tracking-wider uppercase text-neonGold mt-2">Coordinator</span>
+                            <!-- Tooltip -->
+                            <div class="tooltip-node absolute bottom-20 bg-obsidian border border-neonGold/20 px-3 py-1.5 rounded-lg text-[10px] font-mono text-center w-40 shadow-xl">
+                                Monitors consensus entropy and triggers halts.
+                            </div>
+                        </div>
+
+                        <!-- Prosecutor/Agent 1 (Cyan) - Left -->
+                        <div id="node-agent1" class="absolute left-6 top-1/2 -translate-y-1/2 transition-all duration-300 z-10 node-hover flex flex-col items-center">
+                            <div class="w-16 h-16 rounded-full bg-obsidian border-2 border-neonCyan/30 flex items-center justify-center transition-all duration-300">
+                                <i data-lucide="activity" class="w-8 h-8 text-neonCyan"></i>
+                            </div>
+                            <span class="text-[10px] font-mono tracking-wider uppercase text-neonCyan mt-2">Prosecutor</span>
+                            <div class="tooltip-node absolute bottom-20 bg-obsidian border border-neonCyan/20 px-3 py-1.5 rounded-lg text-[10px] font-mono text-center w-40 shadow-xl">
+                                Proposes initial logical inferences.
+                            </div>
+                        </div>
+
+                        <!-- Skeptic/Agent 2 (Purple) - Right -->
+                        <div id="node-agent2" class="absolute right-6 top-1/2 -translate-y-1/2 transition-all duration-300 z-10 node-hover flex flex-col items-center">
+                            <div class="w-16 h-16 rounded-full bg-obsidian border-2 border-neonPurple/30 flex items-center justify-center transition-all duration-300">
+                                <i data-lucide="shield" class="w-8 h-8 text-neonPurple"></i>
+                            </div>
+                            <span class="text-[10px] font-mono tracking-wider uppercase text-neonPurple mt-2">Skeptic</span>
+                            <div class="tooltip-node absolute bottom-20 bg-obsidian border border-neonPurple/20 px-3 py-1.5 rounded-lg text-[10px] font-mono text-center w-40 shadow-xl">
+                                Audit logic paths for loops/errors.
+                            </div>
+                        </div>
+
+                        <!-- Synthesizer/Agent 3 (Emerald) - Bottom Center -->
+                        <div id="node-agent3" class="absolute bottom-4 transition-all duration-300 z-10 node-hover flex flex-col items-center">
+                            <div class="w-16 h-16 rounded-full bg-obsidian border-2 border-neonEmerald/30 flex items-center justify-center transition-all duration-300">
+                                <i data-lucide="git-merge" class="w-8 h-8 text-neonEmerald"></i>
+                            </div>
+                            <span class="text-[10px] font-mono tracking-wider uppercase text-neonEmerald mt-2">Synthesizer</span>
+                            <div class="tooltip-node absolute top-20 bg-obsidian border border-neonEmerald/20 px-3 py-1.5 rounded-lg text-[10px] font-mono text-center w-40 shadow-xl">
+                                Merges vector states for generation.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Agent Thought Bubbles -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <!-- Coordinator -->
+                <div class="glass-card p-4 space-y-2 border-l-2 border-neonGold bg-neonGold/5">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs font-mono text-neonGold tracking-widest uppercase">Coordinator</span>
+                        <i data-lucide="cpu" class="w-3.5 h-3.5 text-neonGold"></i>
+                    </div>
+                    <p id="bubble-coord" class="text-xs font-light text-slate-300 italic min-h-[50px]">Awaiting start...</p>
+                </div>
+                <!-- Prosecutor -->
+                <div class="glass-card p-4 space-y-2 border-l-2 border-neonCyan bg-neonCyan/5">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs font-mono text-neonCyan tracking-widest uppercase">Prosecutor</span>
+                        <i data-lucide="activity" class="w-3.5 h-3.5 text-neonCyan"></i>
+                    </div>
+                    <p id="bubble-pros" class="text-xs font-light text-slate-300 italic min-h-[50px]">Awaiting start...</p>
+                </div>
+                <!-- Skeptic -->
+                <div class="glass-card p-4 space-y-2 border-l-2 border-neonPurple bg-neonPurple/5">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs font-mono text-neonPurple tracking-widest uppercase">Skeptic</span>
+                        <i data-lucide="shield" class="w-3.5 h-3.5 text-neonPurple"></i>
+                    </div>
+                    <p id="bubble-skep" class="text-xs font-light text-slate-300 italic min-h-[50px]">Awaiting start...</p>
+                </div>
+                <!-- Synthesizer -->
+                <div class="glass-card p-4 space-y-2 border-l-2 border-neonEmerald bg-neonEmerald/5">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs font-mono text-neonEmerald tracking-widest uppercase">Synthesizer</span>
+                        <i data-lucide="git-merge" class="w-3.5 h-3.5 text-neonEmerald"></i>
+                    </div>
+                    <p id="bubble-synth" class="text-xs font-light text-slate-300 italic min-h-[50px]">Awaiting start...</p>
+                </div>
+            </div>
+
+            <!-- Telemetry & Graph Output -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Metrics -->
+                <div class="glass-card p-6 flex flex-col justify-center space-y-6">
+                    <div class="flex items-center gap-2 text-xs font-mono tracking-widest text-slate-400 uppercase">
+                        <i data-lucide="activity" class="w-4 h-4"></i>
+                        Telemetry Metrics
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="bg-white/5 border border-white/5 rounded-2xl p-4 text-center">
+                            <span class="block text-[10px] font-mono uppercase tracking-wider text-slate-400">Current Round</span>
+                            <span id="metricRound" class="text-3xl font-display font-extrabold text-white mt-1 block">0</span>
+                        </div>
+                        <div class="bg-white/5 border border-white/5 rounded-2xl p-4 text-center">
+                            <span class="block text-[10px] font-mono uppercase tracking-wider text-slate-400">Disagreement</span>
+                            <span id="metricDisagreement" class="text-3xl font-display font-extrabold text-neonCyan mt-1 block">0.00</span>
+                        </div>
+                        <div class="bg-white/5 border border-white/5 rounded-2xl p-4 text-center">
+                            <span class="block text-[10px] font-mono uppercase tracking-wider text-slate-400">Entropy</span>
+                            <span id="metricEntropy" class="text-3xl font-display font-extrabold text-neonPurple mt-1 block">0.00</span>
+                        </div>
+                        <div class="bg-white/5 border border-white/5 rounded-2xl p-4 text-center">
+                            <span class="block text-[10px] font-mono uppercase tracking-wider text-slate-400">Token Savings</span>
+                            <span id="metricSavings" class="text-3xl font-display font-extrabold text-neonEmerald mt-1 block">0%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Chart -->
+                <div class="glass-card p-6 lg:col-span-2 flex flex-col space-y-4">
+                    <div class="flex items-center gap-2 text-xs font-mono tracking-widest text-slate-400 uppercase">
+                        <i data-lucide="line-chart" class="w-4 h-4"></i>
+                        Disagreement Convergence
+                    </div>
+                    <div class="h-44 relative">
+                        <canvas id="disagreementChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Final Converged Output -->
+            <div class="glass-card p-6 space-y-4">
+                <div class="flex items-center justify-between border-b border-white/5 pb-2">
+                    <div class="flex items-center gap-2 text-xs font-mono tracking-widest text-slate-400 uppercase">
+                        <i data-lucide="file-text" class="w-4 h-4"></i>
+                        Final Generated Response
+                    </div>
+                    <span id="statusIndicator" class="text-[10px] font-mono tracking-wider uppercase bg-white/5 px-2 py-0.5 rounded text-slate-500">Idle</span>
+                </div>
+                <div id="finalOutput" class="font-mono text-sm leading-relaxed text-slate-300 min-h-[60px] whitespace-pre-line bg-obsidian/40 border border-white/5 rounded-xl p-4">
+                    Awaiting deliberation...
+                </div>
+            </div>
+        </section>
+
+        <!-- API & SDK Documentation -->
+        <section id="api" class="space-y-8 scroll-mt-24">
+            <div class="border-b border-white/5 pb-4">
+                <h2 class="text-3xl font-display font-extrabold text-white">SDK & API Integration</h2>
+                <p class="text-sm text-slate-400 mt-1">Interact with CIDA through simple Python wrappers or OpenAI-compatible endpoints.</p>
+            </div>
+
+            <div class="glass-card overflow-hidden">
+                <!-- Tab Headers -->
+                <div class="flex border-b border-white/5 bg-white/5">
+                    <button onclick="switchTab('pySDK')" id="btn-tab-pySDK" class="px-6 py-4 text-xs font-mono tracking-wider uppercase border-r border-white/5 text-neonCyan border-b-2 border-neonCyan">Python SDK</button>
+                    <button onclick="switchTab('openAI')" id="btn-tab-openAI" class="px-6 py-4 text-xs font-mono tracking-wider uppercase border-r border-white/5 text-slate-400">OpenAI Compatible API</button>
+                    <button onclick="switchTab('gateway')" id="btn-tab-gateway" class="px-6 py-4 text-xs font-mono tracking-wider uppercase border-r border-white/5 text-slate-400">Middleware Gateway</button>
+                </div>
+
+                <!-- Tab Contents -->
+                <div class="p-6">
+                    <div id="tab-pySDK-content" class="space-y-4">
+                        <p class="text-sm text-slate-400">Initialize a locally deployable continuous latent reasoning model on CPU/GPU:</p>
+                        <pre class="bg-obsidian border border-white/5 p-4 rounded-xl text-xs font-mono text-neonCyan overflow-x-auto">
+<span class="text-slate-500"># Import CIDA-plugin and wrap any local PyTorch model</span>
+from cida_plugin.inference import LatentAgent, HuggingFaceBackbone
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-7B-Chat")
+llm = AutoModelForCausalLM.from_pretrained("Qwen/Qwen1.5-7B-Chat", device_map="auto")
+
+agent = LatentAgent(
+    d_model=4096,
+    llm=llm,
+    tokenizer=tokenizer,
+    default_reasoning_rounds=3
+)
+
+response = agent.run("If A is older than B, B is older than C... Is C older than A?")
+print(response)
+                        </pre>
+                    </div>
+
+                    <div id="tab-openAI-content" class="hidden space-y-4">
+                        <p class="text-sm text-slate-400">Simply point any existing OpenAI-SDK script to the CIDA middleware gateway:</p>
+                        <pre class="bg-obsidian border border-white/5 p-4 rounded-xl text-xs font-mono text-neonPurple overflow-x-auto">
+import openai
+
+openai.api_key = "dummy-key"
+openai.base_url = "http://localhost:8000/v1"
+
+response = openai.chat.completions.create(
+    model="kairos-cida-v1.5",
+    messages=[
+        {"role": "user", "content": "Explain the Monty Hall dilemma and why I should switch doors."}
+    ],
+    temperature=0.2
+)
+
+print(response.choices[0].message.content)
+                        </pre>
+                    </div>
+
+                    <div id="tab-gateway-content" class="hidden space-y-4">
+                        <p class="text-sm text-slate-400">Leverage the new dynamic middleware swap to intercept prompts and hot-swap adapters in real-time:</p>
+                        <pre class="bg-obsidian border border-white/5 p-4 rounded-xl text-xs font-mono text-neonEmerald overflow-x-auto">
+from cida_gateway import CIDAMiddleware
+
+# Initialize with a base model
+model = CIDAMiddleware(base_model="Qwen/Qwen1.5-7B-Chat")
+
+# Register small task-specific cognitive adapters
+model.register_adapter("math", "kirtzh/CIDA-Math-v1")
+model.register_adapter("logic", "kirtzh/CIDA-Logic-v1")
+
+# Route and dynamically hot-swap adapter weights in &lt;10ms
+response = model.generate(
+    prompt="If all humans are mortal, and Socrates is human...",
+    task_type="logic"
+)
+                        </pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Scientific Benchmarks -->
+        <section id="benchmarks" class="space-y-8 scroll-mt-24">
+            <div class="border-b border-white/5 pb-4">
+                <h2 class="text-3xl font-display font-extrabold text-white">Scientific Benchmarks</h2>
+                <p class="text-sm text-slate-400 mt-1">Comparing standard autoregressive generation (System 1) vs. CIDA Latent Deliberation (System 2).</p>
+            </div>
+
+            <div class="glass-card overflow-hidden">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-white/5 font-mono text-xs text-slate-400 border-b border-white/5">
+                        <tr>
+                            <th class="px-6 py-4 font-semibold uppercase tracking-wider">Evaluation Scenario</th>
+                            <th class="px-6 py-4 font-semibold uppercase tracking-wider text-red-500">Baseline (System 1)</th>
+                            <th class="px-6 py-4 font-semibold uppercase tracking-wider text-neonCyan">CIDA (System 2)</th>
+                            <th class="px-6 py-4 font-semibold uppercase tracking-wider text-neonEmerald">Improvement</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-white/5 font-light">
+                        <tr class="hover:bg-white/[0.02] transition-colors">
+                            <td class="px-6 py-4 font-medium text-white">Transitive Inference (Length 5)</td>
+                            <td class="px-6 py-4 text-red-400">42.5% Accuracy</td>
+                            <td class="px-6 py-4 text-neonCyan font-medium">94.8% Accuracy</td>
+                            <td class="px-6 py-4 text-neonEmerald">+123.0% (OOD robust)</td>
+                        </tr>
+                        <tr class="hover:bg-white/[0.02] transition-colors">
+                            <td class="px-6 py-4 font-medium text-white">Monty Hall Logic Trap</td>
+                            <td class="px-6 py-4 text-red-400">18.2% Accuracy</td>
+                            <td class="px-6 py-4 text-neonCyan font-medium">88.5% Accuracy</td>
+                            <td class="px-6 py-4 text-neonEmerald">+386.2%</td>
+                        </tr>
+                        <tr class="hover:bg-white/[0.02] transition-colors">
+                            <td class="px-6 py-4 font-medium text-white">Temporal Grid Paradoxes</td>
+                            <td class="px-6 py-4 text-red-400">22.4% Accuracy</td>
+                            <td class="px-6 py-4 text-neonCyan font-medium">91.0% Accuracy</td>
+                            <td class="px-6 py-4 text-neonEmerald">+306.2%</td>
+                        </tr>
+                        <tr class="hover:bg-white/[0.02] transition-colors">
+                            <td class="px-6 py-4 font-medium text-white">False Premise Syllogisms</td>
+                            <td class="px-6 py-4 text-red-400">35.0% Accuracy</td>
+                            <td class="px-6 py-4 text-neonCyan font-medium">85.6% Accuracy</td>
+                            <td class="px-6 py-4 text-neonEmerald">+144.5%</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Lab Philosophy -->
+        <section id="philosophy" class="space-y-8 scroll-mt-24">
+            <div class="border-b border-white/5 pb-4">
+                <h2 class="text-3xl font-display font-extrabold text-white">Lab Philosophy</h2>
+                <p class="text-sm text-slate-400 mt-1">Our mission and values at VEIMO Research Lab.</p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div class="glass-card p-6 space-y-4">
+                    <div class="bg-neonCyan/10 p-3 rounded-xl w-fit">
+                        <i data-lucide="git-branch" class="w-6 h-6 text-neonCyan"></i>
+                    </div>
+                    <h3 class="text-lg font-display font-bold text-white">Latent Coordination</h3>
+                    <p class="text-sm text-slate-400 font-light leading-relaxed">
+                        Rather than passing thousands of text tokens back and forth between agents, we route dense hidden representations, cutting token cost by over 80%.
+                    </p>
+                </div>
+                
+                <div class="glass-card p-6 space-y-4">
+                    <div class="bg-neonPurple/10 p-3 rounded-xl w-fit">
+                        <i data-lucide="lock" class="w-6 h-6 text-neonPurple"></i>
+                    </div>
+                    <h3 class="text-lg font-display font-bold text-white">Zero-Latency Safety</h3>
+                    <p class="text-sm text-slate-400 font-light leading-relaxed">
+                        Assess security, rules, and alignment in the latent space before generating text, avoiding the double-inference overhead of traditional guardrails.
+                    </p>
+                </div>
+
+                <div class="glass-card p-6 space-y-4">
+                    <div class="bg-neonEmerald/10 p-3 rounded-xl w-fit">
+                        <i data-lucide="rocket" class="w-6 h-6 text-neonEmerald"></i>
+                    </div>
+                    <h3 class="text-lg font-display font-bold text-white">Plug & Play Adaptability</h3>
+                    <p class="text-sm text-slate-400 font-light leading-relaxed">
+                        Build highly specialized logical reasoning models as lightweight vector adapters that can be dynamically loaded and swapped on the fly.
+                    </p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-white/5 bg-obsidian py-12 px-6 text-center text-xs font-mono text-slate-500">
+        &copy; 2026 VEIMO Research Lab. All rights reserved.
+    </footer>
+
+    <!-- JS Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Main Application script -->
+    <script src="app.js"></script>
+</body>
+</html>

@@ -21,6 +21,18 @@ class CIDAPlanProjector(nn.Module):
         B = state_s.size(0)
         return self.projector(state_s.reshape(B,-1).float()).view(B, self.num_plan_tokens, self.d_llm)
 
+class AlignedPlanProjector(nn.Module):
+    def __init__(self, base_projector, W):
+        super().__init__()
+        self.base_projector = base_projector
+        self.register_buffer("W", W)
+        
+    def forward(self, state_s):
+        plan = self.base_projector(state_s) # (B, 8, d_source)
+        W_dtype = next(self.base_projector.parameters()).dtype
+        aligned_plan = torch.matmul(plan.to(W_dtype), self.W.to(W_dtype))
+        return aligned_plan
+
 class CIDAWrapper(nn.Module):
     """
     LangChain/LlamaIndex style wrapper for integrating CIDA with Causal LLMs.
@@ -60,11 +72,37 @@ class CIDAWrapper(nn.Module):
         cida_core = CIDAPlugin(cfg).to(device).float()
         cida_core.load_state_dict(torch.load(cida_bin, map_location=device))
         
-        # Load base plan projector
-        base_proj = CIDAPlanProjector(cfg.d_hidden, d_llm, cfg.num_agents, 8).to(device)
-        base_proj.load_state_dict(torch.load(proj_bin, map_location=device))
+        # Determine native d_source from weights
+        proj_sd = torch.load(proj_bin, map_location="cpu")
+        last_key = list(proj_sd.keys())[-1]
+        out_features = proj_sd[last_key].shape[0]
+        d_source = out_features // 8
         
-        wrapper = cls(cida_core, base_proj, d_llm).to(device)
+        # Load base plan projector with native d_source
+        base_proj = CIDAPlanProjector(cfg.d_hidden, d_source, cfg.num_agents, 8).to(device)
+        base_proj.load_state_dict(proj_sd)
+        
+        # If target dimension matches, use directly. Otherwise align.
+        if d_source == d_llm:
+            final_proj = base_proj
+        else:
+            print(f"🔄 Dimension mismatch (CIDA source: {d_source}, LLM target: {d_llm}). "
+                  f"Applying dynamic manifold alignment...")
+            # Compute W alignment matrix using SVD on target embeddings
+            try:
+                target_embeds = base_model.get_input_embeddings().weight.detach().float()
+            except Exception:
+                target_embeds = torch.randn(2000, d_llm, device="cpu")
+            
+            U, S, V = torch.linalg.svd(target_embeds, full_matrices=False)
+            W = torch.zeros(d_source, d_llm, device=device)
+            min_d = min(d_source, d_llm)
+            for i in range(min_d):
+                W[i, i] = 1.0
+            W = torch.matmul(W, V.to(device))
+            final_proj = AlignedPlanProjector(base_proj, W).to(device)
+            
+        wrapper = cls(cida_core, final_proj, d_llm).to(device)
         
         # Optionally load fine-tuned gating layers
         if fine_tuned_path and os.path.exists(fine_tuned_path):

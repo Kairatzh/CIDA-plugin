@@ -2,20 +2,118 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class StoreProxyList(list):
+    """A list wrapper that propagates item updates back to the underlying memory store."""
+    def __init__(self, items, store, field_name):
+        super().__init__(items)
+        self.store = store
+        self.field_name = field_name
+
+    def __setitem__(self, index, value):
+        super().__setitem__(index, value)
+        entries = self.store.get_all()
+        # Resolve negative indexing
+        if index < 0:
+            index = len(entries) + index
+        if 0 <= index < len(entries):
+            if self.field_name == "decay_weight":
+                self.store.update_decay_weight(index, value)
+            else:
+                entries[index][self.field_name] = value
+                self.store.set_all(entries)
+
+class BaseMemoryStore:
+    """Abstract base class for CIDA LatentMemory backends."""
+    def clear(self):
+        raise NotImplementedError
+    def add(self, key, value, text, tool_name, decay_weight=1.0):
+        raise NotImplementedError
+    def get_all(self):
+        raise NotImplementedError
+    def set_all(self, entries):
+        raise NotImplementedError
+    def update_decay_weight(self, index, new_weight):
+        raise NotImplementedError
+
+class InMemoryMemoryStore(BaseMemoryStore):
+    """In-memory backend (default, fully backwards-compatible)."""
+    def __init__(self):
+        self.entries = []
+    def clear(self):
+        self.entries = []
+    def add(self, key, value, text, tool_name, decay_weight=1.0):
+        self.entries.append({
+            "key": key.detach().cpu().squeeze().float(),
+            "value": value.detach().cpu().squeeze().float(),
+            "text": text,
+            "tool_name": tool_name,
+            "decay_weight": decay_weight
+        })
+    def get_all(self):
+        return self.entries
+    def set_all(self, entries):
+        self.entries = list(entries)
+    def update_decay_weight(self, index, new_weight):
+        if 0 <= index < len(self.entries):
+            self.entries[index]["decay_weight"] = new_weight
+
+class RedisMemoryStore(BaseMemoryStore):
+    """Redis-backed persistent memory backend."""
+    def __init__(self, host="localhost", port=6379, db=0, key_prefix="cida:memory", client=None):
+        self.host = host
+        self.port = port
+        self.db = db
+        self.key_prefix = key_prefix
+        self._client = client
+    @property
+    def client(self):
+        if self._client is None:
+            import redis
+            self._client = redis.Redis(host=self.host, port=self.port, db=self.db)
+        return self._client
+    def clear(self):
+        self.client.delete(self.key_prefix)
+    def add(self, key, value, text, tool_name, decay_weight=1.0):
+        import pickle
+        entry = {
+            "key": key.detach().cpu().squeeze().float(),
+            "value": value.detach().cpu().squeeze().float(),
+            "text": text,
+            "tool_name": tool_name,
+            "decay_weight": decay_weight
+        }
+        self.client.rpush(self.key_prefix, pickle.dumps(entry))
+    def get_all(self):
+        import pickle
+        raw_items = self.client.lrange(self.key_prefix, 0, -1)
+        entries = []
+        for item in raw_items:
+            entries.append(pickle.loads(item))
+        return entries
+    def set_all(self, entries):
+        import pickle
+        self.clear()
+        if entries:
+            serialized = [pickle.dumps(e) for e in entries]
+            self.client.rpush(self.key_prefix, *serialized)
+    def update_decay_weight(self, index, new_weight):
+        import pickle
+        raw_item = self.client.lindex(self.key_prefix, index)
+        if raw_item:
+            entry = pickle.loads(raw_item)
+            entry["decay_weight"] = new_weight
+            self.client.lset(self.key_prefix, index, pickle.dumps(entry))
+
 class LatentMemory(nn.Module):
     """
     A lightweight, tensor-based vector store that acts as a 'latent diary'
     to store past planning states and mix them back into current decisions.
-    Supports tool tracking and reliability weighting.
+    Supports tool tracking, reliability weighting, and pluggable storage backends.
     """
-    def __init__(self, d_model):
+    def __init__(self, d_model, store=None):
         super().__init__()
         self.d_model = d_model
-        self.keys = []
-        self.values = []
-        self.texts = []
-        self.tool_names = []
-        self.decay_weights = []
+        self.store = store if store is not None else InMemoryMemoryStore()
         
         # Simple cross-attention mixing projection
         self.q_proj = nn.Linear(d_model, d_model)
@@ -38,43 +136,43 @@ class LatentMemory(nn.Module):
             nn.init.zeros_(self.gate.weight)
             nn.init.zeros_(self.gate.bias)
 
+    @property
+    def keys(self):
+        return StoreProxyList([e["key"] for e in self.store.get_all()], self.store, "key")
+
+    @property
+    def values(self):
+        return StoreProxyList([e["value"] for e in self.store.get_all()], self.store, "value")
+
+    @property
+    def texts(self):
+        return StoreProxyList([e["text"] for e in self.store.get_all()], self.store, "text")
+
+    @property
+    def tool_names(self):
+        return StoreProxyList([e["tool_name"] for e in self.store.get_all()], self.store, "tool_name")
+
+    @property
+    def decay_weights(self):
+        return StoreProxyList([e["decay_weight"] for e in self.store.get_all()], self.store, "decay_weight")
+
     def clear(self, keep_seeded=True):
         """Reset the latent memory, optionally preserving seeded clues."""
         if keep_seeded:
-            new_keys = []
-            new_values = []
-            new_texts = []
-            new_tools = []
-            new_decays = []
-            for k, v, t, tn, d in zip(self.keys, self.values, self.texts, self.tool_names, self.decay_weights):
-                if not t.startswith("Called tool"):
-                    new_keys.append(k)
-                    new_values.append(v)
-                    new_texts.append(t)
-                    new_tools.append(tn)
-                    new_decays.append(d)
-            self.keys = new_keys
-            self.values = new_values
-            self.texts = new_texts
-            self.tool_names = new_tools
-            self.decay_weights = new_decays
+            new_entries = []
+            for e in self.store.get_all():
+                if not e["text"].startswith("Called tool"):
+                    new_entries.append(e)
+            self.store.set_all(new_entries)
         else:
-            self.keys = []
-            self.values = []
-            self.texts = []
-            self.tool_names = []
-            self.decay_weights = []
+            self.store.clear()
 
     def add_memory(self, key_tensor, value_tensor, text_desc="", tool_name=None):
         """
         Store a planning state key and value representation along with a description.
         Expects shapes of (1, d_model) or (d_model,).
         """
-        self.keys.append(key_tensor.detach().cpu().squeeze().float())
-        self.values.append(value_tensor.detach().cpu().squeeze().float())
-        self.texts.append(text_desc)
-        self.tool_names.append(tool_name)
-        self.decay_weights.append(1.0)
+        self.store.add(key_tensor, value_tensor, text_desc, tool_name, 1.0)
 
     def retrieve(self, query_tensor, tool_reliability=None):
         """
@@ -86,13 +184,19 @@ class LatentMemory(nn.Module):
         device = query_tensor.device
         self.to(device)
         
-        if not self.keys:
+        entries = self.store.get_all()
+        if not entries:
             # Return zero vector if no memories are stored yet
             return torch.zeros_like(query_tensor)
 
         # Convert lists of tensors to single batched tensors on current device
-        K_stack = torch.stack(self.keys).to(device) # (N, d_model)
-        V_stack = torch.stack(self.values).to(device) # (N, d_model)
+        keys = [e["key"] for e in entries]
+        values = [e["value"] for e in entries]
+        decay_weights = [e["decay_weight"] for e in entries]
+        tool_names = [e["tool_name"] for e in entries]
+
+        K_stack = torch.stack(keys).to(device) # (N, d_model)
+        V_stack = torch.stack(values).to(device) # (N, d_model)
 
         q = self.q_proj(query_tensor) # (1, d_model)
         k = self.k_proj(K_stack) # (N, d_model)
@@ -112,25 +216,27 @@ class LatentMemory(nn.Module):
         if tool_reliability:
             # Construct a scaling multiplier tensor of shape (1, N)
             multipliers = []
-            for tn in self.tool_names:
+            for tn in tool_names:
                 multipliers.append(tool_reliability.get(tn, 1.0))
             m_tensor = torch.tensor(multipliers, dtype=scores_scaled.dtype, device=device).unsqueeze(0)
             scores_scaled = scores_scaled * m_tensor
 
         # Apply Temporal Decay (Latent Garbage Collector)
-        d_tensor = torch.tensor(self.decay_weights, dtype=scores_scaled.dtype, device=device).unsqueeze(0)
+        d_tensor = torch.tensor(decay_weights, dtype=scores_scaled.dtype, device=device).unsqueeze(0)
         scores_scaled = scores_scaled * d_tensor
 
         attn_weights = F.softmax(scores_scaled, dim=-1) # (1, N)
 
         # Update decay weights: Top 2 matches get refreshed (1.0), others decay by 10%
-        if len(self.keys) > 0:
-            top_indices = torch.topk(scores_scaled, min(2, len(self.keys))).indices[0].tolist()
-            for i in range(len(self.decay_weights)):
+        if len(keys) > 0:
+            top_indices = torch.topk(scores_scaled, min(2, len(keys))).indices[0].tolist()
+            for i in range(len(decay_weights)):
+                if decay_weights[i] >= 900.0:
+                    continue
                 if i in top_indices:
-                    self.decay_weights[i] = 1.0
+                    self.store.update_decay_weight(i, 1.0)
                 else:
-                    self.decay_weights[i] = max(0.1, self.decay_weights[i] * 0.9)
+                    self.store.update_decay_weight(i, max(0.1, decay_weights[i] * 0.9))
 
         # Retrieve weighted value representation
         context = torch.matmul(attn_weights, v) # (1, d_model)
@@ -147,11 +253,13 @@ class LatentMemory(nn.Module):
         Retrieve the text descriptions of the top k matching memories
         for explainability logging using true cosine similarity.
         """
-        if not self.keys:
+        entries = self.store.get_all()
+        if not entries:
             return []
         
         device = query_tensor.device
-        K_stack = torch.stack(self.keys).to(device) # (N, d_model)
+        keys = [e["key"] for e in entries]
+        K_stack = torch.stack(keys).to(device) # (N, d_model)
         
         with torch.no_grad():
             q = self.q_proj(query_tensor)
@@ -164,12 +272,12 @@ class LatentMemory(nn.Module):
             # Compute cosine similarities
             scores = torch.matmul(q_norm, k_norm.transpose(0, 1)).squeeze(0) # (N,)
             
-            top_k = min(k, len(self.keys))
+            top_k = min(k, len(keys))
             top_vals, top_idx = torch.topk(scores, top_k)
             
             active = []
             for val, idx in zip(top_vals.tolist(), top_idx.tolist()):
-                active.append((self.texts[idx], val))
+                active.append((entries[idx]["text"], val))
             return active
 
     def save_to_file(self, filepath: str):
@@ -177,13 +285,14 @@ class LatentMemory(nn.Module):
         Saves the memory keys, values, and texts to a file.
         Uses torch.save to handle tensors alongside strings safely.
         """
+        entries = self.store.get_all()
         state = {
             "d_model": self.d_model,
-            "keys": [k.cpu() for k in self.keys],
-            "values": [v.cpu() for v in self.values],
-            "texts": self.texts,
-            "tool_names": self.tool_names,
-            "decay_weights": self.decay_weights,
+            "keys": [e["key"].cpu() for e in entries],
+            "values": [e["value"].cpu() for e in entries],
+            "texts": [e["text"] for e in entries],
+            "tool_names": [e["tool_name"] for e in entries],
+            "decay_weights": [e["decay_weight"] for e in entries],
             "state_dict": self.state_dict()
         }
         torch.save(state, filepath)
@@ -194,9 +303,21 @@ class LatentMemory(nn.Module):
         """
         state = torch.load(filepath, map_location=map_location)
         self.d_model = state["d_model"]
-        self.keys = [k.to(map_location) for k in state["keys"]]
-        self.values = [v.to(map_location) for v in state["values"]]
-        self.texts = state["texts"]
-        self.tool_names = state.get("tool_names", [None] * len(self.keys))
-        self.decay_weights = state.get("decay_weights", [1.0] * len(self.keys))
+        
+        keys = state["keys"]
+        values = state["values"]
+        texts = state["texts"]
+        tool_names = state.get("tool_names", [None] * len(keys))
+        decay_weights = state.get("decay_weights", [1.0] * len(keys))
+        
+        entries = []
+        for k, v, t, tn, d in zip(keys, values, texts, tool_names, decay_weights):
+            entries.append({
+                "key": k.to(map_location),
+                "value": v.to(map_location),
+                "text": t,
+                "tool_name": tn,
+                "decay_weight": d
+            })
+        self.store.set_all(entries)
         self.load_state_dict(state["state_dict"])

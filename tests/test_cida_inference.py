@@ -75,7 +75,10 @@ def test_latent_reasoner_state_propagation():
             # CIDA core mock
             class FinalState:
                 def __init__(self):
-                    self.s = torch.ones(1, 8, d_model) * 1.5
+                    s = torch.ones(1, 8, d_model) * 1.5
+                    s[0, 0, :] = 1.0
+                    s[0, 1, :] = 2.0
+                    self.s = s
             return {"state_final": FinalState()}
             
     class MockWrapper(nn.Module):
@@ -718,3 +721,265 @@ def test_cida_swarm_fan_out_fan_in():
 
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+def test_eternal_memory_decay():
+    d_model = 8
+    memory = LatentMemory(d_model)
+    v1 = torch.ones(1, d_model)
+    
+    # Add memory and set weight to 999.0 (eternal)
+    memory.add_memory(v1, v1, "eternal clue")
+    memory.decay_weights[-1] = 999.0
+    
+    # Retrieve multiple times
+    for _ in range(5):
+        query = torch.zeros(1, d_model)
+        memory.retrieve(query)
+        
+    # Verify decay weight remains unchanged (999.0)
+    assert memory.decay_weights[-1] == 999.0
+
+
+def test_plan_cache_capacity_cap():
+    d_model = 8
+    
+    class MockCore:
+        def __call__(self, pooled):
+            class FinalState:
+                def __init__(self):
+                    s = torch.ones(1, 8, d_model) * 1.5
+                    s[0, 0, :] = 1.0
+                    s[0, 1, :] = 2.0
+                    self.s = s
+                
+            return {
+                "state_final": FinalState(),
+                "uncertainty": torch.tensor([0.1]),
+                "disagreement": torch.tensor([0.05])
+            }
+
+    class MockWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cida_core = MockCore()
+            self.base_projector = lambda s: s
+            self.d_llm = d_model
+        def forward(self, h):
+            return h.unsqueeze(1).expand(-1, 8, -1)
+
+    class MockLLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = nn.Parameter(torch.zeros(1))
+        def get_input_embeddings(self):
+            class Embed:
+                def __call__(self, ids):
+                    return torch.ones(1, ids.shape[1], d_model)
+            return Embed()
+        def get_last_hidden(self, input_ids, attention_mask):
+            return torch.randn(1, d_model)
+        @property
+        def device(self): return "cpu"
+        @property
+        def dtype(self): return torch.float32
+        @property
+        def config(self):
+            class Config:
+                hidden_size = d_model
+            return Config()
+        def generate_from_embeds(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+            return torch.tensor([[100, 101]])
+
+    class MockTokenizer:
+        def __call__(self, text, return_tensors):
+            class Enc:
+                def __init__(self):
+                    self.input_ids = torch.tensor([[1, 2, 3]])
+                    self.attention_mask = torch.tensor([[1, 1, 1]])
+                def to(self, device): return self
+            return Enc()
+        def decode(self, ids, skip_special_tokens):
+            return "Action: test_tool()\nObservation: Done"
+        @property
+        def pad_token_id(self): return 0
+        @property
+        def eos_token_id(self): return 1
+        def convert_tokens_to_ids(self, tok): return 1
+
+    agent = LatentAgent(
+        wrapper=MockWrapper(),
+        llm=MockLLM(),
+        tokenizer=MockTokenizer(),
+        tools={"test_tool": lambda: "Result: Ok"},
+        default_reasoning_rounds=2
+    )
+    
+    # Disable fast path to ensure full planning execution
+    agent.enable_fast_path = False
+    
+    # Fill cache up to capacity (more than 50 entries)
+    # Since we generate unique prompts, they will generate new cache entries
+    for i in range(55):
+        agent.run(f"task prompt {i}", max_turns=1)
+        
+    # Verify plan cache is capped at 50
+    assert len(agent.plan_cache) == 50
+
+
+def test_latent_agent_run_async():
+    import asyncio
+    d_model = 8
+    
+    class MockCore:
+        def __call__(self, pooled):
+            class FinalState:
+                def __init__(self):
+                    s = torch.ones(1, 8, d_model) * 1.5
+                    s[0, 0, :] = 1.0
+                    s[0, 1, :] = 2.0
+                    self.s = s
+                
+            return {
+                "state_final": FinalState(),
+                "uncertainty": torch.tensor([0.1]),
+                "disagreement": torch.tensor([0.05])
+            }
+
+    class MockWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cida_core = MockCore()
+            self.base_projector = lambda s: s
+            self.d_llm = d_model
+        def forward(self, h):
+            return h.unsqueeze(1).expand(-1, 8, -1)
+
+    class MockLLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = nn.Parameter(torch.zeros(1))
+        def get_input_embeddings(self):
+            class Embed:
+                def __call__(self, ids):
+                    return torch.ones(1, ids.shape[1], d_model)
+            return Embed()
+        def get_last_hidden(self, input_ids, attention_mask):
+            return torch.ones(1, d_model) * 0.5
+        async def get_last_hidden_async(self, input_ids, attention_mask):
+            return torch.ones(1, d_model) * 0.5
+        @property
+        def device(self): return "cpu"
+        @property
+        def dtype(self): return torch.float32
+        @property
+        def config(self):
+            class Config:
+                hidden_size = d_model
+            return Config()
+        def generate_from_embeds(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+            return torch.tensor([[100, 101]])
+        async def generate_from_embeds_async(self, inputs_embeds, attention_mask, max_new_tokens, pad_token_id, eos_token_id, **kwargs):
+            return torch.tensor([[100, 101]])
+
+    class MockTokenizer:
+        def __call__(self, text, return_tensors):
+            class Enc:
+                def __init__(self):
+                    self.input_ids = torch.tensor([[1, 2, 3]])
+                    self.attention_mask = torch.tensor([[1, 1, 1]])
+                def to(self, device): return self
+            return Enc()
+        def decode(self, ids, skip_special_tokens):
+            return "Action: test_async_tool()\nObservation: Done"
+        @property
+        def pad_token_id(self): return 0
+        @property
+        def eos_token_id(self): return 1
+        def convert_tokens_to_ids(self, tok): return 1
+
+    async def my_async_tool():
+        await asyncio.sleep(0.01)
+        return "Async Ok"
+
+    agent = LatentAgent(
+        wrapper=MockWrapper(),
+        llm=MockLLM(),
+        tokenizer=MockTokenizer(),
+        tools={
+            "test_async_tool": my_async_tool,
+            "test_sync_tool": lambda: "Sync Ok"
+        },
+        default_reasoning_rounds=2
+    )
+    
+    # 1. Test running with an async tool in the async agent loop
+    result = asyncio.run(agent.run_async("run async tool", max_turns=1))
+    assert "test_async_tool()" in agent.history_turns[0]["action"]
+    assert agent.history_turns[0]["observation"] == "Async Ok"
+    
+    # 2. Test running with a sync tool in the async agent loop
+    agent.tokenizer.decode = lambda ids, skip_special_tokens: "Action: test_sync_tool()\nObservation: Done"
+    result = asyncio.run(agent.run_async("run sync tool", max_turns=1))
+    assert "test_sync_tool()" in agent.history_turns[0]["action"]
+    assert agent.history_turns[0]["observation"] == "Sync Ok"
+
+
+def test_in_memory_store():
+    from cida_plugin.inference.latent_memory import LatentMemory, InMemoryMemoryStore
+    
+    store = InMemoryMemoryStore()
+    memory = LatentMemory(d_model=8, store=store)
+    v1 = torch.ones(1, 8)
+    memory.add_memory(v1, v1, "test_in_memory")
+    
+    assert len(memory.keys) == 1
+    assert memory.texts[0] == "test_in_memory"
+    
+    # Test proxy setter
+    memory.decay_weights[0] = 5.0
+    assert memory.decay_weights[0] == 5.0
+    assert store.get_all()[0]["decay_weight"] == 5.0
+
+
+def test_redis_memory_store():
+    from cida_plugin.inference.latent_memory import RedisMemoryStore
+    
+    class MockRedis:
+        def __init__(self):
+            self.data = []
+        def delete(self, key):
+            self.data = []
+        def rpush(self, key, *values):
+            self.data.extend(values)
+        def lrange(self, key, start, end):
+            return self.data
+        def lindex(self, key, index):
+            if 0 <= index < len(self.data):
+                return self.data[index]
+            return None
+        def lset(self, key, index, value):
+            if 0 <= index < len(self.data):
+                self.data[index] = value
+                
+    mock_client = MockRedis()
+    store = RedisMemoryStore(client=mock_client)
+    
+    assert store.client is mock_client
+    
+    key_tensor = torch.ones(1, 8)
+    value_tensor = torch.ones(1, 8)
+    store.add(key_tensor, value_tensor, "test_redis", "tool_a", 2.5)
+    
+    all_entries = store.get_all()
+    assert len(all_entries) == 1
+    assert all_entries[0]["text"] == "test_redis"
+    assert all_entries[0]["tool_name"] == "tool_a"
+    assert all_entries[0]["decay_weight"] == 2.5
+    
+    store.update_decay_weight(0, 1.2)
+    all_entries = store.get_all()
+    assert all_entries[0]["decay_weight"] == 1.2
+
+
+

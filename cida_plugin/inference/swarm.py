@@ -133,7 +133,7 @@ class CidaSwarm:
         from .backbone import LLMBackbone, HuggingFaceBackbone
 
         backbone = self.llm
-        if not isinstance(backbone, LLMBackbone):
+        if not (isinstance(backbone, LLMBackbone) or hasattr(backbone, "get_last_hidden")):
             backbone = HuggingFaceBackbone(self.llm)
 
         device = next(iter(self.wrapper.parameters()), torch.tensor(0)).device

@@ -12,7 +12,7 @@ class LatentReasoner:
         self.wrapper = wrapper
         
         # Check and wrap llm using HuggingFaceBackbone if it's not already an LLMBackbone
-        if llm is not None and not isinstance(llm, LLMBackbone):
+        if llm is not None and not (isinstance(llm, LLMBackbone) or hasattr(llm, "get_last_hidden")):
             self.llm = HuggingFaceBackbone(llm)
         else:
             self.llm = llm

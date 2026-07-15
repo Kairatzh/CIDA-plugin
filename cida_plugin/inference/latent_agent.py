@@ -20,7 +20,7 @@ class LatentAgent:
         self.wrapper = wrapper
         
         # Check and wrap llm using HuggingFaceBackbone if it's not already an LLMBackbone
-        if llm is not None and not isinstance(llm, LLMBackbone):
+        if llm is not None and not (isinstance(llm, LLMBackbone) or hasattr(llm, "get_last_hidden")):
             self.llm = HuggingFaceBackbone(llm)
         else:
             self.llm = llm
@@ -499,7 +499,10 @@ class LatentAgent:
                             h_latent = p_state.mean(dim=1)
                             
                         plan = self.wrapper(h_latent)
-                        # Save to cache
+                        # Save to cache with capacity control (FIFO eviction if size >= 50)
+                        if len(self.plan_cache) >= 50:
+                            oldest_key = next(iter(self.plan_cache))
+                            del self.plan_cache[oldest_key]
                         self.plan_cache[h_base.clone()] = plan.clone()
                         self.callbacks.on_deliberation_end(actual_rounds)
                     
@@ -573,6 +576,360 @@ class LatentAgent:
                     with torch.no_grad():
                         desc = f"Called tool '{tool_name}'. Result: '{obs}'"
                         self.memory.add_memory(h_base, h_base, text_desc=desc, tool_name=tool_name)
+                    
+                    # Extract thought and action
+                    thought = ""
+                    action_str = response
+                    if not self.silent_mode:
+                        thought_match = re.search(r"Thought:\s*(.*?)\s*Action:", response, re.DOTALL)
+                        if thought_match:
+                            thought = thought_match.group(1).strip()
+                        action_match = re.search(r"Action:\s*(\w+\(.*\))", response, re.DOTALL)
+                        if action_match:
+                            action_str = action_match.group(1).strip()
+                    
+                    self.history_turns.append({
+                        "thought": thought,
+                        "action": action_str,
+                        "observation": obs
+                    })
+                    break
+                else:
+                    if not self.silent_mode:
+                        print("⚠️ Agent did not call a tool properly or finished.")
+                    return response
+            
+            turn += 1
+            
+        return "Max turns reached."
+
+    async def _parse_and_run_tool_async(self, response: str) -> tuple[str, str]:
+        """Parses the LLM response for tool calls and runs them asynchronously."""
+        import json as json_lib
+        import inspect
+        import asyncio
+        
+        # 1. First, check if the model tried to call HTTP methods directly
+        http_match = re.search(r"Action:\s*(GET|POST|PUT|DELETE)\s+(https?://[^\s\)]+)", response, re.IGNORECASE)
+        if http_match:
+            method = http_match.group(1).upper()
+            full_url = http_match.group(2)
+            full_url = full_url.rstrip(")'\"")
+            url_parts = full_url.split("?", 1)
+            url = url_parts[0]
+            payload_json = None
+            
+            if len(url_parts) > 1:
+                query = url_parts[1]
+                pj_match = re.search(r"payload_json=['\"]?(.*?)['\"]?$", query)
+                if pj_match:
+                    payload_json = pj_match.group(1)
+                else:
+                    from urllib.parse import parse_qs
+                    params = parse_qs(query)
+                    flat_params = {k: v[0] for k, v in params.items()}
+                    if flat_params:
+                        payload_json = json_lib.dumps(flat_params)
+            
+            payload_inline_match = re.search(r"payload_json\s*=\s*['\"]?(.*?)['\"]?$", response)
+            if payload_inline_match and not payload_json:
+                payload_inline_match.group(1)
+            
+            if not self.silent_mode:
+                print(f"🔄 Auto-redirecting raw HTTP Action to call_web_api(method='{method}', url='{url}', payload_json={payload_json})")
+            
+            self.callbacks.on_tool_call("call_web_api", [], {"method": method, "url": url, "payload_json": payload_json})
+            obs = await asyncio.to_thread(self.call_web_api, method, url, None, payload_json)
+            self.callbacks.on_tool_result("call_web_api", obs)
+            
+            success = not (str(obs).startswith("Error:") or not str(obs).startswith("Status 200:"))
+            self._update_tool_reliability("call_web_api", success)
+            return "call_web_api", obs
+
+        # 2. Standard tool call parsing
+        tool_name, args_str = find_first_balanced_action(response)
+        if not tool_name:
+            return None, None
+        
+        if tool_name not in self.tools:
+            return tool_name, f"Error: Tool '{tool_name}' not found."
+            
+        func = self.tools[tool_name]
+        sig = inspect.signature(func)
+        
+        parts = split_arguments_safely(args_str)
+        final_args, final_kwargs, err_msg = bind_arguments_to_signature(parts, sig)
+        
+        if err_msg:
+            self._update_tool_reliability(tool_name, False)
+            return tool_name, f"Error: {err_msg}"
+            
+        if not self.silent_mode:
+            print(f"⚙️ Calling Tool: {tool_name}(args={final_args}, kwargs={final_kwargs})")
+            
+        self.callbacks.on_tool_call(tool_name, final_args, final_kwargs)
+        try:
+            if inspect.iscoroutinefunction(func):
+                obs = await func(*final_args, **final_kwargs)
+            else:
+                obs = await asyncio.to_thread(func, *final_args, **final_kwargs)
+            
+            validator = self.tool_validators.get(tool_name)
+            if validator is not None:
+                if not validator(obs):
+                    obs = f"Error: Validator rejected observation schema -> {str(obs)[:100]}"
+                    
+            self.callbacks.on_tool_result(tool_name, obs)
+            success = not str(obs).startswith("Error:")
+            self._update_tool_reliability(tool_name, success)
+            return tool_name, obs
+        except TypeError as te:
+            obs = f"Error: Tool call parameters mismatch: {te}"
+            self.callbacks.on_tool_result(tool_name, obs)
+            self._update_tool_reliability(tool_name, False)
+            return tool_name, obs
+        except Exception as e:
+            obs = f"Error: {e}"
+            self.callbacks.on_tool_result(tool_name, obs)
+            self._update_tool_reliability(tool_name, False)
+            return tool_name, obs
+
+    async def run_async(self, task_prompt: str, max_turns: int = 6, silent_mode: bool = None, clear_memory: bool = True) -> str:
+        """Runs the ReAct loop asynchronously with latent memory integration and silent mode support."""
+        import asyncio
+        if silent_mode is not None:
+            self.silent_mode = silent_mode
+            
+        if clear_memory:
+            self.memory.clear(keep_seeded=True)
+        self.history_turns = []
+        
+        # Generate rich dynamic description with signatures and docstrings
+        tools_list = []
+        for name, func in self.tools.items():
+            sig = inspect.signature(func)
+            doc = func.__doc__.strip().split("\n")[0] if func.__doc__ else "Execute tool action."
+            tools_list.append(f"- {name}{sig}: {doc}")
+        tools_desc = "\n".join(tools_list)
+        
+        if self.silent_mode:
+            system_prompt = (
+                "<|im_start|>system\n"
+                "You are a fast automation agent. Immediately generate the next Action block. Do not write any thoughts, explanations, or extra conversation. Solve the task as fast as possible.\n\n"
+                f"You have access to the following tools:\n{tools_desc}\n\n"
+                "Format:\n"
+                "Action: <tool_name>(args)\n"
+                "Observation: <tool output>\n"
+                "... (repeat Action/Observation cycles as needed)\n"
+                "Final Answer: <your final answer summarizing the result>\n<|im_end|>\n"
+                f"<|im_start|>user\n{task_prompt}\n<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+        else:
+            system_prompt = (
+                "<|im_start|>system\n"
+                "You are a helpful assistant equipped with tools. Solve the task step-by-step.\n"
+                "Stop generation immediately after closing the code/action block. Do not simulate observations.\n"
+                "IMPORTANT: If a tool call fails or returns an error, do not give up. Check your history for alternative options, correct any mistakes, and try another path until you successfully complete the user's task.\n"
+                "IMPORTANT: You MUST match the exact tool signatures. Do not pass extra arguments or guess argument names. If a tool takes no arguments, call it with empty parentheses (e.g. tool_name()).\n\n"
+                f"You have access to the following tools:\n{tools_desc}\n\n"
+                "Format:\n"
+                "Thought: <reasoning>\n"
+                "Action: <tool_name>(args)\n"
+                "Observation: <tool output>\n"
+                "... (repeat Thought/Action/Observation cycles as needed)\n"
+                "Thought: <reasoning>\n"
+                "Final Answer: <your final answer summarizing the result>\n<|im_end|>\n"
+                f"<|im_start|>user\n{task_prompt}\n<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+        
+        compute_dtype = self.llm.dtype if self.llm is not None else torch.float32
+        
+        turn = 0
+        while turn < max_turns:
+            self.callbacks.on_turn_start(turn)
+            if not self.silent_mode:
+                print(f"\n[Turn {turn + 1}] Processing plan...")
+            
+            history = self._reconstruct_history(system_prompt, task_prompt)
+            enc = self.tokenizer(history, return_tensors="pt").to(self.device)
+            
+            turn_retry_count = 0
+            max_retries = 3
+            
+            while turn_retry_count < max_retries:
+                h_base = await self.llm.get_last_hidden_async(input_ids=enc.input_ids, attention_mask=enc.attention_mask)
+                
+                # CIDA Explainable Latent Diary: Retrieve active concepts
+                if not self.silent_mode:
+                    active_concepts = self.memory.get_active_concepts(h_base, k=2)
+                    if active_concepts:
+                        print("📖 [CIDA Latent Diary] Recalled thoughts:")
+                        for concept, score in active_concepts:
+                            print(f"  🧠 Similarity {score:.2f} | {concept}")
+                
+                # Retrieve and mix past planning states using Reliability-weighted Tool Trust
+                h_mixed = self.memory.retrieve(h_base, tool_reliability=self.tool_reliability)
+                
+                # Check Plan Cache
+                plan = None
+                best_sim = -1.0
+                best_plan = None
+                for cached_h, plan_tensor in self.plan_cache.items():
+                    sim = torch.nn.functional.cosine_similarity(h_base, cached_h).item()
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_plan = plan_tensor
+                        
+                if best_sim > 0.96:
+                    if not self.silent_mode:
+                        print(f"💾 [CIDA Plan Cache] HIT (Similarity: {best_sim:.4f}). Reusing cached latent planning state.")
+                    plan = best_plan
+                else:
+                    # Determine task complexity dynamically via agent state variance
+                    co_check = self.wrapper.cida_core(pooled=h_mixed)
+                    agent_states = co_check["state_final"].s
+                    agent_mean = agent_states.mean(dim=1, keepdim=True)
+                    variance = torch.var(agent_states - agent_mean).item()
+                    
+                    # Callback trigger
+                    self.callbacks.on_deliberation_start(self.default_reasoning_rounds, variance)
+                    
+                    # Uncertainty-based escalation check
+                    uncertainty_val = co_check.get("uncertainty", torch.tensor([0.0])).mean().item()
+                    if uncertainty_val > self.uncertainty_threshold:
+                        self.callbacks.on_uncertainty_high(uncertainty_val, self.uncertainty_threshold)
+                        if turn_retry_count < max_retries - 1:
+                            turn_retry_count += 1
+                            self.callbacks.on_rollback(turn_retry_count, f"High latent uncertainty: {uncertainty_val:.4f}")
+                            h_mixed = h_mixed + torch.randn_like(h_mixed) * 0.05
+                            continue
+                        
+                    if variance < 0.05 and self.enable_fast_path:
+                        # Fast-Path Heuristic: Extremely low variance means trivial task, skip heavy loop
+                        current_rounds = 0
+                        if not self.silent_mode:
+                            print(f"⚡ [Fast-Path] Trivial task detected (variance {variance:.4f}). Bypassing Latent Deliberation.")
+                    elif variance < 0.15:
+                        current_rounds = max(1, self.default_reasoning_rounds // 2)
+                    else:
+                        current_rounds = self.default_reasoning_rounds
+                            
+                    h_latent = h_mixed.clone()
+                    if turn_retry_count > 0:
+                        current_rounds = current_rounds * 2
+                        h_latent = h_latent + torch.randn_like(h_latent) * 0.02
+                        if not self.silent_mode:
+                            print(f"⚠️ [Latent Rollback] Retry {turn_retry_count}/{max_retries} - Scaling deliberation to {current_rounds} rounds with latent perturbation.")
+                    
+                    # Dynamic/Adaptive Deliberation with Latent Firewall constraint checking
+                    min_rounds = max(1, current_rounds // 3)
+                    max_rounds = current_rounds * 2
+                    target_disagreement = 0.15
+                    
+                    actual_rounds = 0
+                    for r in range(max_rounds):
+                        actual_rounds = r + 1
+                        
+                        # 1. Latent Firewall: Check intentions before step execution
+                        if not self.check_guardrail(h_latent):
+                            if not self.silent_mode:
+                                print("🛡️ [CIDA Latent Firewall] Preventative constraint violation detected. Forcing intent perturbation.")
+                            h_latent = h_latent + torch.randn_like(h_latent) * 0.05
+                            
+                        co = self.wrapper.cida_core(pooled=h_latent)
+                        disagreement_val = co.get("disagreement", torch.tensor([0.0])).mean().item()
+                        
+                        # Log step metrics
+                        self.callbacks.on_deliberation_step(r, disagreement_val)
+                        
+                        # Convergence check
+                        if r >= min_rounds and disagreement_val < target_disagreement:
+                            if not self.silent_mode:
+                                print(f"🎯 [CIDA Adaptive Compute] Deliberation converged early at round {r+1} (Disagreement: {disagreement_val:.4f} < {target_disagreement})")
+                            break
+                            
+                        p_state = self.wrapper.base_projector(co["state_final"].s)
+                        h_latent = p_state.mean(dim=1)
+                        
+                    plan = self.wrapper(h_latent)
+                    # Save to cache with capacity control (FIFO eviction if size >= 50)
+                    if len(self.plan_cache) >= 50:
+                        oldest_key = next(iter(self.plan_cache))
+                        del self.plan_cache[oldest_key]
+                    self.plan_cache[h_base.clone()] = plan.clone()
+                    self.callbacks.on_deliberation_end(actual_rounds)
+                
+                # Generate next step
+                p_emb = self.llm.get_input_embeddings()(enc.input_ids).detach()
+                gm = torch.cat([enc.attention_mask, torch.ones(1, 8, dtype=enc.attention_mask.dtype, device=self.device)], dim=1)
+                
+                eos_ids = [self.tokenizer.eos_token_id] if self.tokenizer.eos_token_id is not None else []
+                im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+                if im_end_id is not None and not isinstance(im_end_id, list):
+                    eos_ids.append(im_end_id)
+                
+                ids = await self.llm.generate_from_embeds_async(
+                    inputs_embeds=torch.cat([p_emb.to(compute_dtype), plan.to(compute_dtype)], dim=1),
+                    attention_mask=gm,
+                    max_new_tokens=250,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=eos_ids
+                )
+                
+                response = self.tokenizer.decode(ids[0], skip_special_tokens=True).strip()
+            
+                # Reconstruct action prefix in silent mode if it was skipped in generation
+                if self.silent_mode:
+                    if not response.startswith("Action:") and not response.startswith("Final Answer:"):
+                        response = "Action: " + response
+                
+                # Truncate response to keep only up to the first action call, preventing model simulation
+                action_match = re.search(r"(Action:\s*\w+\([^)]*\))", response)
+                if action_match:
+                    action_end_idx = response.find(action_match.group(1)) + len(action_match.group(1))
+                    response = response[:action_end_idx].strip()
+                elif "Observation:" in response:
+                    response = response.split("Observation:")[0].strip()
+                
+                if not self.silent_mode:
+                    print(response)
+                
+                self.callbacks.on_turn_end(response)
+                if "Final Answer:" in response:
+                    return response
+                    
+                # Parse and execute tool
+                tool_name, obs = await self._parse_and_run_tool_async(response)
+                if tool_name:
+                    if not self.silent_mode:
+                        print(f"Observation: {obs}")
+                    
+                    # Trigger Latent Rollback if an error occurs
+                    is_error = str(obs).strip().startswith("Error:") or str(obs).strip().startswith("Failed:")
+                    if is_error and turn_retry_count < max_retries - 1:
+                        turn_retry_count += 1
+                        self.callbacks.on_rollback(turn_retry_count, f"Tool failure or bad HTTP status: {obs[:100]}")
+                        
+                        # Invalidate Plan Cache for this h_base to prevent stale HIT death-loops
+                        stale_keys = [k for k in self.plan_cache if torch.nn.functional.cosine_similarity(h_base, k).item() > 0.90]
+                        for sk in stale_keys:
+                            del self.plan_cache[sk]
+                        
+                        # Retrieve the best clue matching the failed state
+                        active_concepts = self.memory.get_active_concepts(h_base, k=1)
+                        if active_concepts:
+                            concept, score = active_concepts[0]
+                            # Inject the clue text if it's a seeded loophole memory
+                            if score > 0.70 and not concept.startswith("Called tool"):
+                                if not self.silent_mode:
+                                    print(f"📖 [CIDA Latent Clue] {concept}")
+                        continue
+                    
+                    # Record this state in the latent memory index with tool tracking
+                    desc = f"Called tool '{tool_name}'. Result: '{obs}'"
+                    self.memory.add_memory(h_base, h_base, text_desc=desc, tool_name=tool_name)
                     
                     # Extract thought and action
                     thought = ""

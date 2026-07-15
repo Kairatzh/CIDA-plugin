@@ -1,160 +1,255 @@
-# CIDA Inference Library
-## Полное Руководство | Comprehensive Guide | 综合指南
+# 📖 Kairos-CIDA v1.5: Полное Руководство Разработчика (Developer Handbook)
 
-**[RU]** Добро пожаловать в официальное руководство по библиотеке `cida_inference`. Этот документ проведет вас по всему жизненному циклу использования библиотеки: от установки до масштабирования Enterprise-пайплайнов.
-**[EN]** Welcome to the official guide for the `cida_inference` library. This document will guide you through the entire lifecycle of using the library: from installation to scaling Enterprise pipelines.
-**[ZH]** 欢迎使用 `cida_inference` 库官方指南。本文档将引导您完成使用该库的整个生命周期：从安装到扩展企业管道。
+Добро пожаловать в официальный справочник разработчика по интеграции **CIDA (Continuous Latent Deliberation Agent)**. 
+
+Этот документ содержит исчерпывающее практическое руководство по установке, базовому использованию, интеграции кастомных инструментов, работе с латентной памятью (включая Redis), а также построению многоагентных роев (Swarm) с векторным обменом контекстом.
 
 ---
 
-### 1. Как скачать и установить | How to Download and Install | 如何下载和安装
+## 🗺️ Содержание
+1. [Философия: Почему CIDA, а не текстовые агенты?](#1-философия-почему-cida-а-не-текстовые-агенты)
+2. [Быстрый старт: Установка и первый запуск](#2-быстрый-старт-установка-и-первый-запуск)
+3. [Разработка под CIDA: Интеграция кастомных инструментов (Tools)](#3-разработка-под-cida-интеграция-кастомных-инструментов-tools)
+4. [Надежность в Production: Латентные откаты (Rollbacks)](#4-надежность-в-production-латентные-откаты-rollbacks)
+5. [Управление состоянием: Латентная память и Redis](#5-управление-состоянием-латентная-память-и-redis)
+6. [Многоагентные системы: Роевой интеллект CidaSwarm](#6-многоагентные-системы-роевой-интеллект-cidaswarm)
+7. [Тонкая настройка: Адаптивные вычисления и LRU-кэширование](#7-тонкая-настройка-адаптивные-вычисления-и-lru-кэширование)
 
-**[RU]** Библиотека CIDA устанавливается стандартными средствами Python. Поскольку она тесно интегрирована с PyTorch и HuggingFace, убедитесь, что в вашей среде установлены драйверы CUDA.
-**[EN]** The CIDA library is installed using standard Python tools. Since it is tightly integrated with PyTorch and HuggingFace, ensure that CUDA drivers are installed in your environment.
-**[ZH]** CIDA 库使用标准 Python 工具安装。由于它与 PyTorch 和 HuggingFace 紧密集成，请确保您的环境中已安装 CUDA 驱动程序。
+---
+
+## 1. Философия: Почему CIDA, а не текстовые-агенты?
+
+Традиционные агенты (построенные на LangChain, CrewAI или AutoGen) используют **текстовую координацию**. Чтобы принять решение, они генерируют сотни токенов рассуждений (`Thought: ...`), парсят их регулярными выражениями и передают друг другу в виде логов. Это ведет к трем проблемам:
+1. **Финансовый налог на CoT:** Вы платите за токены "мыслей", которые никогда не увидит конечный пользователь.
+2. **Высокая задержка (Latency):** Авторегрессионная генерация текста — самый медленный процесс в LLM.
+3. **Неустойчивость синтаксиса:** Малейшая ошибка в JSON-формате "мысли" ломает работу парсера и всего агента.
+
+**CIDA решает это на уровне латентного пространства (System 2):**
+* Размышление и консенсус происходят **внутри скрытых слоев модели** до генерации первого токена ответа.
+* Агенты общаются не текстовыми сообщениями, а компактными **сжатыми векторами планирования** ($8 \times D_{llm}$).
+* Вместо текстовых мыслей вы получаете чистый ответ и математические метрики (Disagreement / Uncertainty).
+
+---
+
+## 2. Быстрый старт: Установка и первый запуск
+
+Установка библиотеки выполняется стандартным менеджером пакетов `pip`. Для локального инференса рекомендуется использовать видеокарту с поддержкой CUDA (от 8 ГБ VRAM для квантованных моделей).
 
 ```bash
-# [RU] Установка ядра CIDA и инференс-компонентов из PyPI
-# [EN] Installing CIDA core and inference components from PyPI
-# [ZH] 从 PyPI 安装 CIDA 核心和推理组件
+# Установка ядра CIDA и клиентского SDK из GitHub / PyPI
 pip install cida-plugin
 
-# [RU] Установка необходимых зависимостей (PyTorch, Transformers)
-# [EN] Installing required dependencies (PyTorch, Transformers)
-# [ZH] 安装所需的依赖项 (PyTorch, Transformers)
-pip install torch transformers
+# Установка зависимостей машинного обучения
+pip install torch transformers acceleration bitsandbytes redis
 ```
 
----
+### Минимальный рабочий пример (3 строки кода)
 
-### 2. Запуск и базовое использование | Running and Basic Usage | 运行和基本用法
-
-**[RU]** Для запуска агента необходимо инициализировать `KairosOrchestrator` (который скачает базовую модель и адаптер CIDA) и передать ему ваши функции в качестве инструментов.
-**[EN]** To run an agent, you need to initialize the `KairosOrchestrator` (which will download the base model and the CIDA adapter) and pass your functions to it as tools.
-**[ZH]** 要运行代理，您需要初始化 `KairosOrchestrator`（它将下载基础模型和 CIDA 适配器）并将您的函数作为工具传递给它。
+В простейшем сценарии мы оборачиваем стандартную модель `Qwen` адаптером CIDA и запускаем инференс:
 
 ```python
 import torch
-from cida_plugin.orchestrator import KairosOrchestrator
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from cida_plugin.inference.loader import CIDAWrapper
 from cida_plugin.inference.latent_agent import LatentAgent
+from cida_plugin.inference.backbone import HuggingFaceBackbone
 
-# [RU] Загрузка ядра и адаптера
-# [EN] Loading the core and adapter
-# [ZH] 加载核心和适配器
-orchestrator = KairosOrchestrator(
-    backbone_model_name="Qwen/Qwen2.5-7B-Instruct",
-    cida_model_path_or_repo="Kairatzh/CIDA-plugin-v1",
-    device="cuda",
-    torch_dtype=torch.bfloat16
-)
+# 1. Инициализируем базовую предобученную модель
+model_id = "Qwen/Qwen1.5-7B-Chat"
+llm = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto", torch_dtype=torch.float16)
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+backbone = HuggingFaceBackbone(llm)
 
-# [RU] Создание простого инструмента
-# [EN] Creating a simple tool
-# [ZH] 创建一个简单的工具
-def get_system_status() -> str:
-    """Returns the current system status."""
-    return "System is operational. CPU: 45%, RAM: 60%."
+# 2. Оборачиваем модель адаптером CIDA в одну строчку
+wrapper = CIDAWrapper.from_pretrained(llm, cida_repo="kirtzh/Kairos-7B-CIDA-v1.0")
 
-# [RU] Инициализация агента и запуск
-# [EN] Initializing the agent and running
-# [ZH] 初始化代理并运行
-agent = LatentAgent(
-    wrapper=orchestrator,
-    llm=orchestrator.llm,
-    tokenizer=orchestrator.tokenizer,
-    tools={"get_system_status": get_system_status}
-)
-
-print(agent.run("Check the server parameters."))
+# 3. Создаем агента и выполняем запрос
+agent = LatentAgent(wrapper=wrapper, llm=backbone, tokenizer=tokenizer)
+response = agent.run("Вычисли площадь круга радиусом 5 см.")
+print(response)
 ```
 
 ---
 
-### 3. Преимущества архитектуры CIDA | Advantages of the CIDA Architecture | CIDA 架构的优势
+## 3. Разработка под CIDA: Интеграция кастомных инструментов (Tools)
 
-**[RU]** В отличие от стандартных LLM-агентов, CIDA работает на уровне скрытых состояний (System 2).
-1. **Точность:** Векторные дебаты перед генерацией текста исключают галлюцинации в синтаксисе тулов.
-2. **Экономия:** Агент думает внутри матрицы, не генерируя тысячи текстовых токенов `Thought:`, что кардинально снижает стоимость вывода.
-3. **Безопасность:** Латентный фаервол (Latent Firewall) блокирует вредоносные намерения еще до того, как модель начнет их озвучивать.
+Инструменты (Tools) в CIDA — это стандартные функции Python. Агент автоматически считывает сигнатуру функции, типы аргументов и docstring для понимания того, когда и как вызывать инструмент.
 
-**[EN]** Unlike standard LLM agents, CIDA operates at the level of hidden states (System 2).
-1. **Accuracy:** Vector debates before text generation eliminate hallucinations in tool syntax.
-2. **Economy:** The agent thinks inside the matrix without generating thousands of `Thought:` text tokens, radically reducing inference costs.
-3. **Security:** The Latent Firewall blocks malicious intents even before the model starts vocalizing them.
+### Пример интеграции API погоды и базы данных
 
-**[ZH]** 与标准的 LLM 代理不同，CIDA 在隐藏状态的级别上运行（系统 2）。
-1. **准确性：** 文本生成之前的向量辩论消除了工具语法中的幻觉。
-2. **经济性：** 代理在矩阵内部思考，而无需生成数以千计的 `Thought:` 文本标记，从而从根本上降低了推理成本。
-3. **安全性：** 潜在防火墙 (Latent Firewall) 甚至在模型开始表达恶意意图之前就将其阻止。
+```python
+from typing import Dict, Any
+
+# Описываем функции с четкими типами и подробными docstrings
+def fetch_weather(city: str) -> str:
+    """
+    Получает текущую погоду для указанного города.
+    :param city: Название города на английском языке (например, 'London', 'Almaty').
+    """
+    # Симуляция интеграции с OpenWeatherMap API
+    db_mock = {"London": "15°C, Rain", "Almaty": "28°C, Sunny", "Tokyo": "22°C, Cloudy"}
+    return db_mock.get(city, "City not found.")
+
+def save_report_to_db(report_text: str, database_id: int = 1) -> str:
+    """
+    Сохраняет сгенерированный отчет в базу данных компании.
+    :param report_text: Текст отчета для записи.
+    :param database_id: ID целевой базы данных (по умолчанию 1).
+    """
+    print(f"💾 Запись в БД #{database_id}: {report_text[:30]}...")
+    return "Status: SUCCESS. Row inserted."
+
+# Регистрация в агенте
+agent = LatentAgent(
+    wrapper=wrapper,
+    llm=backbone,
+    tokenizer=tokenizer,
+    tools={
+        "fetch_weather": fetch_weather,
+        "save_report_to_db": save_report_to_db
+    }
+)
+
+# Запуск агента с вызовом цепочки инструментов
+result = agent.run("Узнай погоду в Алматы и сохрани отчет об этом в базу данных.")
+print(result)
+```
 
 ---
 
-### 4. Создание мультиагентных пайплайнов | Creating Multi-Agent Pipelines | 创建多代理管道
+## 4. Надежность в Production: Латентные откаты (Rollbacks)
 
-**[RU]** Класс `CidaSwarm` позволяет связывать агентов в конвейеры (pipelines). Уникальность CIDA в том, что агенты передают друг другу Латентную Память (`LatentMemory`) — векторы, а не текст. Это предотвращает потерю контекста при долгой работе.
-**[EN]** The `CidaSwarm` class allows linking agents into pipelines. CIDA's uniqueness is that agents pass Latent Memory (`LatentMemory`) to each other—vectors, not text. This prevents context loss during long operations.
-**[ZH]** `CidaSwarm` 类允许将代理链接到管道中。CIDA 的独特之处在于代理相互传递潜在内存 (`LatentMemory`)——向量，而不是文本。这防止了在长时间操作中丢失上下文。
+В реальных приложениях внешние инструменты могут возвращать ошибки (таймауты, невалидные ответы API, сбои соединений). CIDA использует концепцию **Reliability-weighted Tool Trust** (надежность инструментов с экспоненциальным сглаживанием) и механизм **Latent Rollback**.
+
+Если инструмент возвращает ошибку или не проходит валидацию:
+1. Коэффициент надежности этого инструмента снижается.
+2. Агент **отматывает скрытое состояние** на шаг назад (Latent Rollback).
+3. В векторное состояние подмешивается корректирующий шум (Latent Jittering), выводящий модель из локального минимума.
+4. Агент повторно планирует действие, выбирая альтернативный путь (например, другой инструмент или другие параметры вызова).
+
+```python
+# Добавляем валидатор для проверки корректности ответа инструмента
+def validate_weather_response(response_text: str) -> bool:
+    # Если API вернул ошибку, валлидатор сработает ложно
+    return "not found" not in response_text.lower()
+
+# Регистрируем инструмент с валидатором
+agent.register_tool(
+    name="fetch_weather",
+    func=fetch_weather,
+    validator=validate_weather_response
+)
+
+# Если вызвать несуществующий город, сработает валидатор,
+# CIDA снизит оценку надежности инструмента и сделает латентный откат
+response = agent.run("Узнай погоду в городе НесуществующийCity.")
+```
+
+---
+
+## 5. Управление состоянием: Латентная память и Redis
+
+Для работы в облачных кластерах (например, в Kubernetes-подах, которые могут перезапускаться), CIDA поддерживает персистентную латентную память через **Redis**. Это гарантирует сохранение всех векторных контекстов дебатов и истории вызовов между сессиями.
+
+```python
+from cida_plugin.inference.latent_memory import LatentMemory, RedisMemoryStore
+
+# 1. Создаем персистентный Redis-бэкенд для латентной памяти
+redis_store = RedisMemoryStore(
+    host="localhost",
+    port=6379,
+    db=0,
+    password=None,
+    key_prefix="cida_agent_session_1"
+)
+
+# 2. Инициализируем латентную память CIDA с Redis бэкендом
+# d_model соответствует размерности скрытого состояния используемой LLM
+d_model = 4096  # Для моделей Qwen 7B
+latent_memory = LatentMemory(d_model=d_model, store=redis_store)
+
+# 3. Подключаем память к агенту
+agent = LatentAgent(
+    wrapper=wrapper,
+    llm=backbone,
+    tokenizer=tokenizer,
+    memory=latent_memory
+)
+
+# Теперь все рассуждения и вызовы инструментов автоматически сохраняются в Redis
+agent.run("Найди последние данные о продажах за Q2.")
+```
+
+---
+
+## 6. Многоагентные системы: Роевой интеллект CidaSwarm
+
+Для решения сложных, многоуровневых задач CIDA предлагает модуль **`CidaSwarm`**. В отличие от текстовых роев, где агенты передают друг другу громоздкие промпты, `CidaSwarm` организует общую **Латентную классную доску (Shared Latent Workspace)**. Агенты записывают свои выводы в виде векторов в общую память, откуда другие агенты считывают их за один проход внимания.
 
 ```python
 from cida_plugin.inference.swarm import CidaSwarm
 
-# [RU] Конфигурация двух агентов
-# [EN] Configuration of two agents
-# [ZH] 两个代理的配置
+# Описываем конфигурации агентов и их зоны ответственности
 swarm_config = {
-    "Researcher": {"role": "Finds data on the web", "tools": {"call_web_api": agent.call_web_api}},
-    "Summarizer": {"role": "Writes concise executive summaries", "tools": {}}
+    "FinancialAnalyst": {
+        "role": "Анализирует финансовые показатели компаний, вычисляет P/E.",
+        "tools": {"fetch_financials": fetch_weather} # Заглушка
+    },
+    "RiskManager": {
+        "role": "Оценивает потенциальные геополитические и рыночные риски.",
+        "tools": {}
+    },
+    "ChiefEditor": {
+        "role": "Компилирует финансовый отчет и риски в итоговую сводку для инвесторов.",
+        "tools": {"save_report_to_db": save_report_to_db}
+    }
 }
 
+# Инициализируем рой CIDA
 swarm = CidaSwarm(
-    wrapper=orchestrator,
-    llm=orchestrator.llm,
-    tokenizer=orchestrator.tokenizer,
+    wrapper=wrapper,
+    llm=backbone,
+    tokenizer=tokenizer,
     agent_configs=swarm_config
 )
 
-# [RU] Запуск агентов последовательно. Researcher передает векторы Summarizer'у.
-# [EN] Running agents sequentially. Researcher passes vectors to Summarizer.
-# [ZH] 顺序运行代理。Researcher 将向量传递给 Summarizer。
+# Последовательный конвейер: каждый агент обогащает общее латентное пространство
 results = swarm.run(
-    task="Research the latest Apple stock drop and summarize the reasons.",
-    pipeline=["Researcher", "Summarizer"]
+    task="Проведи комплексную оценку компании Tesla Inc.",
+    pipeline=["FinancialAnalyst", "RiskManager", "ChiefEditor"]
 )
 
-print(results["Summarizer"])
+print(results["ChiefEditor"])
 ```
 
 ---
 
-### 5. Масштабирование и Развертывание | Scaling and Deployment | 扩展和部署
+## 7. Тонкая настройка: Адаптивные вычисления и LRU-кэширование
 
-**[RU]** Библиотека `cida_inference` спроектирована для масштабирования в Enterprise-окружениях.
-* **Аппаратное обеспечение:** Оркестратор поддерживает квантование `bitsandbytes` (4-bit и 8-bit), что позволяет запускать агентов на потребительских GPU (например, RTX 3090/4090).
-* **Многопоточность:** Метод `run_parallel_then_merge` в `CidaSwarm` позволяет нескольким агентам (Fan-out) одновременно собирать данные из разных источников, а затем единому агенту-синтезатору (Fan-in) объединять векторную память в финальный ответ.
+Для снижения затрат на инференс в CIDA предусмотрены встроенные оптимизации:
 
-**[EN]** The `cida_inference` library is designed to scale in Enterprise environments.
-* **Hardware:** The orchestrator supports `bitsandbytes` quantization (4-bit and 8-bit), allowing agents to run on consumer GPUs (e.g., RTX 3090/4090).
-* **Multithreading:** The `run_parallel_then_merge` method in `CidaSwarm` allows multiple agents (Fan-out) to simultaneously collect data from different sources, and then a single synthesizer agent (Fan-in) merges the vector memory into a final answer.
+### Адаптивные вычисления (Adaptive Compute)
+Перед выполнением тяжелого цикла дебатов CIDA анализирует дисперсию (разногласие) мнений внутренних агентов на первом слое.
+* Если задача тривиальная (например, "Сколько будет 2+2?"), расхождение мнений минимально (`variance < 0.05`). CIDA завершает дебаты досрочно на 1-м раунде, экономя до **80% вычислительного времени**.
+* Если задача сложная, лимит раундов автоматически повышается.
 
-**[ZH]** `cida_inference` 库专为在企业环境中扩展而设计。
-* **硬件：** 编排器支持 `bitsandbytes` 量化（4 位和 8 位），允许代理在消费者 GPU（例如，RTX 3090/4090）上运行。
-* **多线程：** `CidaSwarm` 中的 `run_parallel_then_merge` 方法允许许多代理 (Fan-out) 同时从不同来源收集数据，然后由单个合成器代理 (Fan-in) 将向量内存合并为最终答案。
+### LRU-кэширование планов
+CIDA кэширует траектории латентного планирования. При получении запроса с высокой семантической близостью к прошлому (`cosine_similarity > 0.96`), агент повторно использует вычисленный вектор планирования, минуя обращение к тяжелому циклу оптимизации. Кэш автоматически вытесняет наименее используемые элементы при достижении лимита.
+
+```python
+agent = LatentAgent(
+    wrapper=wrapper,
+    llm=backbone,
+    tokenizer=tokenizer,
+    default_reasoning_rounds=4,        # Максимальное число раундов
+    disagreement_threshold=0.15,      # Порог досрочного выхода
+    uncertainty_threshold=0.25        # Порог эскалации/отката
+)
+```
 
 ---
 
-### 6. Ключевые плюшки библиотеки | Key Bonus Features | 关键奖励功能
+## 🚀 Готовый интерактивный шаблон в Google Colab
+Для мгновенного тестирования без локальной установки и настройки окружения запустите наш официальный демонстрационный Colab-ноутбук:
 
-**[RU]** CIDA предоставляет уникальные алгоритмы, которых нет в других фреймворках:
-1. **Скрытый Режим (Stealth Mode):** Активация `silent_mode=True` полностью выключает текстовую генерацию рассуждений. Агент становится "невидимым", отвечая мгновенно и экономя ресурсы.
-2. **Автономные Откаты (Latent Rollback):** Если API возвращает `Status 400` или происходит программная ошибка, агент автоматически отматывает свое состояние назад на 1 шаг, меняет аргументы вызова и пробует снова, не возвращая ошибку пользователю.
-3. **Быстрый Выход (Fast Path Early Exit):** Перед началом вычислений CIDA оценивает сложность задачи. Если дисперсия внутренних мнений (`variance < 0.05`), фреймворк пропускает циклы дебатов, ускоряя генерацию ответа в 3 раза.
-
-**[EN]** CIDA provides unique algorithms not found in other frameworks:
-1. **Stealth Mode:** Activating `silent_mode=True` completely turns off textual reasoning generation. The agent becomes "invisible", responding instantly and saving resources.
-2. **Latent Rollback:** If an API returns `Status 400` or a software error occurs, the agent automatically rewinds its state back by 1 step, changes the invocation arguments, and tries again without returning an error to the user.
-3. **Fast Path Early Exit:** Before starting computations, CIDA evaluates task complexity. If the variance of internal opinions is low (`variance < 0.05`), the framework skips debate loops, speeding up answer generation by 3 times.
-
-**[ZH]** CIDA 提供了其他框架中没有的独特算法：
-1. **隐身模式 (Stealth Mode)：** 激活 `silent_mode=True` 将完全关闭文本推理生成。代理变得“不可见”，即时响应并节省资源。
-2. **潜在回滚 (Latent Rollback)：** 如果 API 返回 `Status 400` 或发生软件错误，代理会自动将其状态后退 1 步，更改调用参数，然后重试，而不会向用户返回错误。
-3. **快速路径提前退出 (Fast Path Early Exit)：** 在开始计算之前，CIDA 会评估任务复杂性。如果内部意见的方差很低 (`variance < 0.05`)，框架将跳过辩论循环，将答案生成速度提高 3 倍。
+👉 **[Запустить Kairos_CIDA_Usage_Quickstart.ipynb](file:///c:/Users/User/Desktop/projects/CIDA-plugin/Kairos_CIDA_Usage_Quickstart.ipynb)** *(Ноутбук предустановлен и готов к работе на бесплатной GPU T4).*

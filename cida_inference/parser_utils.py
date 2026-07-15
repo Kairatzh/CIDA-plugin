@@ -329,4 +329,7 @@ def find_first_balanced_action(response: str) -> tuple[str, str]:
         else:
             args_chars.append(char)
             
-    return None, None
+    # If we reached the end but brackets/quotes were not closed, 
+    # return the captured arguments anyway. This ensures a Tool Error is thrown,
+    # which gracefully triggers Latent Rollback instead of halting the agent.
+    return tool_name, "".join(args_chars)
