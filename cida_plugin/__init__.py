@@ -34,7 +34,18 @@ from .ttt import TestTimeTrainer
 from .liquid_dynamics import LiquidDeliberationSolver
 from .hf import wrap_hf_model, HFModelWithCIDA, wrap_hf_causal_lm, HFModelForCausalLMWithCIDA
 from .projector import LatentAEProjector, TargetEncoder
-from .inference import CIDAWrapper, LatentMemory, LatentReasoner, LatentAgent, CidaSwarm
+from .inference import (
+    CIDAWrapper,
+    LatentMemory,
+    LatentReasoner,
+    LatentAgent,
+    CidaSwarm,
+    FiLMGenerator,
+    FiLMModulatedGeneration,
+    LatentMCTS,
+    StrategyLibrary,
+    CIDABreakthroughEngine,
+)
 
 __all__ = [
     # Главный интерфейс
@@ -76,5 +87,12 @@ __all__ = [
     "LatentAgent",
     # [v1.2] Multi-agent Swarm
     "CidaSwarm",
+    # [v2.0] Production Platform Modules
+    "FiLMGenerator",
+    "FiLMModulatedGeneration",
+    "LatentMCTS",
+    "StrategyLibrary",
+    "CIDABreakthroughEngine",
 ]
+
 
