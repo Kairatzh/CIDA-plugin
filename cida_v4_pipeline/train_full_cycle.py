@@ -429,7 +429,7 @@ class FullCycleSentinelTrainer:
         wb_decisions = []
         for batch in test_loader:
             h_seq = batch["h_seq"].to(self.device)
-            # Evaluate step with hysteresis damping
+            white_box.reset_episode()
             dec = white_box.evaluate_step(h_seq)
             wb_decisions.append(dec.status)
 
