@@ -347,9 +347,9 @@ class FullCycleSentinelTrainer:
         # Policy parameters: steering projection head
         optimizer = torch.optim.AdamW(self.steerer.parameters(), lr=lr)
 
-        total_reward = 0.0
-        count = 0
         for epoch in range(epochs):
+            total_reward = 0.0
+            count = 0
             for batch in loader:
                 h_seq = batch["h_seq"].to(self.device)
                 intent = batch["intent"].to(self.device)
@@ -372,8 +372,8 @@ class FullCycleSentinelTrainer:
                 # Compute steering vector
                 steer_vec = self.steerer.compute_steer_vector(refined_pack.constraint, alpha=0.15)
                 
-                # Reward: positive if post-refinement energy < 1.0, negative otherwise
-                rewards = torch.where(refined_energy < 1.0, 1.0, -1.0)
+                # Reward: positive if post-refinement energy < threshold (1.5), negative otherwise
+                rewards = torch.where(refined_energy < 1.5, 1.0, -1.0)
 
                 # Policy loss: maximize alignment when reward is positive
                 policy_loss = -(steer_vec.norm(dim=-1) * rewards).mean()
