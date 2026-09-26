@@ -26,4 +26,25 @@ __all__ = [
     "PrefixKVSteerer",
     "DatasetCurator",
     "OfflineLatentCacher",
+    "CognitiveStatePack",
+    "LatentVAEBottleneck",
+    "JEPATrajectoryEnergyPredictor",
+    "LangevinDynamicsRefiner",
+    "ContrastiveActivationSteerer",
+    "WhiteBoxSentinel",
+    "BlackBoxSentinel",
+    "OmniSentinel",
+    "FullCycleSentinelTrainer",
 ]
+
+from .sentinel_dual import (
+    CognitiveStatePack,
+    LatentVAEBottleneck,
+    JEPATrajectoryEnergyPredictor,
+    LangevinDynamicsRefiner,
+    ContrastiveActivationSteerer,
+    WhiteBoxSentinel,
+    BlackBoxSentinel,
+    OmniSentinel,
+)
+from .train_full_cycle import FullCycleSentinelTrainer
