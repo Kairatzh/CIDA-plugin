@@ -163,6 +163,10 @@ class DatasetCurator:
         print(f"[OK] Successfully curated {valid_count} TACO coding problems to: {out_file}")
         return out_file
 
+    # Convenience aliases
+    curate_taco = curate_taco_code
+    curate_numina = curate_numinamath
+
     def generate_local_seed_data(self, num_samples: int = 50) -> str:
         """
         Generates high-quality offline seed data for immediate local training and smoke-testing.
