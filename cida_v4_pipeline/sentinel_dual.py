@@ -93,8 +93,11 @@ class GatedPersistentMemory(nn.Module):
         m_prev: (B, d_hidden) previous persistent memory
         Returns: (B, d_hidden) updated memory
         """
-        if m_prev is None:
-            m_prev = torch.zeros_like(s_t)
+        if m_prev is None or m_prev.size(0) != s_t.size(0):
+            if m_prev is not None and m_prev.size(0) > s_t.size(0):
+                m_prev = m_prev[:s_t.size(0)]
+            else:
+                m_prev = torch.zeros_like(s_t)
         
         gate = torch.sigmoid(self.gate_w(s_t) + self.gate_u(m_prev))
         cand = torch.tanh(self.cand_w(s_t) + self.cand_u(m_prev))
@@ -476,6 +479,12 @@ class WhiteBoxSentinel(nn.Module):
         5. If budget exhausted: Emits HALT_FALLBACK to prevent infinite loops.
         """
         B = h_stream.size(0)
+        if self.persistent_memory is not None and self.persistent_memory.size(0) != B:
+            if self.persistent_memory.size(0) > B:
+                self.persistent_memory = self.persistent_memory[:B]
+            else:
+                self.persistent_memory = None
+
         state_pack, _, _, _, self.persistent_memory = self.vae(
             h_stream, m_prev=self.persistent_memory, sample=False
         )
