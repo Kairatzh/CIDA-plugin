@@ -119,17 +119,30 @@ class ContrastiveLatentDataset(Dataset):
                 pos_steps.append(curr.unsqueeze(0))
             traj_pos = torch.cat(pos_steps, dim=0) # (H, D_hidden)
 
-            # Drifting trajectory (S-): Sudden high curvature divergence (hallucination)
+            # Negative trajectory (S-): 50% Hard Negatives (subtle logic drift) vs 50% Exploding Drift
             neg_steps = []
             curr_neg = s_curr
+            is_hard_negative = (i % 2 == 0)
+
             for step in range(horizon):
-                if step >= horizon // 2:
-                    # Exploding tangent divergence (simulating false assumption)
-                    drift_dir = torch.randn(d_hidden)
-                    drift_dir = drift_dir / (torch.norm(drift_dir) + 1e-7)
-                    curr_neg = curr_neg + 1.5 * drift_dir
+                if is_hard_negative:
+                    # Hard Negative: mimics S+ until final step, then misses intent by subtle offset (subtle math error)
+                    if step < horizon - 1:
+                        step_ratio = (step + 1) / float(horizon)
+                        curr_neg = (1.0 - 0.25 * step_ratio) * curr_neg + (0.25 * step_ratio) * intent
+                    else:
+                        # Subtle orthogonal perturbation
+                        ortho = torch.randn(d_hidden)
+                        ortho = ortho - (ortho @ intent) * intent
+                        curr_neg = intent * 0.7 + (ortho / (torch.norm(ortho) + 1e-7)) * 0.7
                 else:
-                    curr_neg = curr_neg + torch.randn(d_hidden) * 0.1
+                    # Soft Negative: exploding curvature / tangent departure
+                    if step >= horizon // 2:
+                        drift_dir = torch.randn(d_hidden)
+                        drift_dir = drift_dir / (torch.norm(drift_dir) + 1e-7)
+                        curr_neg = curr_neg + 1.5 * drift_dir
+                    else:
+                        curr_neg = curr_neg + torch.randn(d_hidden) * 0.1
                 neg_steps.append(curr_neg.unsqueeze(0))
             traj_neg = torch.cat(neg_steps, dim=0) # (H, D_hidden)
 

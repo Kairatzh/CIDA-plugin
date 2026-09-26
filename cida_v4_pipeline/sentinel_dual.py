@@ -147,14 +147,14 @@ class LatentVAEBottleneck(nn.Module):
         sample: bool = False
     ) -> Tuple[CognitiveStatePack, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        h_seq: (B, L, d_llm)
-        Returns:
-            state_pack: CognitiveStatePack
-            h_recon: (B, d_llm)
-            mu: (B, d_hidden * 4)
-            logvar: (B, d_hidden * 4)
-            m_next: (B, d_hidden)
+        h_seq: (B, L, D_llm) — compatible with any backbone hidden dimension
         """
+        # Dynamic dimension bridge: automatically project any LLM hidden size to expected D_llm
+        if h_seq.size(-1) != self.d_llm:
+            if not hasattr(self, "_dim_bridge") or self._dim_bridge.in_features != h_seq.size(-1):
+                self._dim_bridge = nn.Linear(h_seq.size(-1), self.d_llm, bias=False).to(h_seq.device)
+            h_seq = self._dim_bridge(h_seq)
+
         B = h_seq.size(0)
         q = self.norm_q(self.query_bank.expand(B, -1, -1))
         kv = self.norm_kv(self.kv_proj(h_seq))
@@ -377,6 +377,8 @@ class ContrastiveActivationSteerer(nn.Module):
             nn.LayerNorm(d_llm),
             nn.Tanh()
         )
+        # Learnable per-layer steering gains
+        self.layer_gains = nn.Parameter(torch.ones(len(self.target_layers)) * 0.15)
 
     def compute_steer_vector(
         self,
@@ -396,16 +398,28 @@ class ContrastiveActivationSteerer(nn.Module):
         self,
         h_layer: torch.Tensor,
         constraint: torch.Tensor,
-        alpha: float = 0.15
+        layer_idx: Optional[int] = None,
+        alpha: Optional[float] = None
     ) -> torch.Tensor:
         """
-        In-place activation addition with adaptive variance preservation:
-        h_steered = h_layer + alpha * norm(v) * std(h_layer)
+        In-place activation addition with adaptive variance preservation and layer-specific gain.
         """
-        h_std = h_layer.std(dim=-1, keepdim=True).clamp(min=1e-5)
+        if alpha is None:
+            if layer_idx is not None and layer_idx in self.target_layers:
+                idx = self.target_layers.index(layer_idx)
+                alpha = float(torch.clamp(self.layer_gains[idx], 0.01, 0.50).item())
+            else:
+                alpha = 0.15
+
         steer_vec = self.compute_steer_vector(constraint, alpha=alpha, h_std=1.0)
+        if h_layer.size(-1) != self.d_llm:
+            if not hasattr(self, "_layer_bridge") or self._layer_bridge.out_features != h_layer.size(-1):
+                self._layer_bridge = nn.Linear(self.d_llm, h_layer.size(-1), bias=False).to(h_layer.device)
+            steer_vec = self._layer_bridge(steer_vec)
+
+        h_std = h_layer.std(dim=-1, keepdim=True).clamp(min=1e-5)
         if steer_vec.dim() == 2 and h_layer.dim() == 3:
-            steer_vec = steer_vec.unsqueeze(1) # Broadcast across sequence tokens
+            steer_vec = steer_vec.unsqueeze(1)
         return h_layer + steer_vec * h_std
 
 
