@@ -1,9 +1,0 @@
-# ── Cell 2: Latent CIDA v2 + PlanProjector ──
-    class CIDAPlanProjector(nn.Module):
-    proj = CIDAPlanProjector(
-            class PlanProjector(nn.Module):
-                projector = PlanProjector(num_plan_tokens=num_plan, hidden_size=2048).to(DEVICE)
-from cida_plugin import CidaConfig, CidaModel, PlanProjector
-config = CidaConfig.from_json_file(config_path)
-cida_model = CidaModel(config).cuda()
-proj = PlanProjector(num_plan_tokens=8, hidden_dim=4096).cuda()

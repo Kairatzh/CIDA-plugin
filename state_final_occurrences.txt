@@ -1,3 +1,0 @@
-            plan = proj(co["state_final"].s)  # (1, NUM_PLAN, d_llm)
-        plan = proj(co["state_final"].s)
-                plan = proj(co["state_final"].s)
