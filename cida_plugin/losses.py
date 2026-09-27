@@ -124,8 +124,9 @@ class CIDALoss(nn.Module):
         b_j = b_final.unsqueeze(1)   # (B, 1, M, K)
         pairwise_dist = (b_i - b_j).abs().sum(dim=-1)  # (B, M, M)
 
-        # Только нижняя треугольная часть (без диагонали)
         M = b_final.size(1)
+        if M < 2:
+            return torch.tensor(0.0, device=b_final.device)
         mask = torch.tril(torch.ones(M, M, device=b_final.device), diagonal=-1).bool()
         off_diag = pairwise_dist[:, mask]  # (B, n_pairs)
 
