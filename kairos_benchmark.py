@@ -109,7 +109,7 @@ TRACKS: Dict[str, TrackSpec] = {
         name="vision",
         modality="vision",
         backbone_repo="facebook/ijepa_vith14_1k",
-        dataset_repo="food101",
+        dataset_repo="ethz/food101",
         image_field="image",
         label_field="label",
         num_classes=101,
@@ -124,13 +124,44 @@ TRACKS: Dict[str, TrackSpec] = {
 # Stage A — download real frozen backbones
 # ===========================================================================
 
+def ensure_tokenizer_packages():
+    """Ensure sentencepiece and tiktoken are installed for ModernBERT tokenizers."""
+    for pkg in ["sentencepiece", "tiktoken"]:
+        try:
+            __import__(pkg)
+        except ImportError:
+            import subprocess
+            print(f"[setup] Auto-installing required tokenizer dependency: {pkg}...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
+                print(f"[setup] Successfully installed {pkg}")
+            except Exception as e:
+                print(f"[setup] Warning: could not install {pkg}: {e}")
+
+
 def download_backbone(track: TrackSpec, cache_dir: str = "./weights"):
     os.makedirs(cache_dir, exist_ok=True)
     from transformers import AutoModel, AutoTokenizer, AutoProcessor, AutoImageProcessor
 
     if track.modality == "text":
+        ensure_tokenizer_packages()
         print(f"[download] Fetching tokenizer for {track.backbone_repo}...")
-        tok = AutoTokenizer.from_pretrained(track.backbone_repo, cache_dir=cache_dir, trust_remote_code=True)
+        tok = None
+        for kwargs in [
+            {"trust_remote_code": True},
+            {"trust_remote_code": True, "subfolder": "tokenizer"},
+            {"trust_remote_code": True, "use_fast": False},
+        ]:
+            try:
+                tok = AutoTokenizer.from_pretrained(track.backbone_repo, cache_dir=cache_dir, **kwargs)
+                break
+            except Exception:
+                pass
+
+        if tok is None:
+            print(f"[download] Primary tokenizer load failed. Falling back to answerdotai/ModernBERT-large tokenizer...")
+            tok = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-large", cache_dir=cache_dir)
+
         print(f"[download] Fetching model for {track.backbone_repo}...")
         model = AutoModel.from_pretrained(track.backbone_repo, cache_dir=cache_dir, trust_remote_code=True)
         model.eval()
@@ -173,16 +204,28 @@ def cache_latents(
     from datasets import load_dataset
 
     os.makedirs(out_dir, exist_ok=True)
-    try:
-        ds = load_dataset(track.dataset_repo, split=split, streaming=True)
-    except Exception as e:
-        # Fallback for repos like PolyAI/banking77 -> banking77 if renamed
-        if "/" in track.dataset_repo:
-            alt_repo = track.dataset_repo.split("/")[-1]
-            print(f"[cache] Attempting fallback dataset name: {alt_repo}")
-            ds = load_dataset(alt_repo, split=split, streaming=True)
-        else:
-            raise e
+    candidates = [track.dataset_repo]
+    if "food101" in track.dataset_repo:
+        if track.dataset_repo != "ethz/food101":
+            candidates.insert(0, "ethz/food101")
+        if "food101" not in candidates:
+            candidates.append("food101")
+    elif "/" in track.dataset_repo:
+        candidates.append(track.dataset_repo.split("/")[-1])
+
+    ds = None
+    last_err = None
+    for cand in candidates:
+        try:
+            print(f"[cache:{track.name}/{split}] Trying dataset: {cand}...")
+            ds = load_dataset(cand, split=split, streaming=True)
+            break
+        except Exception as e:
+            last_err = e
+            print(f"[cache:{track.name}/{split}] Candidate {cand} failed: {e}")
+
+    if ds is None:
+        raise last_err
 
     buf, shard_idx, seen, in_shard = [], 0, 0, 0
     batch = []
@@ -200,7 +243,16 @@ def cache_latents(
 
     def encode_vision_batch(items):
         proc, model = backbone["processor"], backbone["model"].to(device)
-        images = [x[track.image_field].convert("RGB") for x in items]
+        images = []
+        for x in items:
+            img = x[track.image_field]
+            if hasattr(img, "convert"):
+                images.append(img.convert("RGB"))
+            elif isinstance(img, str):
+                from PIL import Image
+                images.append(Image.open(img).convert("RGB"))
+            else:
+                images.append(img)
         labels = [int(x[track.label_field]) for x in items]
         enc = proc(images=images, return_tensors="pt").to(device)
         with torch.no_grad():
