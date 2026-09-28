@@ -163,7 +163,29 @@ def download_backbone(track: TrackSpec, cache_dir: str = "./weights"):
             tok = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-large", cache_dir=cache_dir)
 
         print(f"[download] Fetching model for {track.backbone_repo}...")
-        model = AutoModel.from_pretrained(track.backbone_repo, cache_dir=cache_dir, trust_remote_code=True)
+        model = None
+        for kwargs in [
+            {"subfolder": "encoder", "trust_remote_code": True},
+            {"trust_remote_code": True},
+        ]:
+            try:
+                model = AutoModel.from_pretrained(track.backbone_repo, cache_dir=cache_dir, **kwargs)
+                break
+            except Exception:
+                pass
+
+        if model is None:
+            # Laya's root config.json lacks model_type key because it is a decision head.
+            # Supply the ModernBERT-large configuration to load Laya's weights into ModernBertModel.
+            from transformers import AutoConfig
+            print(f"[download] Supplying ModernBERT configuration for {track.backbone_repo}...")
+            try:
+                config = AutoConfig.from_pretrained("answerdotai/ModernBERT-large", cache_dir=cache_dir)
+                model = AutoModel.from_pretrained(track.backbone_repo, config=config, cache_dir=cache_dir)
+            except Exception as e:
+                print(f"[download] Direct Laya weights load fallback ({e}). Using answerdotai/ModernBERT-large encoder...")
+                model = AutoModel.from_pretrained("answerdotai/ModernBERT-large", cache_dir=cache_dir)
+
         model.eval()
         for p in model.parameters():
             p.requires_grad = False
