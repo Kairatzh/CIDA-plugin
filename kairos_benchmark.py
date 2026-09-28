@@ -97,7 +97,7 @@ TRACKS: Dict[str, TrackSpec] = {
         name="text",
         modality="text",
         backbone_repo="convaiinnovations/laya",
-        dataset_repo="PolyAI/banking77",
+        dataset_repo="mteb/banking77",
         text_field="text",
         label_field="label",
         num_classes=77,
@@ -175,13 +175,25 @@ def download_backbone(track: TrackSpec, cache_dir: str = "./weights"):
                 pass
 
         if model is None:
-            # Laya's root config.json lacks model_type key because it is a decision head.
-            # Supply the ModernBERT-large configuration to load Laya's weights into ModernBertModel.
-            from transformers import AutoConfig
-            print(f"[download] Supplying ModernBERT configuration for {track.backbone_repo}...")
+            # Laya's checkpoint stores the ModernBERT-large backbone under the 'encoder.' key prefix.
+            # We instantiate ModernBertModel and load the exact pretrained encoder weights.
+            from transformers import AutoConfig, ModernBertModel
+            from huggingface_hub import hf_hub_download
+            from safetensors.torch import load_file
+
+            print(f"[download] Extracting Laya ModernBERT encoder weights from safetensors...")
             try:
                 config = AutoConfig.from_pretrained("answerdotai/ModernBERT-large", cache_dir=cache_dir)
-                model = AutoModel.from_pretrained(track.backbone_repo, config=config, cache_dir=cache_dir)
+                model = ModernBertModel(config)
+                weights_path = hf_hub_download(repo_id=track.backbone_repo, filename="model.safetensors", cache_dir=cache_dir)
+                raw_sd = load_file(weights_path)
+                backbone_sd = {k[len("encoder."):]: v for k, v in raw_sd.items() if k.startswith("encoder.")}
+                if backbone_sd:
+                    missing, unexpected = model.load_state_dict(backbone_sd, strict=False)
+                    print(f"[download] Successfully loaded {len(backbone_sd)} Laya encoder tensors (missing={len(missing)}, unexpected={len(unexpected)})")
+                else:
+                    print(f"[download] Falling back to answerdotai/ModernBERT-large weights...")
+                    model = AutoModel.from_pretrained("answerdotai/ModernBERT-large", cache_dir=cache_dir)
             except Exception as e:
                 print(f"[download] Direct Laya weights load fallback ({e}). Using answerdotai/ModernBERT-large encoder...")
                 model = AutoModel.from_pretrained("answerdotai/ModernBERT-large", cache_dir=cache_dir)
@@ -227,6 +239,11 @@ def cache_latents(
 
     os.makedirs(out_dir, exist_ok=True)
     candidates = [track.dataset_repo]
+    if "banking77" in track.dataset_repo:
+        if "mteb/banking77" not in candidates:
+            candidates.insert(0, "mteb/banking77")
+        if "PolyAI/banking77" not in candidates:
+            candidates.append("PolyAI/banking77")
     if "food101" in track.dataset_repo:
         if track.dataset_repo != "ethz/food101":
             candidates.insert(0, "ethz/food101")
