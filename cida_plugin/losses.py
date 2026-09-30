@@ -59,40 +59,42 @@ class CIDALoss(nn.Module):
         lambda_ac: float = 0.2,
         min_disagreement: float = 0.08,
         multi_label: bool = False,
+        label_smoothing: float = 0.0,
     ):
         super().__init__()
         self.lambda_cal = lambda_cal
         self.lambda_ac = lambda_ac
         self.min_disagreement = min_disagreement
         self.multi_label = multi_label
+        self.label_smoothing = label_smoothing
 
     # ── Компонент 1: Task Loss ────────────────────────────────────────────────
 
     def task_loss(self, p_final: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
-        Основная задача: классификация.
+        Основная задача: классификация с поддержкой label smoothing.
         """
         eps = 1e-7
         if self.multi_label:
             return F.binary_cross_entropy(p_final.clamp(eps, 1.0 - eps), y)
-        # FIX v4: log-softmax стабильнее чем clamp().log() — согласовано с consensus.py
-        log_probs = F.log_softmax(p_final.log().clamp(-10, 10), dim=-1)
-        return F.nll_loss(log_probs, y)
+        logits = p_final.log().clamp(-10, 10)
+        return F.cross_entropy(logits, y, label_smoothing=self.label_smoothing)
 
     # ── Компонент 2: Calibration Loss ─────────────────────────────────────────
 
     def calibration_loss(self, p_final: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
-        Brier score: MSE между вероятностями и метками.
+        Brier score: сумма квадратов отклонений по классам, усредненная по батчу.
+        FIX: .sum(dim=-1).mean() устраняет деление на K, возвращая Brier score к масштабу [0, 2].
         """
         if self.multi_label:
             probs = p_final
-            return ((probs - y) ** 2).mean()
+            return ((probs - y) ** 2).sum(dim=-1).mean()
 
         # Single-label: one-hot targets
         K = p_final.size(-1)
         y_oh = F.one_hot(y, num_classes=K).float()
-        return ((p_final - y_oh) ** 2).mean()
+        return ((p_final - y_oh) ** 2).sum(dim=-1).mean()
 
     # ── Компонент 3: Anti-Collapse Loss ──────────────────────────────────────
 
