@@ -38,7 +38,7 @@ class MultiTaskCIDAPlugin(nn.Module):
         d_message: int = 512,
         num_agents: int = 4,
         max_rounds: int = 3,
-        num_tools: int = 65,     # 64 tools + 1 NO_TOOL
+        num_tools: int = 66,     # 64 concrete tools + 1 specialized long-tail + 1 NO_TOOL
         num_intents: int = 77,   # Banking77
         num_safety: int = 2,     # Binary guardrail
     ):

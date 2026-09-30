@@ -142,6 +142,7 @@ class KairosEngine:
             self.label_maps["tools"] = {0: "NO_TOOL / PASS_THROUGH"}
             for i in range(1, 65):
                 self.label_maps["tools"][i] = f"tool_{i}"
+            self.label_maps["tools"][65] = "SPECIALIZED_OR_LONG_TAIL_TOOL"
         else:
             # Ensure keys are integers
             self.label_maps["tools"] = {int(k): str(v) for k, v in self.label_maps["tools"].items()}
@@ -183,7 +184,7 @@ class KairosEngine:
         d_hidden = cfg.get("d_hidden", 512)
         d_message = cfg.get("d_message", 512)
         num_agents = cfg.get("num_agents", 4)
-        num_tools = cfg.get("num_tools", 65)
+        num_tools = cfg.get("num_tools", 66)
         num_intents = cfg.get("num_intents", 77)
         num_safety = cfg.get("num_safety", 2)
 
