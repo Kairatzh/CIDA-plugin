@@ -307,15 +307,36 @@ def cache_all_tracks(cache_dir: str = "./weights", out_base: str = "./latent_cac
     else:
         print("[cache] Track 3 (safety) already cached, skipping.")
 
-    # Save Unified Label Maps for Production SDK
-    tool_map = {0: "NO_TOOL / PASS_THROUGH", **{i + 1: t for i, t in enumerate(top_64_tools)}}
-    safety_map = {0: "SAFE", 1: "ATTACK_OR_INJECTION"}
-    label_maps = {
-        "tools": tool_map,
-        "intent": intent_map,
-        "safety": safety_map,
-    }
+    # Load or generate Unified Label Maps for Production SDK
     label_path = os.path.join(out_base, "label_maps.json")
+    label_maps = {}
+    if os.path.exists(label_path):
+        try:
+            with open(label_path, "r", encoding="utf-8") as f:
+                label_maps = json.load(f)
+        except Exception:
+            label_maps = {}
+
+    if "tools" not in label_maps:
+        if 'top_64_tools' in locals():
+            label_maps["tools"] = {0: "NO_TOOL / PASS_THROUGH", **{i + 1: t for i, t in enumerate(top_64_tools)}}
+        else:
+            label_maps["tools"] = {0: "NO_TOOL / PASS_THROUGH", **{i: f"tool_{i}" for i in range(1, 65)}}
+
+    if "intent" not in label_maps:
+        if 'intent_map' in locals():
+            label_maps["intent"] = intent_map
+        else:
+            try:
+                ds_b = datasets.load_dataset("mteb/banking77", split="train")
+                names = ds_b.features["label"].names if hasattr(ds_b.features["label"], "names") else [str(i) for i in range(77)]
+                label_maps["intent"] = {i: name for i, name in enumerate(names)}
+            except Exception:
+                label_maps["intent"] = {i: f"intent_{i}" for i in range(77)}
+
+    if "safety" not in label_maps:
+        label_maps["safety"] = {0: "SAFE", 1: "ATTACK_OR_INJECTION"}
+
     with open(label_path, "w", encoding="utf-8") as f:
         json.dump(label_maps, f, indent=2, ensure_ascii=False)
     print(f"\n[cache] Saved unified multi-task label maps to {label_path}")
