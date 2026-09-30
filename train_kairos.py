@@ -187,32 +187,63 @@ def cache_latents_for_track(track: str, cache_dir: str = "./weights", out_base: 
         except Exception:
             ds = datasets.load_dataset("Salesforce/xlam-function-calling-60k", split="train")
 
-        # Extract tool names called in the answers
+        # Extract tool names called in the answers or messages
         records = []
         tool_counter = Counter()
 
-        print("[cache:function_calling] Indexing tool schemas...")
+        print("[cache:function_calling] Indexing tool schemas and user queries...")
         for row in ds:
-            query = row.get("query", "")
-            answers = row.get("answers", "")
+            query = ""
             tool_name = None
-            if isinstance(answers, list) and len(answers) > 0:
-                if isinstance(answers[0], dict) and "name" in answers[0]:
-                    tool_name = answers[0]["name"]
-            elif isinstance(answers, str):
-                try:
-                    parsed = json.loads(answers)
-                    if isinstance(parsed, list) and len(parsed) > 0 and "name" in parsed[0]:
-                        tool_name = parsed[0]["name"]
-                except Exception:
-                    pass
+
+            # Format A: messages list (e.g. minpeter/xlam-function-calling-60k-parsed)
+            if "messages" in row and row["messages"]:
+                msgs = row["messages"]
+                for m in msgs:
+                    if isinstance(m, dict):
+                        if m.get("role") == "user" and not query:
+                            query = m.get("content", "")
+                        elif m.get("role") == "assistant":
+                            tool_calls = m.get("tool_calls")
+                            if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
+                                tc = tool_calls[0]
+                                if isinstance(tc, dict):
+                                    if "function" in tc and isinstance(tc["function"], dict):
+                                        tool_name = tc["function"].get("name")
+                                    elif "name" in tc:
+                                        tool_name = tc.get("name")
+
+            # Format B: Salesforce raw format (query and answers)
+            if not query and "query" in row:
+                query = row.get("query", "")
+            if not tool_name and "answers" in row:
+                answers = row.get("answers", "")
+                if isinstance(answers, list) and len(answers) > 0:
+                    if isinstance(answers[0], dict) and "name" in answers[0]:
+                        tool_name = answers[0]["name"]
+                elif isinstance(answers, str):
+                    try:
+                        parsed = json.loads(answers)
+                        if isinstance(parsed, list) and len(parsed) > 0 and "name" in parsed[0]:
+                            tool_name = parsed[0]["name"]
+                    except Exception:
+                        pass
+
             if tool_name and query:
                 records.append((query, tool_name))
                 tool_counter[tool_name] += 1
 
+        if not records:
+            raise RuntimeError(
+                f"[ERROR] Could not extract any tool calls from dataset. "
+                f"Inspected {len(ds)} rows. Features found: {ds.column_names}. "
+                f"Sample row: {ds[0] if len(ds) > 0 else 'empty'}"
+            )
+
         top_tools = [t for t, _ in tool_counter.most_common(64)]
         tool_to_idx = {t: i for i, t in enumerate(top_tools)}
-        print(f"[cache:function_calling] Indexed {len(records)} tool calls. Selected top {len(top_tools)} tools.")
+        print(f"[cache:function_calling] Successfully extracted {len(records)} tool interactions across {len(tool_counter)} unique tools.")
+        print(f"[cache:function_calling] Selected top {len(top_tools)} tools for classification.")
 
         # Filter and map
         filtered = [(q, tool_to_idx[t]) for q, t in records if t in tool_to_idx]
@@ -742,6 +773,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--seeds", type=int, nargs="+", default=None, help="Multiple random seeds")
     parser.add_argument("--cache", action="store_true", help="Cache latents for track before training")
+    parser.add_argument("--cache_only", action="store_true", help="Only cache latents and exit")
+    parser.add_argument("--max_samples", type=int, default=None, help="Max samples to cache")
     parser.add_argument("--out_dir", type=str, default="./kairos_checkpoints", help="Output directory")
     parser.add_argument("--smoke_test", action="store_true", help="Quick sanity check on synthetic data")
 
@@ -760,15 +793,26 @@ def main():
         print(f"[SmokeTest] Forward and backward successful! Loss: {loss.item():.4f}")
         return
 
-    if args.cache:
+    if args.cache or args.cache_only:
         print(f"\n[Kairos:Cache] Caching track '{args.track}'...")
-        cache_latents_for_track(args.track)
+        cache_latents_for_track(args.track, max_samples=args.max_samples)
         print(f"[Kairos:Cache] Done caching '{args.track}'!\n")
+        if args.cache_only:
+            return
 
     shard_dir = resolve_dir(f"./latent_cache/{args.track}/train")
     eval_shard_dir = resolve_dir(f"./latent_cache/{args.track}/eval")
 
-    num_classes = 77 if args.track == "text" else 64
+    reg_path = os.path.join(resolve_dir(f"./latent_cache/{args.track}"), "tool_registry.json")
+    if os.path.exists(reg_path):
+        try:
+            with open(reg_path, "r") as f:
+                reg_data = json.load(f)
+                num_classes = reg_data.get("num_classes", 64)
+        except Exception:
+            num_classes = 77 if args.track == "text" else 64
+    else:
+        num_classes = 77 if args.track == "text" else 64
 
     seeds = args.seeds if args.seeds else [args.seed]
     all_reports = []
