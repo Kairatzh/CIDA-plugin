@@ -342,14 +342,40 @@ def cache_latents(
 # Stage C — dataset over cached latents with in-memory shard caching
 # ===========================================================================
 
+def resolve_dir(path_str: str) -> str:
+    """Finds directory whether invoked from repo root, parent directory, or Colab /content."""
+    if os.path.exists(path_str) and (glob.glob(os.path.join(path_str, "shard_*.pt")) or glob.glob(os.path.join(path_str, "*.json"))):
+        return path_str
+    # Check relative to script directory
+    script_dir = os.path.abspath(os.path.dirname(__file__))
+    candidate1 = os.path.join(script_dir, path_str.lstrip("./").lstrip(".\\"))
+    if os.path.exists(candidate1) and (glob.glob(os.path.join(candidate1, "shard_*.pt")) or glob.glob(os.path.join(candidate1, "*.json"))):
+        return candidate1
+    # Check if current directory has a subfolder CIDA-plugin
+    candidate2 = os.path.join(os.getcwd(), "CIDA-plugin", path_str.lstrip("./").lstrip(".\\"))
+    if os.path.exists(candidate2) and (glob.glob(os.path.join(candidate2, "shard_*.pt")) or glob.glob(os.path.join(candidate2, "*.json"))):
+        return candidate2
+    if os.path.exists(candidate1):
+        return candidate1
+    return path_str
+
+
 class LatentDataset(Dataset):
     """Index-mapped dataset over shard files. Shards are cached in memory
     to eliminate disk thrashing when shuffle=True."""
 
     def __init__(self, shard_dir: str, in_memory: bool = True):
-        self.paths = sorted(glob.glob(os.path.join(shard_dir, "shard_*.pt")))
+        resolved_shard_dir = resolve_dir(shard_dir)
+        self.paths = sorted(glob.glob(os.path.join(resolved_shard_dir, "shard_*.pt")))
         if not self.paths:
-            raise FileNotFoundError(f"No shards found in {shard_dir} — run `cache` first.")
+            raise FileNotFoundError(
+                f"\n[ERROR] No shard_*.pt files found in '{shard_dir}' (nor in '{resolved_shard_dir}').\n"
+                f"If you just launched or restarted Colab, the cached latents need to be generated first.\n"
+                f"Please run the caching command:\n"
+                f"    python kairos_benchmark.py cache --track text\n"
+                f"Or in Colab:\n"
+                f"    !cd CIDA-plugin && python kairos_benchmark.py cache --track text"
+            )
         self.index: List[tuple] = []
         self.in_memory = in_memory
         self._cache: Dict[int, Dict[str, torch.Tensor]] = {}
@@ -710,6 +736,7 @@ def train_variant(
 # ===========================================================================
 
 def report(out_dir: str = "./kairos_checkpoints"):
+    out_dir = resolve_dir(out_dir)
     rows = []
     # Collect all seeded JSONs first, fallback to unseeded
     json_files = sorted(glob.glob(os.path.join(out_dir, "*_seed*.json")))
@@ -865,6 +892,9 @@ if __name__ == "__main__":
         if not (args.track and args.variant):
             raise SystemExit("--track and --variant are required for stage 'train'")
         t = TRACKS[args.track]
+        shard_dir = resolve_dir(f"./latent_cache/{t.name}/train")
+        eval_shard_dir = resolve_dir(f"./latent_cache/{t.name}/eval")
+        out_dir = resolve_dir(args.out_dir)
         seeds_to_run = args.seeds if args.seeds else [args.seed]
         for s in seeds_to_run:
             print(f"\n=======================================================")
@@ -873,10 +903,10 @@ if __name__ == "__main__":
             train_variant(
                 t,
                 args.variant,
-                shard_dir=f"./latent_cache/{t.name}/train",
-                eval_shard_dir=f"./latent_cache/{t.name}/eval",
+                shard_dir=shard_dir,
+                eval_shard_dir=eval_shard_dir,
                 d_in=args.d_in,
-                out_dir=args.out_dir,
+                out_dir=out_dir,
                 epochs=args.epochs,
                 batch_size=args.batch_size,
                 lr=args.lr,
