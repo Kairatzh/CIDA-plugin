@@ -46,16 +46,21 @@ from cida_plugin.losses import CIDALoss
 
 def resolve_dir(path_str: str) -> str:
     """Finds directory whether invoked from repo root, parent directory, or Colab /content."""
-    if os.path.exists(path_str) and (glob.glob(os.path.join(path_str, "shard_*.pt")) or glob.glob(os.path.join(path_str, "*.json"))):
-        return path_str
-    candidate1 = os.path.join(SCRIPT_DIR, path_str.lstrip("./").lstrip(".\\"))
-    if os.path.exists(candidate1) and (glob.glob(os.path.join(candidate1, "shard_*.pt")) or glob.glob(os.path.join(candidate1, "*.json"))):
-        return candidate1
-    candidate2 = os.path.join(os.getcwd(), "CIDA-plugin", path_str.lstrip("./").lstrip(".\\"))
-    if os.path.exists(candidate2) and (glob.glob(os.path.join(candidate2, "shard_*.pt")) or glob.glob(os.path.join(candidate2, "*.json"))):
-        return candidate2
-    if os.path.exists(candidate1):
-        return candidate1
+    clean = path_str.lstrip("./").lstrip(".\\")
+    candidates = [
+        path_str,
+        os.path.join(SCRIPT_DIR, clean),
+        os.path.join(os.getcwd(), clean),
+        os.path.join(os.getcwd(), "CIDA-plugin", clean),
+        os.path.join("/content", clean),
+        os.path.join("/content", "CIDA-plugin", clean),
+    ]
+    for c in candidates:
+        if os.path.exists(c) and (glob.glob(os.path.join(c, "shard_*.pt")) or glob.glob(os.path.join(c, "*.json"))):
+            return c
+    for c in candidates:
+        if os.path.exists(c):
+            return c
     return path_str
 
 
@@ -105,6 +110,31 @@ def cache_all_tracks(cache_dir: str = "./weights", out_base: str = "./latent_cac
     """Caches latent representations for Tools, Intent, and Safety tracks."""
     import datasets
     from collections import Counter
+
+    out_base = resolve_dir(out_base)
+    os.makedirs(out_base, exist_ok=True)
+
+    tools_cached = bool(glob.glob(os.path.join(out_base, "tools", "train", "shard_*.pt")))
+    intent_cached = bool(glob.glob(os.path.join(out_base, "intent", "train", "shard_*.pt")))
+    safety_cached = bool(glob.glob(os.path.join(out_base, "safety", "train", "shard_*.pt")))
+
+    # Check if text cache from benchmark can be reused for intent
+    if not intent_cached:
+        text_train = resolve_dir(os.path.join(out_base, "text", "train"))
+        text_eval = resolve_dir(os.path.join(out_base, "text", "eval"))
+        if glob.glob(os.path.join(text_train, "shard_*.pt")):
+            print(f"[cache] Reusing existing Banking77 shards from '{text_train}' for Track 2 (intent)...")
+            import shutil
+            for split, src in [("train", text_train), ("eval", text_eval)]:
+                dst = os.path.join(out_base, "intent", split)
+                os.makedirs(dst, exist_ok=True)
+                for f in glob.glob(os.path.join(src, "shard_*.pt")):
+                    shutil.copy(f, os.path.join(dst, os.path.basename(f)))
+            intent_cached = bool(glob.glob(os.path.join(out_base, "intent", "train", "shard_*.pt")))
+
+    if tools_cached and intent_cached and safety_cached:
+        print(f"[cache] All 3 tracks are already cached in '{out_base}'. Skipping caching step.")
+        return
 
     backbone = load_laya_backbone(cache_dir=cache_dir)
     tok = backbone["tokenizer"]
@@ -169,104 +199,113 @@ def cache_all_tracks(cache_dir: str = "./weights", out_base: str = "./latent_cac
             flush()
 
     # ── Track 1: Tools (xLAM with NO_TOOL Class 0) ───────────────────────────
-    print("\n[cache] Processing Track 1: Tools (Salesforce xLAM)...")
-    try:
-        ds_xlam = datasets.load_dataset("minpeter/xlam-function-calling-60k-parsed", split="train")
-    except Exception:
-        ds_xlam = datasets.load_dataset("Salesforce/xlam-function-calling-60k", split="train")
+    if not tools_cached:
+        print("\n[cache] Processing Track 1: Tools (Salesforce xLAM)...")
+        try:
+            ds_xlam = datasets.load_dataset("minpeter/xlam-function-calling-60k-parsed", split="train")
+        except Exception:
+            ds_xlam = datasets.load_dataset("Salesforce/xlam-function-calling-60k", split="train")
 
-    records, tool_counter = [], Counter()
-    for row in ds_xlam:
-        query, tool_name = "", None
-        if "messages" in row and row["messages"]:
-            for m in row["messages"]:
-                if isinstance(m, dict):
-                    if m.get("role") == "user" and not query:
-                        query = m.get("content", "")
-                    elif m.get("role") == "assistant":
-                        tcs = m.get("tool_calls")
-                        if tcs and isinstance(tcs, list) and len(tcs) > 0 and isinstance(tcs[0], dict):
-                            fn = tcs[0].get("function")
-                            tool_name = fn.get("name") if isinstance(fn, dict) else tcs[0].get("name")
-        if not query and "query" in row:
-            query = row.get("query", "")
-        if not tool_name and "answers" in row:
-            ans = row.get("answers", "")
-            if isinstance(ans, str):
-                try:
-                    parsed = json.loads(ans)
-                    if isinstance(parsed, list) and len(parsed) > 0 and "name" in parsed[0]:
-                        tool_name = parsed[0]["name"]
-                except Exception:
-                    pass
-            elif isinstance(ans, list) and len(ans) > 0 and "name" in ans[0]:
-                tool_name = ans[0]["name"]
+        records, tool_counter = [], Counter()
+        for row in ds_xlam:
+            query, tool_name = "", None
+            if "messages" in row and row["messages"]:
+                for m in row["messages"]:
+                    if isinstance(m, dict):
+                        if m.get("role") == "user" and not query:
+                            query = m.get("content", "")
+                        elif m.get("role") == "assistant":
+                            tcs = m.get("tool_calls")
+                            if tcs and isinstance(tcs, list) and len(tcs) > 0 and isinstance(tcs[0], dict):
+                                fn = tcs[0].get("function")
+                                tool_name = fn.get("name") if isinstance(fn, dict) else tcs[0].get("name")
+            if not query and "query" in row:
+                query = row.get("query", "")
+            if not tool_name and "answers" in row:
+                ans = row.get("answers", "")
+                if isinstance(ans, str):
+                    try:
+                        parsed = json.loads(ans)
+                        if isinstance(parsed, list) and len(parsed) > 0 and "name" in parsed[0]:
+                            tool_name = parsed[0]["name"]
+                    except Exception:
+                        pass
+                elif isinstance(ans, list) and len(ans) > 0 and "name" in ans[0]:
+                    tool_name = ans[0]["name"]
 
-        if tool_name and query:
-            records.append((query, tool_name))
-            tool_counter[tool_name] += 1
+            if tool_name and query:
+                records.append((query, tool_name))
+                tool_counter[tool_name] += 1
 
-    top_64_tools = [t for t, _ in tool_counter.most_common(64)]
-    # Tool index 1..64. Index 0 is reserved for NO_TOOL / PASS_THROUGH
-    tool_to_idx = {t: i + 1 for i, t in enumerate(top_64_tools)}
+        top_64_tools = [t for t, _ in tool_counter.most_common(64)]
+        # Tool index 1..64. Index 0 is reserved for NO_TOOL / PASS_THROUGH
+        tool_to_idx = {t: i + 1 for i, t in enumerate(top_64_tools)}
 
-    # Negative non-tool samples for Class 0
-    negative_prompts = [
-        ("Tell me a creative joke about a programmer.", 0),
-        ("Write a short poem about the ocean and stars.", 0),
-        ("What is the meaning of life according to Socrates?", 0),
-        ("Explain how photosynthesis works in plants.", 0),
-        ("Hello, how are you doing today?", 0),
-        ("Can you help me brainstorm names for a coffee shop?", 0),
-        ("Summarize the plot of Hamlet in two sentences.", 0),
-        ("What are the main causes of the French Revolution?", 0),
-        ("Give me five motivational quotes for studying.", 0),
-        ("Translate 'good morning' to five different languages.", 0),
-    ] * 100
+        # Negative non-tool samples for Class 0
+        negative_prompts = [
+            ("Tell me a creative joke about a programmer.", 0),
+            ("Write a short poem about the ocean and stars.", 0),
+            ("What is the meaning of life according to Socrates?", 0),
+            ("Explain how photosynthesis works in plants.", 0),
+            ("Hello, how are you doing today?", 0),
+            ("Can you help me brainstorm names for a coffee shop?", 0),
+            ("Summarize the plot of Hamlet in two sentences.", 0),
+            ("What are the main causes of the French Revolution?", 0),
+            ("Give me five motivational quotes for studying.", 0),
+            ("Translate 'good morning' to five different languages.", 0),
+        ] * 100
 
-    tool_samples = [(q, tool_to_idx[t]) for q, t in records if t in tool_to_idx]
-    tool_samples.extend(negative_prompts)
-    random.seed(42)
-    random.shuffle(tool_samples)
+        tool_samples = [(q, tool_to_idx[t]) for q, t in records if t in tool_to_idx]
+        tool_samples.extend(negative_prompts)
+        random.seed(42)
+        random.shuffle(tool_samples)
 
-    n_tool_train = int(len(tool_samples) * 0.8)
-    _encode_and_shard(tool_samples[:n_tool_train], "tools", "train")
-    _encode_and_shard(tool_samples[n_tool_train:], "tools", "eval")
+        n_tool_train = int(len(tool_samples) * 0.8)
+        _encode_and_shard(tool_samples[:n_tool_train], "tools", "train")
+        _encode_and_shard(tool_samples[n_tool_train:], "tools", "eval")
+    else:
+        print("[cache] Track 1 (tools) already cached, skipping.")
 
     # ── Track 2: Intent (Banking77) ──────────────────────────────────────────
-    print("\n[cache] Processing Track 2: Intent (Banking77)...")
-    ds_bank_train = datasets.load_dataset("mteb/banking77", split="train")
-    ds_bank_eval = datasets.load_dataset("mteb/banking77", split="test")
+    if not intent_cached:
+        print("\n[cache] Processing Track 2: Intent (Banking77)...")
+        ds_bank_train = datasets.load_dataset("mteb/banking77", split="train")
+        ds_bank_eval = datasets.load_dataset("mteb/banking77", split="test")
 
-    intent_names = ds_bank_train.features["label"].names if hasattr(ds_bank_train.features["label"], "names") else [str(i) for i in range(77)]
-    intent_map = {i: name for i, name in enumerate(intent_names)}
+        intent_names = ds_bank_train.features["label"].names if hasattr(ds_bank_train.features["label"], "names") else [str(i) for i in range(77)]
+        intent_map = {i: name for i, name in enumerate(intent_names)}
 
-    bank_train = [(r["text"], int(r["label"])) for r in ds_bank_train]
-    bank_eval = [(r["text"], int(r["label"])) for r in ds_bank_eval]
-    _encode_and_shard(bank_train, "intent", "train")
-    _encode_and_shard(bank_eval, "intent", "eval")
+        bank_train = [(r["text"], int(r["label"])) for r in ds_bank_train]
+        bank_eval = [(r["text"], int(r["label"])) for r in ds_bank_eval]
+        _encode_and_shard(bank_train, "intent", "train")
+        _encode_and_shard(bank_eval, "intent", "eval")
+    else:
+        print("[cache] Track 2 (intent) already cached, skipping.")
 
     # ── Track 3: Safety Guardrail (Jailbreak Detection) ──────────────────────
-    print("\n[cache] Processing Track 3: Safety Guardrail...")
-    safety_samples = []
-    try:
-        ds_jail = datasets.load_dataset("jackhhao/jailbreak-classification", split="train")
-        for r in ds_jail:
-            text = r.get("text", "") or r.get("prompt", "")
-            lbl = int(r.get("label", 0))
-            if text:
-                safety_samples.append((text, lbl))
-    except Exception:
-        # Fallback to deepset prompt-injections
-        ds_inj = datasets.load_dataset("deepset/prompt-injections", split="train")
-        for r in ds_inj:
-            safety_samples.append((r["text"], int(r["label"])))
+    if not safety_cached:
+        print("\n[cache] Processing Track 3: Safety Guardrail...")
+        safety_samples = []
+        try:
+            ds_jail = datasets.load_dataset("jackhhao/jailbreak-classification", split="train")
+            for r in ds_jail:
+                text = r.get("text", "") or r.get("prompt", "")
+                lbl = int(r.get("label", 0))
+                if text:
+                    safety_samples.append((text, lbl))
+        except Exception:
+            # Fallback to deepset prompt-injections
+            ds_inj = datasets.load_dataset("deepset/prompt-injections", split="train")
+            for r in ds_inj:
+                safety_samples.append((r["text"], int(r["label"])))
 
-    random.seed(42)
-    random.shuffle(safety_samples)
-    n_safe_train = int(len(safety_samples) * 0.8)
-    _encode_and_shard(safety_samples[:n_safe_train], "safety", "train")
-    _encode_and_shard(safety_samples[n_safe_train:], "safety", "eval")
+        random.seed(42)
+        random.shuffle(safety_samples)
+        n_safe_train = int(len(safety_samples) * 0.8)
+        _encode_and_shard(safety_samples[:n_safe_train], "safety", "train")
+        _encode_and_shard(safety_samples[n_safe_train:], "safety", "eval")
+    else:
+        print("[cache] Track 3 (safety) already cached, skipping.")
 
     # Save Unified Label Maps for Production SDK
     tool_map = {0: "NO_TOOL / PASS_THROUGH", **{i + 1: t for i, t in enumerate(top_64_tools)}}
@@ -393,6 +432,7 @@ def train_multitask(
     batch_size: int = 32,
     lr: float = 3e-4,
     out_dir: str = "./kairos_checkpoints",
+    latent_dir: str = "./latent_cache",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ):
     os.makedirs(out_dir, exist_ok=True)
@@ -405,15 +445,34 @@ def train_multitask(
     print(f"  Device: {device} | Epochs: {epochs} | Batch Size: {batch_size} | LR: {lr}")
     print("=" * 70 + "\n")
 
-    # Load datasets for all 3 tracks
-    ds_tools_train = ShardedLatentDataset("./latent_cache/tools/train")
-    ds_tools_eval = ShardedLatentDataset("./latent_cache/tools/eval")
+    # 1. Automatic Cache Check: verify all 3 tracks exist; if not, auto-cache at full power!
+    latent_dir = resolve_dir(latent_dir)
+    required = [
+        ("tools", "train"), ("tools", "eval"),
+        ("intent", "train"), ("intent", "eval"),
+        ("safety", "train"), ("safety", "eval"),
+    ]
+    missing = False
+    for tr, sp in required:
+        check_p = resolve_dir(os.path.join(latent_dir, tr, sp))
+        if not os.path.exists(check_p) or not glob.glob(os.path.join(check_p, "shard_*.pt")):
+            missing = True
+            break
 
-    ds_intent_train = ShardedLatentDataset("./latent_cache/intent/train")
-    ds_intent_eval = ShardedLatentDataset("./latent_cache/intent/eval")
+    if missing:
+        print(f"[MT-Kairos:Notice] Required dataset shards not found in '{latent_dir}'.")
+        print("[MT-Kairos:Notice] Automatically launching multi-task caching engine at full power...\n")
+        cache_all_tracks(out_base=latent_dir)
 
-    ds_safety_train = ShardedLatentDataset("./latent_cache/safety/train")
-    ds_safety_eval = ShardedLatentDataset("./latent_cache/safety/eval")
+    # 2. Load datasets for all 3 tracks
+    ds_tools_train = ShardedLatentDataset(os.path.join(latent_dir, "tools", "train"))
+    ds_tools_eval = ShardedLatentDataset(os.path.join(latent_dir, "tools", "eval"))
+
+    ds_intent_train = ShardedLatentDataset(os.path.join(latent_dir, "intent", "train"))
+    ds_intent_eval = ShardedLatentDataset(os.path.join(latent_dir, "intent", "eval"))
+
+    ds_safety_train = ShardedLatentDataset(os.path.join(latent_dir, "safety", "train"))
+    ds_safety_eval = ShardedLatentDataset(os.path.join(latent_dir, "safety", "eval"))
 
     print(f"[MT-Kairos:Data] Tools:  {len(ds_tools_train):,} train,  {len(ds_tools_eval):,} eval (65 classes)")
     print(f"[MT-Kairos:Data] Intent: {len(ds_intent_train):,} train, {len(ds_intent_eval):,} eval (77 classes)")
@@ -648,6 +707,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--out_dir", type=str, default="./kairos_checkpoints", help="Output directory")
+    parser.add_argument("--latent_dir", type=str, default="./latent_cache", help="Path to latent cache directory")
     parser.add_argument("--smoke_test", action="store_true", help="Quick sanity check on synthetic data")
 
     args = parser.parse_args()
@@ -661,7 +721,7 @@ def main():
         return
 
     if args.cache_all:
-        cache_all_tracks()
+        cache_all_tracks(out_base=args.latent_dir)
         print("\n[Kairos:Cache] All 3 tracks cached successfully! Now run training.\n")
         return
 
@@ -670,6 +730,7 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         out_dir=args.out_dir,
+        latent_dir=args.latent_dir,
     )
 
 
