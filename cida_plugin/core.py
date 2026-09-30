@@ -23,6 +23,7 @@ from .deliberation import (
     CounterargumentCommunication,
     AgentUpdater,
     PerspectiveProjector,
+    VAEPerspectiveProjector,
 )
 from .consensus import ConsensusAggregator, HaltingPredictor
 from .ttt import TestTimeTrainer
@@ -66,12 +67,19 @@ class CIDAPlugin(nn.Module):
             else nn.Identity()
         )
 
-        # ── Perspective Projector (optional per-agent projections) ─────────────
-        if cfg.use_perspective_projector:
+        # ── Perspective Projector (optional per-agent projections or VAE) ─────
+        if getattr(cfg, "use_vae_perspective", False):
+            self.vae_perspective_projector = VAEPerspectiveProjector(
+                cfg.num_agents, cfg.d_input, cfg.d_hidden
+            )
+            self.perspective_projector = None
+        elif cfg.use_perspective_projector:
+            self.vae_perspective_projector = None
             self.perspective_projector = PerspectiveProjector(
                 cfg.num_agents, cfg.d_input, cfg.d_hidden
             )
         else:
+            self.vae_perspective_projector = None
             self.perspective_projector = None
 
         # ── Deliberation components ───────────────────────────────────────────
@@ -88,6 +96,7 @@ class CIDAPlugin(nn.Module):
             cfg.num_classes,
             num_heads=cfg.num_attn_heads,
             multi_label=cfg.multi_label,
+            alpha_prior=cfg.alpha_prior,
         )
 
         # ── Consensus (Weighted Mean for correlated agents) ───────────────────
@@ -203,8 +212,12 @@ class CIDAPlugin(nn.Module):
 
         # ── Initialize agents ─────────────────────────────────────────────────
         # All agents start from the same representation (no RoleEmbeddings).
-        # Structural diversity comes from apply_role_prior on beliefs.
-        if self.perspective_projector is not None:
+        # Structural diversity comes from apply_role_prior on beliefs or VAE sampling.
+        kl_loss = torch.tensor(0.0, device=pooled.device)
+        if self.vae_perspective_projector is not None:
+            # L3 VAE-Perspective Layer: learned stochastic diversity
+            s_t, kl_loss = self.vae_perspective_projector(pooled)
+        elif self.perspective_projector is not None:
             # Per-agent projections for diverse initial views
             s_t = self.perspective_projector(pooled)  # (B, M, d_hidden)
         else:
@@ -236,12 +249,16 @@ class CIDAPlugin(nn.Module):
         # Initial update to get first beliefs from data
         state_t = self.updater(state_t, r_init, e_init)
 
+        # Compute effective role prior blend: bypass if VAE or explicitly 0
+        effective_blend = cfg.role_prior_blend if not getattr(cfg, "use_vae_perspective", False) else 0.0
+
         # Apply structural role priors to initial beliefs (Batched)
         state_t.b = apply_role_priors_batched(
             state_t.b,
             M,
             multi_label=cfg.multi_label,
             positive_class_idx=cfg.positive_class_idx,
+            blend_weight=effective_blend,
         )
 
         # ── TTT: adapt before deliberation ────────────────────────────────────
@@ -307,6 +324,7 @@ class CIDAPlugin(nn.Module):
                     M,
                     multi_label=cfg.multi_label,
                     positive_class_idx=cfg.positive_class_idx,
+                    blend_weight=effective_blend,
                 )
                 b_all[-1] = state_t.b
 
@@ -367,7 +385,11 @@ class CIDAPlugin(nn.Module):
                     
                     # Apply role priors to updated beliefs
                     state.b = apply_role_priors_batched(
-                        state.b, M, multi_label=cfg.multi_label, positive_class_idx=cfg.positive_class_idx
+                        state.b,
+                        M,
+                        multi_label=cfg.multi_label,
+                        positive_class_idx=cfg.positive_class_idx,
+                        blend_weight=effective_blend,
                     )
                     
                     return state.s, state.b, state.u, state.p, state.e, m_new
@@ -425,8 +447,12 @@ class CIDAPlugin(nn.Module):
             state_t.b, state_t.u
         )
 
-        # ── Orthogonality loss (on representations, not weights) ──────────────
+        # ── Orthogonality loss ──────────────────────────────────────────────
         L_orth = compute_role_orthogonality_loss(state_t.s)
+        if self.vae_perspective_projector is not None:
+            L_orth = L_orth + self.vae_perspective_projector.orthogonality_loss()
+        elif self.perspective_projector is not None:
+            L_orth = L_orth + self.perspective_projector.orthogonality_loss()
 
         # ── TTT: restore weights ──────────────────────────────────────────────
         if cfg.use_ttt and _ttt_saved_updater is not None:
@@ -445,6 +471,7 @@ class CIDAPlugin(nn.Module):
             "u_epi": state_t.u_epi,
             "u_alea": state_t.u_alea,
             "L_orth": L_orth,
+            "kl_loss": kl_loss,
             "state_final": state_t,
             "rounds_used": rounds_used,
             "ponder_cost": ponder_cost,

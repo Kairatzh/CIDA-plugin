@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -152,9 +153,24 @@ class AgentUpdater(nn.Module):
         4. Dirichlet Belief Update: alpha = softplus(g(s)) + 1.
     """
 
-    def __init__(self, d_hidden: int, num_classes: int, num_heads: int = 4, multi_label: bool = False):
+    def __init__(
+        self,
+        d_hidden: int,
+        num_classes: int,
+        num_heads: int = 4,
+        multi_label: bool = False,
+        alpha_prior: Optional[float] = None,
+    ):
         super().__init__()
         self.multi_label = multi_label
+        self.K = float(num_classes)
+        # Scale-invariant prior concentration: alpha_0 = S_0 / K, where S_0 = 1.0.
+        # If alpha_prior is explicitly passed, use it (e.g. 1.0 for legacy replication).
+        if alpha_prior is not None:
+            self.alpha_prior = float(alpha_prior)
+        else:
+            self.alpha_prior = 1.0 / self.K
+
         # ── Step 1: Cross-attention over counterarguments ─────────────────────
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=d_hidden,
@@ -186,7 +202,6 @@ class AgentUpdater(nn.Module):
             nn.SiLU(),
             nn.Linear(d_hidden, num_classes),
         )
-        self.K = float(num_classes)
 
     def forward(self, state: AgentState, r: torch.Tensor, e: torch.Tensor) -> AgentState:
         """
@@ -209,7 +224,7 @@ class AgentUpdater(nn.Module):
         e_proj = self.evidence_proj(e)                          # (B, M, d)
         s = self.norm2(s + gate * e_proj)
 
-        # ── Step 3: FFN + residual ────────────────────────────────────────────
+        # ── Step 3: FFN + residual ────────────────────────────────────
         s = self.ffn_norm(s + self.ffn(s))
 
         # ── Step 4: Belief update ─────────────────────────────────────────────
@@ -224,14 +239,15 @@ class AgentUpdater(nn.Module):
             u_next = u_alea + u_epi
             alpha = b_next # Dummy for AgentState
         else:
-            # Single-label: Dirichlet
-            alpha = F.softplus(g_out) + 1.0      # (B, M, K), всегда > 1
+            # Single-label: Scale-invariant Dirichlet (Josang 2002 / Meinert 2024)
+            alpha = F.softplus(g_out) + self.alpha_prior      # (B, M, K)
             alpha_sum = alpha.sum(dim=-1, keepdim=True)
             b_next = alpha / alpha_sum
-            # v4: Разделение неопределённости (Josang 2002 + Meinert 2024)
-            u_epi = self.K ** 2 / alpha_sum ** 2     # Vacuity: неполнота знаний
+            # Total prior concentration S_0 = sum_k alpha_prior_k = self.K * self.alpha_prior
+            s_0 = self.K * self.alpha_prior
+            u_epi = (s_0 / alpha_sum) ** 2                    # Vacuity: строго in [0, 1]
             u_alea = 1.0 - b_next.max(dim=-1, keepdim=True).values  # Шум данных
-            u_next = u_epi + u_alea               # Совместимость с u (total)
+            u_next = u_epi + u_alea                           # Совместимость с u (total)
 
         return AgentState(
             s=s,
@@ -309,6 +325,74 @@ class PerspectiveProjector(nn.Module):
         # Цель: единичная матрица (каждый агент ортогонален остальным)
         eye = torch.eye(M, device=gram.device)
 
+        return ((gram - eye) ** 2).mean()
+
+
+class VAEPerspectiveProjector(nn.Module):
+    """
+    [Kairos L3] Стохастический проектор перспектив агентов (VAE Perspective Layer).
+
+    Вместо детерминированного s_i^0 = W_i * h или эвристических role priors,
+    каждый агент обучается отображать pooled_output h в параметры нормального
+    распределения: (mu_i, logvar_i) = f_i(h).
+
+    Начальное состояние сэмплируется через reparameterization trick:
+        s_i^0 = mu_i + eps * exp(0.5 * logvar_i), eps ~ N(0, I)
+
+    Регуляризация:
+    1. KL-loss: KL(q_i(z|h) || N(0, I)) сохраняет скрытые пространства регулярными.
+    2. Gram-orthogonality loss на весах средних проекций mu_i для предотвращения
+       коллапса агентов в одну точку (агенты смотрят на независимые подпространства).
+    """
+
+    def __init__(self, num_agents: int, d_input: int, d_hidden: int):
+        super().__init__()
+        self.num_agents = num_agents
+        self.d_hidden = d_hidden
+
+        # Per-agent encoders for mu and logvar
+        self.mu_heads = nn.ModuleList([
+            nn.Linear(d_input, d_hidden) for _ in range(num_agents)
+        ])
+        self.logvar_heads = nn.ModuleList([
+            nn.Linear(d_input, d_hidden) for _ in range(num_agents)
+        ])
+
+    def forward(self, pooled: torch.Tensor, deterministic: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        pooled: (B, d_input)
+        Returns:
+            s_0:     (B, M, d_hidden) - sampled initial states
+            kl_loss: scalar tensor - mean KL divergence across batch and agents
+        """
+        mus = [head(pooled) for head in self.mu_heads]           # list of (B, d_hidden)
+        logvars = [head(pooled) for head in self.logvar_heads]   # list of (B, d_hidden)
+
+        mu_stack = torch.stack(mus, dim=1)           # (B, M, d_hidden)
+        logvar_stack = torch.stack(logvars, dim=1)   # (B, M, d_hidden)
+
+        # Reparameterization trick
+        if deterministic or not self.training:
+            s_0 = mu_stack
+        else:
+            std = torch.exp(0.5 * logvar_stack.clamp(-10.0, 10.0))
+            eps = torch.randn_like(std)
+            s_0 = mu_stack + eps * std
+
+        # Analytical KL divergence: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+        kl_per_dim = -0.5 * (1.0 + logvar_stack - mu_stack.pow(2) - logvar_stack.clamp(-10.0, 10.0).exp())
+        kl_loss = kl_per_dim.sum(dim=-1).mean()  # average over (B, M), sum over d_hidden
+
+        return s_0, kl_loss
+
+    def orthogonality_loss(self) -> torch.Tensor:
+        """Штраф за коллинеарность средних проекций агентов (Gram matrix on mu weights)."""
+        W = torch.stack([proj.weight for proj in self.mu_heads])  # (M, d_hidden, d_input)
+        M = W.size(0)
+        W_flat = W.view(M, -1)
+        W_norm = F.normalize(W_flat, p=2, dim=-1)
+        gram = W_norm @ W_norm.T
+        eye = torch.eye(M, device=gram.device)
         return ((gram - eye) ** 2).mean()
 
 

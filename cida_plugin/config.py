@@ -2,6 +2,7 @@
 CIDAPluginConfig — единая точка конфигурации для CIDA-Plugin v3.
 """
 from dataclasses import dataclass, asdict
+from typing import Optional
 import json
 import os
 
@@ -138,8 +139,11 @@ class CIDAPluginConfig:
     abl_no_messages: bool = False
     abl_no_communication: bool = False
 
-    # ─── Perspective Projector ─────────────────────────────────────────────────
+    # ─── Perspective Projector & VAE (L3) ───────────────────────────────────────
     use_perspective_projector: bool = True
+    use_vae_perspective: bool = False
+    kl_weight: float = 1e-3
+    alpha_prior: Optional[float] = None
 
     # ─── Test-Time Training ──────────────────────────────────────────────────────
     use_ttt: bool = False
@@ -193,6 +197,10 @@ class CIDAPluginConfig:
             assert 0.5 < self.early_stop_threshold <= 1.0, (
                 "early_stop_threshold must be in (0.5, 1.0]"
             )
+        if self.use_vae_perspective:
+            assert self.kl_weight >= 0.0, "kl_weight must be non-negative"
+        if self.alpha_prior is not None:
+            assert self.alpha_prior > 0.0, "alpha_prior must be positive"
 
     def to_dict(self):
         return asdict(self)

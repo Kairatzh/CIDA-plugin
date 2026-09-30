@@ -448,7 +448,8 @@ def build_variant(variant: str, d_in: int, num_classes: int) -> tuple[nn.Module,
         loss_fn = CIDALoss(multi_label=False)
         return model, loss_fn
 
-    if variant == "kairos":
+    if variant in ("kairos", "kairos_vae"):
+        # Modern Kairos: L3 VAE-Perspective Layer + Scale-invariant Dirichlet (1/K)
         config = CIDAPluginConfig(
             d_input=d_in,
             d_hidden=256,
@@ -457,6 +458,54 @@ def build_variant(variant: str, d_in: int, num_classes: int) -> tuple[nn.Module,
             num_classes=num_classes,
             max_rounds=3,
             multi_label=False,
+            role_prior_blend=0.0,
+            use_vae_perspective=True,
+            kl_weight=1e-3,
+        )
+        model = KairosCIDAClassifier(config)
+        loss_fn = CIDALoss(
+            lambda_cal=config.lambda_cal,
+            lambda_ac=config.lambda_ac,
+            min_disagreement=config.min_disagreement,
+            multi_label=False,
+        )
+        return model, loss_fn
+
+    if variant == "kairos_ortho":
+        # Control: Deterministic projections + Gram orthogonality (role_prior_blend=0, scale-invariant Dirichlet)
+        config = CIDAPluginConfig(
+            d_input=d_in,
+            d_hidden=256,
+            d_message=256,
+            num_agents=4,
+            num_classes=num_classes,
+            max_rounds=3,
+            multi_label=False,
+            role_prior_blend=0.0,
+            use_vae_perspective=False,
+        )
+        model = KairosCIDAClassifier(config)
+        loss_fn = CIDALoss(
+            lambda_cal=config.lambda_cal,
+            lambda_ac=config.lambda_ac,
+            min_disagreement=config.min_disagreement,
+            multi_label=False,
+        )
+        return model, loss_fn
+
+    if variant == "kairos_legacy":
+        # Legacy diagnosed baseline: hardcoded role priors (blend=0.30) + fixed Dirichlet (+1.0)
+        config = CIDAPluginConfig(
+            d_input=d_in,
+            d_hidden=256,
+            d_message=256,
+            num_agents=4,
+            num_classes=num_classes,
+            max_rounds=3,
+            multi_label=False,
+            role_prior_blend=0.30,
+            use_vae_perspective=False,
+            alpha_prior=1.0,
         )
         model = KairosCIDAClassifier(config)
         loss_fn = CIDALoss(
@@ -477,6 +526,8 @@ def build_variant(variant: str, d_in: int, num_classes: int) -> tuple[nn.Module,
             num_classes=num_classes,
             max_rounds=3,
             multi_label=False,
+            role_prior_blend=0.0,
+            use_vae_perspective=True,
         )
         ref_model = CIDAPlugin(ref_config)
         target_params = sum(p.numel() for p in ref_model.parameters())
@@ -528,9 +579,19 @@ def train_variant(
     epochs: int = 10,
     batch_size: int = 32,
     lr: float = 2e-4,
+    seed: int = 42,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ) -> Dict[str, Any]:
     os.makedirs(out_dir, exist_ok=True)
+
+    # Set seeds for rigorous scientific reproducibility
+    import random
+    import numpy as np
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     train_ds = LatentDataset(shard_dir)
     eval_ds = LatentDataset(eval_shard_dir)
@@ -543,13 +604,21 @@ def train_variant(
     model, loss_fn = build_variant(variant, d_in, track.num_classes)
     model, loss_fn = model.to(device), loss_fn.to(device)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    # Deterministic DataLoader generator
+    g = torch.Generator()
+    g.manual_seed(seed)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, generator=g)
     eval_loader = DataLoader(eval_ds, batch_size=batch_size, shuffle=False)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
     n_params = sum(p.numel() for p in model.parameters())
 
-    print(f"\n[train:{track.name}/{variant}] Starting training ({epochs} epochs, {len(train_ds)} samples, {n_params:,} params)...")
+    print(f"\n[train:{track.name}/{variant}] Starting training ({epochs} epochs, {len(train_ds)} samples, {n_params:,} params, seed={seed})...")
+
+    # Extract kl_weight from model config if available
+    kl_weight = 1e-3
+    if hasattr(model, "cida") and hasattr(model.cida, "config"):
+        kl_weight = getattr(model.cida.config, "kl_weight", 1e-3)
 
     for epoch in range(epochs):
         t0 = time.time()
@@ -564,7 +633,14 @@ def train_variant(
             y = b["label"].to(device)
 
             out = model(pooled=pooled, seq_output=seq, mask=mask)
-            loss, comps = loss_fn(p_final=out["p_final"], y=y, b_all=out["b_all"])
+            loss, comps = loss_fn(
+                p_final=out["p_final"],
+                y=y,
+                b_all=out["b_all"],
+                orth_loss=out.get("L_orth"),
+                kl_loss=out.get("kl_loss"),
+                kl_weight=kl_weight,
+            )
 
             opt.zero_grad()
             loss.backward()
@@ -582,8 +658,8 @@ def train_variant(
         epoch_acc = total_correct / max(total_samples, 1)
         elapsed = time.time() - t0
 
-        print(f"[{track.name}:{variant}] Epoch {epoch+1:02d}/{epochs:02d} | "
-              f"Loss: {epoch_loss:.4f} (task: {last_comps.get('task', 0.0):.4f}, cal: {last_comps.get('calibration', 0.0):.4f}) | "
+        print(f"[{track.name}:{variant}|seed={seed}] Epoch {epoch+1:02d}/{epochs:02d} | "
+              f"Loss: {epoch_loss:.4f} (task: {last_comps.get('task', 0.0):.4f}, cal: {last_comps.get('calibration', 0.0):.4f}, kl: {last_comps.get('kl', 0.0):.4f}) | "
               f"Acc: {epoch_acc*100:6.2f}% | Time: {elapsed:.1f}s")
 
     # Real evaluation on the real held-out split
@@ -608,20 +684,24 @@ def train_variant(
     result = {
         "track": track.name,
         "variant": variant,
+        "seed": seed,
         "params": n_params,
         "accuracy": acc,
         "ece": ece,
         "n_eval": y_true.size(0),
     }
 
-    ckpt_path = os.path.join(out_dir, f"{track.name}_{variant}.pt")
+    ckpt_path = os.path.join(out_dir, f"{track.name}_{variant}_seed{seed}.pt")
     torch.save({"model": model.state_dict(), "result": result}, ckpt_path)
+    torch.save({"model": model.state_dict(), "result": result}, os.path.join(out_dir, f"{track.name}_{variant}.pt"))
 
-    json_path = os.path.join(out_dir, f"{track.name}_{variant}.json")
+    json_path = os.path.join(out_dir, f"{track.name}_{variant}_seed{seed}.json")
     with open(json_path, "w") as f:
         json.dump(result, f, indent=2)
+    with open(os.path.join(out_dir, f"{track.name}_{variant}.json"), "w") as f:
+        json.dump(result, f, indent=2)
 
-    print(f"\n[DONE:{track.name}/{variant}] Final Test Acc: {acc*100:.2f}% | ECE: {ece:.4f} | Saved: {json_path}")
+    print(f"\n[DONE:{track.name}/{variant}|seed={seed}] Final Test Acc: {acc*100:.2f}% | ECE: {ece:.4f} | Saved: {json_path}")
     return result
 
 
@@ -631,7 +711,12 @@ def train_variant(
 
 def report(out_dir: str = "./kairos_checkpoints"):
     rows = []
-    for f in sorted(glob.glob(os.path.join(out_dir, "*.json"))):
+    # Collect all seeded JSONs first, fallback to unseeded
+    json_files = sorted(glob.glob(os.path.join(out_dir, "*_seed*.json")))
+    if not json_files:
+        json_files = sorted(glob.glob(os.path.join(out_dir, "*.json")))
+
+    for f in json_files:
         with open(f) as fh:
             rows.append(json.load(fh))
 
@@ -639,26 +724,48 @@ def report(out_dir: str = "./kairos_checkpoints"):
         print(f"No results found in {out_dir} — run `train` for each (track, variant) first.")
         return
 
-    print("\n" + "=" * 68)
-    print("KAIROS SCIENTIFIC BENCHMARK REPORT (Section 8.2 / 9.1 Evaluation)")
-    print("=" * 68)
-    print(f"{'Track':<8} {'Variant':<16} {'Params':>11} {'Accuracy':>10} {'ECE':>8} {'N_eval':>8}")
-    print("-" * 68)
+    # Group by (track, variant)
+    import numpy as np
+    from collections import defaultdict
+    groups = defaultdict(list)
     for r in rows:
-        print(f"{r['track']:<8} {r['variant']:<16} {r['params']:>11,} "
-              f"{r['accuracy']*100:>9.2f}% {r['ece']:>8.4f} {r['n_eval']:>8}")
-    print("-" * 68)
+        groups[(r['track'], r['variant'])].append(r)
 
+    print("\n" + "=" * 82)
+    print("KAIROS SCIENTIFIC BENCHMARK REPORT (Section 8.2 / 9.1 Multi-Seed Evaluation)")
+    print("=" * 82)
+    print(f"{'Track':<8} {'Variant':<16} {'Params':>11} {'Accuracy (mean±std)':>22} {'ECE (mean±std)':>16} {'Seeds':>8}")
+    print("-" * 82)
+
+    for (trk, var), items in sorted(groups.items()):
+        params = items[0]['params']
+        accs = [x['accuracy'] * 100 for x in items]
+        eces = [x['ece'] for x in items]
+        seeds = [str(x.get('seed', 42)) for x in items]
+
+        if len(items) > 1:
+            acc_str = f"{np.mean(accs):.2f}% ± {np.std(accs):.2f}%"
+            ece_str = f"{np.mean(eces):.4f} ± {np.std(eces):.4f}"
+        else:
+            acc_str = f"{accs[0]:.2f}%"
+            ece_str = f"{eces[0]:.4f}"
+
+        seed_str = ",".join(seeds) if len(seeds) <= 4 else f"{len(seeds)} seeds"
+        print(f"{trk:<8} {var:<16} {params:>11,} {acc_str:>22} {ece_str:>16} {seed_str:>8}")
+
+    print("-" * 82)
     print("\nScientific interpretation of results:")
     print("  1. linear_probe   -> Baseline capacity floor (minimal parameters).")
     print("  2. equal_capacity -> Parameter-matched control (same budget as Kairos, no debate).")
-    print("  3. kairos         -> Full CIDA multi-agent deliberation head.")
+    print("  3. kairos_legacy  -> Diagnosed baseline with hard role priors & alpha=1.0.")
+    print("  4. kairos_ortho   -> Orthogonality without priors (role_prior_blend=0, alpha=1/K).")
+    print("  5. kairos_vae     -> Full Kairos L3 VAE-Perspective Head + scale-invariant Dirichlet.")
     print("\nConclusion criteria:")
-    print("  - If kairos > equal_capacity on Accuracy/ECE: deliberation structure")
-    print("    provides genuine cognitive lift beyond added parameter count.")
+    print("  - If kairos_vae / kairos_ortho > equal_capacity on Accuracy/ECE across seeds:")
+    print("    deliberation structure provides genuine cognitive lift beyond parameter count.")
     print("  - If kairos <= equal_capacity: gains stem primarily from capacity;")
-    print("    report honestly without cherry-picking per Section 8.2.")
-    print("=" * 68 + "\n")
+    print("    report honestly without cherry-picking per Section 8.2 / Appendix F.")
+    print("=" * 82 + "\n")
 
 
 # ===========================================================================
@@ -666,7 +773,7 @@ def report(out_dir: str = "./kairos_checkpoints"):
 # ===========================================================================
 
 def run_smoke_test():
-    """Generates synthetic cached latents to verify all 3 variants and report
+    """Generates synthetic cached latents to verify all 5 variants and report
     without requiring external model downloads or large datasets."""
     print("\n[SMOKE TEST] Initializing rapid benchmark verification...")
     smoke_dir = "./latent_cache/smoke_test"
@@ -704,7 +811,7 @@ def run_smoke_test():
     out_dir = "./kairos_checkpoints/smoke"
     os.makedirs(out_dir, exist_ok=True)
 
-    for v in ["linear_probe", "equal_capacity", "kairos"]:
+    for v in ["linear_probe", "equal_capacity", "kairos_legacy", "kairos_ortho", "kairos_vae"]:
         print(f"\n--- Testing variant: {v} ---")
         train_variant(
             track=smoke_track,
@@ -715,6 +822,7 @@ def run_smoke_test():
             out_dir=out_dir,
             epochs=2,
             batch_size=16,
+            seed=42,
         )
 
     print("\n--- Testing final report generation ---")
@@ -730,10 +838,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("stage", choices=["download", "cache", "train", "report", "smoke_test"])
     parser.add_argument("--track", choices=list(TRACKS.keys()), help="Target benchmark track ('text' or 'vision')")
-    parser.add_argument("--variant", choices=["linear_probe", "equal_capacity", "kairos"], help="Model variant to train")
+    parser.add_argument("--variant", choices=["linear_probe", "equal_capacity", "kairos", "kairos_legacy", "kairos_ortho", "kairos_vae"], help="Model variant to train")
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs (default: 10)")
     parser.add_argument("--batch_size", type=int, default=32, help="Mini-batch size (default: 32)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate (default: 2e-4)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+    parser.add_argument("--seeds", type=int, nargs="+", default=None, help="List of seeds to train sequentially (e.g. --seeds 42 43 44)")
     parser.add_argument("--d_in", type=int, default=None, help="Input dimension (auto-detected from shard if omitted)")
     parser.add_argument("--out_dir", type=str, default="./kairos_checkpoints", help="Output directory for results")
     args = parser.parse_args()
@@ -755,17 +865,23 @@ if __name__ == "__main__":
         if not (args.track and args.variant):
             raise SystemExit("--track and --variant are required for stage 'train'")
         t = TRACKS[args.track]
-        train_variant(
-            t,
-            args.variant,
-            shard_dir=f"./latent_cache/{t.name}/train",
-            eval_shard_dir=f"./latent_cache/{t.name}/eval",
-            d_in=args.d_in,
-            out_dir=args.out_dir,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            lr=args.lr,
-        )
+        seeds_to_run = args.seeds if args.seeds else [args.seed]
+        for s in seeds_to_run:
+            print(f"\n=======================================================")
+            print(f"Starting run: track={t.name} variant={args.variant} seed={s}")
+            print(f"=======================================================")
+            train_variant(
+                t,
+                args.variant,
+                shard_dir=f"./latent_cache/{t.name}/train",
+                eval_shard_dir=f"./latent_cache/{t.name}/eval",
+                d_in=args.d_in,
+                out_dir=args.out_dir,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                seed=s,
+            )
 
     elif args.stage == "report":
         report(out_dir=args.out_dir)

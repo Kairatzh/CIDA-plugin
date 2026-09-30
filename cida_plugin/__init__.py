@@ -26,6 +26,8 @@ from .deliberation import (
     MessageFormulator,
     CounterargumentCommunication,
     AgentUpdater,
+    PerspectiveProjector,
+    VAEPerspectiveProjector,
 )
 from .consensus import ConsensusAggregator, HaltingPredictor
 from .losses import CIDALoss

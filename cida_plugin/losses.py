@@ -140,12 +140,15 @@ class CIDALoss(nn.Module):
         y: torch.Tensor,
         b_all: list,
         orth_loss: torch.Tensor = None,
+        kl_loss: torch.Tensor = None,
+        kl_weight: float = 1e-3,
     ) -> tuple[torch.Tensor, dict]:
         """
         p_final : (B, K)         — финальное предсказание
         y       : (B,) или (B,K) — метки
         b_all   : list[(B,M,K)]  — история убеждений по раундам
         orth_loss: scalar или None — orth loss из representations (опционально)
+        kl_loss : scalar или None — VAE KL loss (опционально)
 
         Returns: (total_loss, components_dict)
         """
@@ -164,11 +167,18 @@ class CIDALoss(nn.Module):
             l_orth = orth_loss
             total = total + 0.05 * l_orth  # малый вес, это regularizer
 
+        # KL loss опционально (для VAE perspective layer)
+        l_kl = torch.tensor(0.0)
+        if kl_loss is not None and kl_loss > 0.0:
+            l_kl = kl_loss
+            total = total + kl_weight * l_kl
+
         components = {
             "task":         l_t.item(),
             "calibration":  l_c.item(),
             "anti_collapse": l_ac.item(),
             "orth":         l_orth.item() if isinstance(l_orth, torch.Tensor) else l_orth,
+            "kl":           l_kl.item() if isinstance(l_kl, torch.Tensor) else l_kl,
             "total":        total.item(),
         }
 

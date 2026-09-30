@@ -68,10 +68,14 @@ def apply_role_prior(
     role_idx: int,
     multi_label: bool = False,
     positive_class_idx: int = 1,
+    blend_weight: float = ROLE_PRIOR_BLEND,
 ) -> torch.Tensor:
     """
     Смешивает data-driven belief с role-specific prior (обобщённая версия для любого K).
     """
+    if blend_weight <= 0.0:
+        return b_data
+
     role = role_idx % 4
     if role == 3: # Интегратор: без prior
         return b_data
@@ -109,7 +113,7 @@ def apply_role_prior(
             
         prior = prior / prior.sum(dim=-1, keepdim=True)
 
-    return (1.0 - ROLE_PRIOR_BLEND) * b_data + ROLE_PRIOR_BLEND * prior
+    return (1.0 - blend_weight) * b_data + blend_weight * prior
 
 
 def apply_role_priors_batched(
@@ -117,16 +121,20 @@ def apply_role_priors_batched(
     M: int,
     multi_label: bool = False,
     positive_class_idx: int = 1,
+    blend_weight: float = ROLE_PRIOR_BLEND,
 ) -> torch.Tensor:
     """
     Векторизованная версия apply_role_prior для батча агентов сразу (B, M, K).
     """
+    if blend_weight <= 0.0:
+        return b_data
+
     B, _, K = b_data.shape
     device = b_data.device
     dtype = b_data.dtype
     
     priors = torch.zeros((M, K), device=device, dtype=dtype)
-    blend_mask = torch.full((M, 1), ROLE_PRIOR_BLEND, device=device, dtype=dtype)
+    blend_mask = torch.full((M, 1), blend_weight, device=device, dtype=dtype)
     
     for i in range(M):
         role = i % 4
