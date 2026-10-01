@@ -402,12 +402,17 @@ def run_scientific_audit(
     print("                        GRAND SCIENTIFIC AUDIT MATRIX: KAIROS 1.0 vs. LAYA")
     print("=" * 105)
     print(f"{'Audit Task':<28} | {'What is Evaluated':<26} | {'Laya Baseline':<22} | {'Kairos 1.0':<22}")
-    print("-" * 105)
-    print(f"{'1. High-Cardinality (77 cls)':<28} | {'Token bloat & accuracy':<26} | {'42.50% (Token choke)':<22} | {f'{t1_res[\"final_acc_k77\"]*100:.2f}% (+30.6%)':<22}")
-    print(f"{'2. Safety / Guardrail':<28} | {'F1, FNR on real attacks':<26} | {'88.30% (11.7% leak)':<22} | {f'{t2_res[\"kairos\"][\"accuracy\"]*100:.2f}% (0.18% leak)':<22}")
-    print(f"{'3. Calibration & Conformal':<28} | {'Conformal set coverage':<26} | {'0% (No risk bound)':<22} | {f'{t3_res[\"empirical_coverage\"]*100:.1f}% Guaranteed':<22}")
-    print(f"{'4. Class 0 / Pass-Through':<28} | {'False Tool Call rate':<26} | {'~18% - 25% (Risk)':<22} | {f'{t4_res[\"class_0_recall\"]*100:.1f}% Safe Reject':<22}")
-    print(f"{'5. Multilingual Generaliz.':<28} | {'Cross-lingual support':<26} | {'84.0% (Dedicated mm)':<22} | {'English-only (v1.0)':<22}")
+    t1_str = f"{t1_res['final_acc_k77']*100:.2f}% (+30.6%)"
+    t2_str = f"{t2_res['kairos']['accuracy']*100:.2f}% (0.18% leak)"
+    t3_str = f"{t3_res['empirical_coverage']*100:.1f}% Guaranteed"
+    t4_str = f"{t4_res['class_0_recall']*100:.1f}% Safe Reject"
+    t5_str = "English-only (v1.0)"
+
+    print(f"{'1. High-Cardinality (77 cls)':<28} | {'Token bloat & accuracy':<26} | {'42.50% (Token choke)':<22} | {t1_str:<22}")
+    print(f"{'2. Safety / Guardrail':<28} | {'F1, FNR on real attacks':<26} | {'88.30% (11.7% leak)':<22} | {t2_str:<22}")
+    print(f"{'3. Calibration & Conformal':<28} | {'Conformal set coverage':<26} | {'0% (No risk bound)':<22} | {t3_str:<22}")
+    print(f"{'4. Class 0 / Pass-Through':<28} | {'False Tool Call rate':<26} | {'~18% - 25% (Risk)':<22} | {t4_str:<22}")
+    print(f"{'5. Multilingual Generaliz.':<28} | {'Cross-lingual support':<26} | {'84.0% (Dedicated mm)':<22} | {t5_str:<22}")
     print("=" * 105)
 
     print("\n[VERDICT: The Honest Moat Summary]:")
