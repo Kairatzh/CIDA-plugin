@@ -214,7 +214,9 @@ def run_arena(
             k_verdict = f"{decision.action} (Conformal Coverage >= 95%)"
             k_acc = "Calibrated Conformal"
         else:
-            k_verdict = f"{decision.tool.name if track == 'tools' else decision.intent.intent} ({decision.confidence*100:.1f}%)"
+            conf = decision.tool.confidence if track == 'tools' else decision.intent.confidence
+            name = decision.tool.name if track == 'tools' else decision.intent.intent
+            k_verdict = f"{name} ({conf*100:.1f}%)"
             k_acc = "91.14% – 92.00%"
 
         results.append({

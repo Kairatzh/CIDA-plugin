@@ -82,6 +82,15 @@ class KairosDecision:
     agent_agreement: float
     deliberation_rounds: int
 
+    @property
+    def confidence(self) -> float:
+        """Returns the confidence corresponding to the top active action."""
+        if self.action == "BLOCK":
+            return self.safety.confidence
+        elif self.action in ("EXECUTE", "PASS_THROUGH"):
+            return self.tool.confidence
+        return self.intent.confidence
+
     def to_dict(self) -> Dict[str, Any]:
         """Converts decision to a JSON-serializable dictionary."""
         return asdict(self)
