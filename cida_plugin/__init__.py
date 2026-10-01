@@ -95,6 +95,14 @@ __all__ = [
     "LatentMCTS",
     "StrategyLibrary",
     "CIDABreakthroughEngine",
+    # [v4/v5] Multi-Task & Industrial Pro
+    "MultiTaskCIDAPlugin",
+    "MultiTaskCIDAPluginPro",
+    "OLoRATaskAdapter",
+    "AdaptiveTemperatureScaling",
 ]
+
+from .multitask import MultiTaskCIDAPlugin
+from .multitask_pro import MultiTaskCIDAPluginPro, OLoRATaskAdapter, AdaptiveTemperatureScaling
 
 
