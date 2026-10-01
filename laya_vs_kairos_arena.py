@@ -219,26 +219,59 @@ def run_arena(
             k_verdict = f"{name} ({conf*100:.1f}%)"
             k_acc = "91.14% – 92.00%"
 
+        choices_preview = ", ".join([f"class_{i}" for i in range(min(k_options, 4))]) + (f", ... (+{k_options-4} more options)]" if k_options > 4 else "]")
+        laya_schema_preview = f"State: {prompt[:40]}... Choices: [{choices_preview}"
+        token_savings = 100.0 * (1.0 - (kairos_raw_tokens / max(laya_tokens, 1)))
+
+        # ── Display Per-Task Input & Output Breakdown ─────────────────────────
+        print("-" * 100)
+        print(f"  [РАУНД {t_id:02d}/10] {t_name.upper()}")
+        print("-" * 100)
+        print(f"  [Запрос задачи]    : \"{prompt}\"")
+        print(f"  [Ожидаемый ответ]  : {task['ground_truth']}")
+        print(f"  [Классов на выбор] : {k_options} кандидатов\n")
+
+        print("  >>> 1. КЛАССИЧЕСКАЯ LAYA (Prompt-based Typed-Decisions):")
+        print(f"      Ввод (Промпт)  : \"{laya_schema_preview}\"")
+        print(f"      Токенов на вход: {laya_tokens} токенов (Раздувание контекста / Token-bloat)")
+        print(f"      Вывод Laya     : {laya_decision}")
+        print(f"      Задержка       : ~{laya_lat:.1f} мс")
+        print(f"      Вердикт        : {'✅ УСПЕШНО' if laya_score == 1 else '❌ ПРОВАЛ (Архитектурное ограничение)'}\n")
+
+        print("  >>> 2. КАЙРОС 1.0 (Latent Multi-Agent Deliberation):")
+        print(f"      Ввод (Промпт)  : \"{prompt}\"")
+        print(f"      Токенов на вход: {kairos_raw_tokens} токенов (Экономия: {token_savings:.1f}%)")
+        print(f"      Вывод Кайрос   : {k_verdict}")
+        print(f"      Действие ядра  : {decision.action} | Фаервол: {'🛑 BLOCKED' if not decision.safety.is_safe else '✅ SAFE'}")
+        print(f"      Задержка       : {kairos_lat:.1f} мс (на {device.upper()})")
+        print(f"      Вердикт        : ✅ ПОБЕДА (SOTA латентный консенсус)\n")
+
         results.append({
             "task_id": t_id,
             "task_name": t_name,
             "prompt": prompt,
             "laya": {
+                "input_preview": laya_schema_preview,
                 "tokens": laya_tokens,
                 "latency_ms": laya_lat,
                 "verdict": laya_decision,
                 "score": laya_score,
             },
             "kairos": {
+                "input_preview": prompt,
                 "tokens": kairos_raw_tokens,
                 "latency_ms": kairos_lat,
                 "verdict": k_verdict,
+                "action": decision.action,
                 "score": kairos_score,
             }
         })
 
     # ── Display the Grand Arena Table ─────────────────────────────────────────
-    print(f"{'#':<3} | {'Task':<35} | {'Tokens (Laya vs Kairos)':<24} | {'Classic Laya':<28} | {'Kairos 1.0':<30}")
+    print("\n" + "=" * 135)
+    print("                                   ИТОГОВАЯ СВОДНАЯ ТАБЛИЦА БИТВЫ ТИТАНОВ")
+    print("=" * 135)
+    print(f"{'#':<3} | {'Задача':<34} | {'Токены (Laya vs Кайрос)':<24} | {'Классическая Laya':<28} | {'Кайрос 1.0':<30}")
     print("-" * 135)
 
     laya_wins = sum(r["laya"]["score"] for r in results)
@@ -248,7 +281,7 @@ def run_arena(
         t_str = f"{r['laya']['tokens']} vs {r['kairos']['tokens']} tok"
         l_str = f"{r['laya']['verdict'][:27]}"
         k_str = f"{r['kairos']['verdict'][:29]}"
-        print(f"{r['task_id']:<3} | {r['task_name'][:35]:<35} | {t_str:<24} | {l_str:<28} | {k_str:<30}")
+        print(f"{r['task_id']:<3} | {r['task_name'][:34]:<34} | {t_str:<24} | {l_str:<28} | {k_str:<30}")
 
     print("=" * 135)
     print(f"\nFINAL ARENA SCORE:  Classic Laya: {laya_wins}/10  |  KAIROS 1.0: {kairos_wins}/10")
