@@ -153,22 +153,20 @@ def cache_all_tracks(cache_dir: str = "./weights", out_base: str = "./latent_cac
         os.makedirs(out_dir, exist_ok=True)
         batch_texts, batch_labels = [], []
         shard_idx, in_shard = 0, 0
-        buf_pooled, buf_seq, buf_mask, buf_lbl = [], [], [], []
+        buf_pooled, buf_lbl = [], []
 
         def flush():
-            nonlocal shard_idx, buf_pooled, buf_seq, buf_mask, buf_lbl, in_shard
+            nonlocal shard_idx, buf_pooled, buf_lbl, in_shard
             if not buf_pooled:
                 return
             p = torch.cat(buf_pooled, dim=0)
-            s = torch.cat(buf_seq, dim=0)
-            m = torch.cat(buf_mask, dim=0)
             l = torch.cat(buf_lbl, dim=0)
             spath = os.path.join(out_dir, f"shard_{shard_idx:05d}.pt")
-            torch.save({"pooled": p, "seq": s, "mask": m, "label": l}, spath)
+            torch.save({"pooled": p, "label": l}, spath)
             print(f"[cache:{track_name}/{split}] Wrote {spath} ({p.size(0)} samples)")
             shard_idx += 1
             in_shard = 0
-            buf_pooled, buf_seq, buf_mask, buf_lbl = [], [], [], []
+            buf_pooled, buf_lbl = [], []
 
         for i, (q, lbl) in enumerate(data_pairs):
             if max_samples_per_track and i >= max_samples_per_track:
@@ -180,11 +178,8 @@ def cache_all_tracks(cache_dir: str = "./weights", out_base: str = "./latent_cac
                 enc = tok(batch_texts, padding="max_length", truncation=True, max_length=128, return_tensors="pt").to(device)
                 with torch.no_grad():
                     out = model(**enc)
-                    seq = out.last_hidden_state
-                    pooled = seq[:, 0, :]
+                    pooled = out.last_hidden_state[:, 0, :]
                 buf_pooled.append(pooled.cpu())
-                buf_seq.append(seq.cpu())
-                buf_mask.append(enc["attention_mask"].cpu())
                 buf_lbl.append(torch.tensor(batch_labels, dtype=torch.long))
                 in_shard += len(batch_texts)
                 batch_texts, batch_labels = [], []
@@ -196,11 +191,8 @@ def cache_all_tracks(cache_dir: str = "./weights", out_base: str = "./latent_cac
             enc = tok(batch_texts, padding="max_length", truncation=True, max_length=128, return_tensors="pt").to(device)
             with torch.no_grad():
                 out = model(**enc)
-                seq = out.last_hidden_state
-                pooled = seq[:, 0, :]
+                pooled = out.last_hidden_state[:, 0, :]
             buf_pooled.append(pooled.cpu())
-            buf_seq.append(seq.cpu())
-            buf_mask.append(enc["attention_mask"].cpu())
             buf_lbl.append(torch.tensor(batch_labels, dtype=torch.long))
             flush()
 
@@ -483,25 +475,24 @@ class ShardedLatentDataset(Dataset):
         self.paths = sorted(glob.glob(os.path.join(resolved, "shard_*.pt")))
         if not self.paths:
             raise FileNotFoundError(f"No shards found in {shard_dir} ({resolved})")
-        self.index = []
-        self._cache = {}
-        for si, p in enumerate(self.paths):
+
+        pooled_list, label_list = [], []
+        for p in self.paths:
             s = torch.load(p, map_location="cpu", weights_only=True)
-            n = s["label"].size(0)
-            self.index.extend([(si, j) for j in range(n)])
-            self._cache[si] = s
+            pooled_list.append(s["pooled"])
+            label_list.append(s["label"])
+            del s
+
+        self.pooled = torch.cat(pooled_list, dim=0)
+        self.labels = torch.cat(label_list, dim=0)
 
     def __len__(self):
-        return len(self.index)
+        return self.labels.size(0)
 
     def __getitem__(self, idx):
-        si, j = self.index[idx]
-        s = self._cache[si]
         return {
-            "pooled": s["pooled"][j],
-            "seq": s["seq"][j],
-            "mask": s["mask"][j],
-            "label": s["label"][j],
+            "pooled": self.pooled[idx],
+            "label": self.labels[idx],
         }
 
 
@@ -682,7 +673,7 @@ def train_multitask(
             except StopIteration:
                 iter_tools = iter(loader_tools)
                 b_t = next(iter_tools)
-            out_t = model(b_t["pooled"].to(device), seq_output=b_t["seq"].to(device), mask=b_t["mask"].to(device), task="tools")
+            out_t = model(b_t["pooled"].to(device), task="tools")
             l_t, _ = loss_fn(out_t["p_final"], b_t["label"].to(device), out_t["b_all"])
             total_step_loss = total_step_loss + l_t
 
@@ -692,7 +683,7 @@ def train_multitask(
             except StopIteration:
                 iter_intent = iter(loader_intent)
                 b_i = next(iter_intent)
-            out_i = model(b_i["pooled"].to(device), seq_output=b_i["seq"].to(device), mask=b_i["mask"].to(device), task="intent")
+            out_i = model(b_i["pooled"].to(device), task="intent")
             l_i, _ = loss_fn(out_i["p_final"], b_i["label"].to(device), out_i["b_all"])
             total_step_loss = total_step_loss + l_i
 
