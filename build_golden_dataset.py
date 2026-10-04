@@ -42,7 +42,7 @@ def extract_math_sample(row: Dict[str, Any]) -> Optional[Dict[str, str]]:
 
 def extract_code_sample(row: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """Extracts instruction and code response from Magicoder."""
-    prompt = row.get("instruction") or row.get("prompt")
+    prompt = row.get("instruction") or row.get("prompt") or row.get("problem-setting")
     input_text = row.get("input", "")
     if input_text and str(input_text).strip():
         prompt = f"{prompt}\n\nInput: {input_text}"
@@ -177,25 +177,26 @@ def build_sft_mix(output_path: str, total_target: int = 50000, smoke_test: bool 
     
     total_written = 0
     with open(output_path, "w", encoding="utf-8") as f_out:
-        # 1. Quantitative Reasoning (OpenR1-Math or NuminaMath)
-        math_repos = ["open-r1/OpenR1-Math-220k", "AI-MO/NuminaMath-CoT"]
-        math_done = False
+        # 1. Quantitative Reasoning (Target: limits["math"])
+        remaining_math = limits["math"]
+        math_repos = ["open-r1/OpenR1-Math-220k", "AI-MO/NuminaMath-CoT", "openai/gsm8k"]
         for repo in math_repos:
+            if remaining_math <= 0:
+                break
             try:
-                for sample in stream_dataset(repo, "train", extract_math_sample, limits["math"]):
+                count_repo = 0
+                for sample in stream_dataset(repo, "train", extract_math_sample, remaining_math):
                     f_out.write(json.dumps(sample, ensure_ascii=False) + "\n")
                     total_written += 1
-                math_done = True
-                break
+                    count_repo += 1
+                    remaining_math -= 1
+                if count_repo > 0:
+                    print(f"  [+] Added {count_repo} math samples from {repo}. Remaining needed: {remaining_math}")
             except Exception as e:
-                print(f"  [!] Failed {repo} ({e}), checking next fallback...")
-        if not math_done:
-            print("  [!] Warning: Could not stream online math. Falling back to GSM8K...")
-            for sample in stream_dataset("openai/gsm8k", "train", extract_math_sample, limits["math"]):
-                f_out.write(json.dumps(sample, ensure_ascii=False) + "\n")
-                total_written += 1
+                print(f"  [!] Skipped {repo} ({e}).")
 
-        # 2. Real Code & Strict Syntax (Magicoder / CodeAlpaca / MBPP)
+        # 2. Real Code & Strict Syntax (Target: limits["code"])
+        remaining_code = limits["code"]
         code_repos = [
             "ise-uiuc/Magicoder-OSS-Instruct-75K",
             "sahil2801/CodeAlpaca-20k",
@@ -203,56 +204,64 @@ def build_sft_mix(output_path: str, total_target: int = 50000, smoke_test: bool 
             "theblackcat102/evol-codealpaca-v1",
             "mbpp"
         ]
-        code_done = False
         for repo in code_repos:
+            if remaining_code <= 0:
+                break
             try:
-                for sample in stream_dataset(repo, "train", extract_code_sample, limits["code"]):
+                count_repo = 0
+                for sample in stream_dataset(repo, "train", extract_code_sample, remaining_code):
                     f_out.write(json.dumps(sample, ensure_ascii=False) + "\n")
                     total_written += 1
-                code_done = True
-                break
+                    count_repo += 1
+                    remaining_code -= 1
+                if count_repo > 0:
+                    print(f"  [+] Added {count_repo} code samples from {repo}. Remaining needed: {remaining_code}")
             except Exception as e:
-                print(f"  [!] Failed {repo} ({e}), checking next fallback...")
-        if not code_done:
-            print("  [-] Could not stream code from any repo.")
+                print(f"  [!] Skipped {repo} ({e}).")
 
-        # 3. Production Function Calling (Hermes / Glaive / XLAM)
+        # 3. Production Function Calling (Target: limits["tools"])
+        remaining_tools = limits["tools"]
         tool_repos = [
             "NousResearch/hermes-function-calling-v1",
             "Salesforce/xlam-function-calling-60k",
             "glaiveai/glaive-function-calling-v2"
         ]
-        tool_done = False
         for repo in tool_repos:
+            if remaining_tools <= 0:
+                break
             try:
-                for sample in stream_dataset(repo, "train", extract_tool_sample, limits["tools"]):
+                count_repo = 0
+                for sample in stream_dataset(repo, "train", extract_tool_sample, remaining_tools):
                     f_out.write(json.dumps(sample, ensure_ascii=False) + "\n")
                     total_written += 1
-                tool_done = True
-                break
+                    count_repo += 1
+                    remaining_tools -= 1
+                if count_repo > 0:
+                    print(f"  [+] Added {count_repo} tool samples from {repo}. Remaining needed: {remaining_tools}")
             except Exception as e:
-                print(f"  [!] Failed {repo} ({e}), checking next fallback...")
-        if not tool_done:
-            print("  [-] Could not stream tools from any repo.")
+                print(f"  [!] Skipped {repo} ({e}).")
 
-        # 4. In-The-Wild Safety (WildJailbreak / BeaverTails)
+        # 4. In-The-Wild Safety (Target: limits["safety"])
+        remaining_safety = limits["safety"]
         safety_repos = [
-            "allenai/wildjailbreak",
-            "PKU-Alignment/BeaverTails",
-            "walledai/JailbreakBench"
+            ("allenai/wildjailbreak", "train"),
+            ("PKU-Alignment/BeaverTails", "330k_train"),
+            ("walledai/JailbreakBench", "train")
         ]
-        safety_done = False
-        for repo in safety_repos:
+        for repo, split_name in safety_repos:
+            if remaining_safety <= 0:
+                break
             try:
-                for sample in stream_dataset(repo, "train", extract_safety_sample, limits["safety"]):
+                count_repo = 0
+                for sample in stream_dataset(repo, split_name, extract_safety_sample, remaining_safety):
                     f_out.write(json.dumps(sample, ensure_ascii=False) + "\n")
                     total_written += 1
-                safety_done = True
-                break
+                    count_repo += 1
+                    remaining_safety -= 1
+                if count_repo > 0:
+                    print(f"  [+] Added {count_repo} safety samples from {repo}. Remaining needed: {remaining_safety}")
             except Exception as e:
-                print(f"  [!] Failed {repo} ({e}), checking next fallback...")
-        if not safety_done:
-            print("  [-] Could not stream safety from any repo.")
+                print(f"  [!] Skipped {repo} ({e}).")
 
     print(f"\n[DONE] Successfully wrote {total_written} real, verified samples to: {output_path}")
 
