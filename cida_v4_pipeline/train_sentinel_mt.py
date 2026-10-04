@@ -155,7 +155,22 @@ def load_real_mt_agentrisk_tasks(data_dir: str = "./MT-AgentRisk") -> List[Dict[
         if "benign" in task_id.lower() or "benign" in root.lower():
             is_attack = False
 
+        # Accurate taxonomy mapping from folder path
+        clean_root = root.replace("\\", "/").lower()
         taxonomy = "Decomposition-MethodA-DataFiles" if is_attack else "Benign-Developer-Task"
+        if is_attack:
+            for tax in MT_AGENT_RISK_TAXONOMY:
+                tax_norm = tax.lower().replace("-", "")
+                root_norm = clean_root.replace("-", "").replace("_", "")
+                if tax_norm in root_norm:
+                    taxonomy = tax
+                    break
+            else:
+                method = "MethodA" if "methoda" in clean_root else ("MethodB" if "methodb" in clean_root else "MethodA")
+                target = "EnvironmentStates" if ("environment" in clean_root or "state" in clean_root) else "DataFiles"
+                family = "Addition" if "addition" in clean_root else ("Decomposition" if "decomposition" in clean_root else "Decomposition")
+                taxonomy = f"{family}-{method}-{target}"
+
         harm_type = "Multi-Turn Harmful Task" if is_attack else "None (Benign Developer Interaction)"
 
         chain_path = os.path.join(root, "attack_chain.json")

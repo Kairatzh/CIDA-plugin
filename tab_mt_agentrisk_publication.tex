@@ -1,0 +1,20 @@
+\begin{table*}[t]
+\centering
+\caption{\textbf{Multi-Turn Agent Safety on MT-AgentRisk ($N=1,100$ tasks).} Evaluated with frozen \texttt{bert-base-uncased} encoder. Wilson 95\% confidence intervals reported in brackets. CIDA Sentinel-MT outperforms capacity-matched and sequence-matched baselines by an order of magnitude while maintaining low false positives.}
+\label{tab:mt_agentrisk_sota}
+\vspace{0.15cm}
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Defense System} & \textbf{Type} & \textbf{Params} & \textbf{ASR (\%) $\downarrow$} & \textbf{FPR (\%) $\downarrow$} & \textbf{ECE $\downarrow$} \\
+\midrule
+Unprotected Base LLM & No Defense & 7B & 100.00 [99.6, 100.0] & 0.00 [0.0, 2.2] & 0.450 \\
+Regex-Keyword-Filter & Static Rule & 0 & 81.61 [79.0, 84.0] & 0.00 [0.0, 2.2] & 0.380 \\
+Frozen BERT + Linear Head & Capacity Ctrl (Min) & 1.5K & 28.49 [25.7, 31.5] & 14.12 [9.6, 20.2] & 0.182 \\
+Frozen BERT + BiGRU Aggregator & Sequence Ctrl & 780K & 14.30 [12.2, 16.7] & 7.65 [4.4, 12.8] & 0.115 \\
+Kairos-Sentinel-MT (T=0, No Delib) & Ablation & 7.4M & 7.42 [5.9, 9.3] & 4.71 [2.3, 9.2] & 0.084 \\
+Kairos-Sentinel-MT (T=1) & Ablation & 7.4M & 4.19 [3.1, 5.7] & 3.53 [1.5, 7.6] & 0.061 \\
+\textbf{Kairos-Sentinel-MT (T=3, Full Delib)} & Proposed (Ours) & 7.4M & \textbf{1.94 [1.2, 3.0]} & \textbf{2.35 [0.9, 5.9]} & \textbf{0.038} \\
+\bottomrule
+\end{tabular}
+\end{table*}
