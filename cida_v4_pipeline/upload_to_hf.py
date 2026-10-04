@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Optional, Dict, List, Any
 import torch
 
 try:
@@ -28,7 +29,7 @@ except ImportError:
     sys.exit(1)
 
 
-MODEL_CARD_TEMPLATE = """---
+MODEL_CARD_TEMPLATE = r"""---
 language:
 - en
 license: apache-2.0
