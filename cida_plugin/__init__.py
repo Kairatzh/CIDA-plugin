@@ -100,9 +100,13 @@ __all__ = [
     "MultiTaskCIDAPluginPro",
     "OLoRATaskAdapter",
     "AdaptiveTemperatureScaling",
+    # [ICML 2026] Multi-Turn Agentic Safety Sentinel
+    "KairosSentinelMT",
+    "TrajectoryAggregator",
 ]
 
 from .multitask import MultiTaskCIDAPlugin
 from .multitask_pro import MultiTaskCIDAPluginPro, OLoRATaskAdapter, AdaptiveTemperatureScaling
+from .sentinel_mt import KairosSentinelMT, TrajectoryAggregator
 
 
