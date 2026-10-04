@@ -154,28 +154,34 @@ def export_and_upload(
     staging_dir = "./hf_upload_staging"
     os.makedirs(staging_dir, exist_ok=True)
 
-    # Copy / save primary checkpoint
-    if not os.path.exists(checkpoint_path):
-        # Check alternative locations
-        candidates = [
-            checkpoint_path,
-            "./kairos_checkpoints/kairos_multitask_production.pt",
-            "./kairos_checkpoints/kairos_pro_best.pt",
-        ]
-        found = None
-        for c in candidates:
-            if os.path.exists(c):
-                found = c
-                break
-        if not found:
-            print(f"[HF:Error] Checkpoint not found at {checkpoint_path}. Train the model first!")
-            sys.exit(1)
-        checkpoint_path = found
-
-    print(f"[HF:Stage] Staging checkpoint from '{checkpoint_path}'...")
     import shutil
-    target_ckpt = os.path.join(staging_dir, "kairos_1_1_production.pt")
-    shutil.copy(checkpoint_path, target_ckpt)
+    # Copy / stage available checkpoints
+    staged_any_ckpt = False
+
+    # 1. Primary Kairos 1.1 Pro checkpoint
+    candidates_1_1 = [
+        checkpoint_path,
+        "./kairos_checkpoints/kairos_1_1_production.pt",
+        "./kairos_checkpoints/kairos_multitask_production.pt",
+        "./kairos_checkpoints/kairos_pro_best.pt",
+    ]
+    for c in candidates_1_1:
+        if os.path.exists(c):
+            print(f"[HF:Stage] Staging Kairos 1.1 Pro checkpoint from '{c}'...")
+            shutil.copy(c, os.path.join(staging_dir, "kairos_1_1_production.pt"))
+            staged_any_ckpt = True
+            break
+
+    # 2. Sentinel-MT (Multi-Turn Deliberation Coprocessor) checkpoint
+    sentinel_ckpt = "./kairos_checkpoints/kairos_sentinel_mt.pt"
+    if os.path.exists(sentinel_ckpt):
+        print(f"[HF:Stage] Staging Sentinel-MT checkpoint from '{sentinel_ckpt}'...")
+        shutil.copy(sentinel_ckpt, os.path.join(staging_dir, "kairos_sentinel_mt.pt"))
+        staged_any_ckpt = True
+
+    if not staged_any_ckpt:
+        print(f"[HF:Error] No valid checkpoints found in ./kairos_checkpoints/. Train a model first!")
+        sys.exit(1)
 
     # Copy label maps
     label_path = os.path.join(latent_dir, "label_maps.json")
@@ -185,16 +191,16 @@ def export_and_upload(
         print(f"[HF:Stage] Staging label maps from '{label_path}'...")
         shutil.copy(label_path, os.path.join(staging_dir, "label_maps.json"))
 
-    # Copy training report if available
+    # Copy training reports & audit reports if available
     report_candidates = [
         "./kairos_checkpoints/kairos_pro_report.json",
         "./kairos_checkpoints/kairos_multitask_report.json",
+        "./mt_agentrisk_audit_report.json",
     ]
     for r in report_candidates:
         if os.path.exists(r):
             print(f"[HF:Stage] Staging report from '{r}'...")
-            shutil.copy(r, os.path.join(staging_dir, "kairos_report.json"))
-            break
+            shutil.copy(r, os.path.join(staging_dir, os.path.basename(r)))
 
     # 4. Generate README.md (Model Card)
     readme_content = MODEL_CARD_TEMPLATE.format(repo_id=repo_id)
