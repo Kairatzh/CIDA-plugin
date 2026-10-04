@@ -40,6 +40,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
@@ -195,7 +200,9 @@ def load_real_mt_agentrisk_tasks(data_dir: str = "./MT-AgentRisk") -> List[Dict[
     for root, dirs, files in os.walk(search_root):
         turn_files = sorted([f for f in files if f.startswith("task-turn-") and f.endswith(".md")])
         single_task = "task.md" in files
-        if not turn_files and not single_task:
+        turns_yaml_file = "turns.yml" if "turns.yml" in files else ("turns.yaml" if "turns.yaml" in files else None)
+
+        if not turn_files and not single_task and not turns_yaml_file:
             continue
 
         task_id = os.path.basename(root)
@@ -206,14 +213,44 @@ def load_real_mt_agentrisk_tasks(data_dir: str = "./MT-AgentRisk") -> List[Dict[
                 break
 
         turns_text = []
-        if turn_files:
+
+        # 1. First priority: parse turns.yml if present
+        if turns_yaml_file and yaml is not None:
+            try:
+                with open(os.path.join(root, turns_yaml_file), "r", encoding="utf-8", errors="ignore") as f:
+                    ydata = yaml.safe_load(f)
+                    if isinstance(ydata, list):
+                        for item in ydata:
+                            if isinstance(item, dict):
+                                ins = item.get("instruction") or item.get("prompt") or item.get("content") or item.get("text")
+                                if ins:
+                                    turns_text.append(str(ins).strip())
+                            elif isinstance(item, str):
+                                turns_text.append(item.strip())
+                    elif isinstance(ydata, dict):
+                        turns_list = ydata.get("turns") or ydata.get("instructions")
+                        if isinstance(turns_list, list):
+                            for item in turns_list:
+                                if isinstance(item, dict):
+                                    ins = item.get("instruction") or item.get("prompt") or item.get("content")
+                                    if ins:
+                                        turns_text.append(str(ins).strip())
+                                elif isinstance(item, str):
+                                    turns_text.append(item.strip())
+            except Exception:
+                pass
+
+        # 2. Second priority: separate markdown turn files
+        if not turns_text and turn_files:
             for tf in turn_files:
                 try:
                     with open(os.path.join(root, tf), "r", encoding="utf-8", errors="ignore") as f:
                         turns_text.append(f.read().strip())
                 except Exception:
                     pass
-        elif single_task:
+
+        # 3. Third priority: single task.md
+        if not turns_text and single_task:
             try:
                 with open(os.path.join(root, "task.md"), "r", encoding="utf-8", errors="ignore") as f:
                     turns_text.append(f.read().strip())
