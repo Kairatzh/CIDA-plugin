@@ -112,3 +112,8 @@ class TextEmbeddingEngine:
                 pass
 
         return embs
+
+    def get_or_compute_embedding(self, text: str, task_id: Optional[str] = None) -> torch.Tensor:
+        """Convenience method to encode a single turn string."""
+        return self.encode([text])[0]
+

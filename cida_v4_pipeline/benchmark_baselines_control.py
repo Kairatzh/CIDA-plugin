@@ -337,8 +337,7 @@ def record_empirical_deliberation_trajectories(
         for task in sample_list:
             turns = task["turns"]
             if encoder is not None:
-                vecs = [encoder.get_or_compute_embedding(t, task_id=f"{task['id']}_turn_{idx}") for idx, t in enumerate(turns)]
-                turn_emb = torch.tensor(np.array(vecs), dtype=torch.float32, device=device).unsqueeze(0)
+                turn_emb = encoder.encode_trajectory(turns, task_id=task["id"]).to(device).unsqueeze(0)
             else:
                 # Fallback for synthetic/smoke testing
                 turn_emb = torch.randn(1, len(turns), sentinel.d_input, device=device)
