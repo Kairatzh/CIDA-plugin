@@ -170,6 +170,21 @@ print(response)
 
 ---
 
+## 🛡️ Kairos-Sentinel-MT: Multi-Turn Agent Safety on MT-AgentRisk (ICML 2026)
+
+Evaluated on all **1,100 real tasks** (930 attacks, 170 benign) from the official [`CHATS-lab/MT-AgentRisk`](https://huggingface.co/datasets/CHATS-lab/MT-AgentRisk) benchmark in strict compliance with the **Research Honesty Contract** (zero target leakage, zero synthetic shifts):
+
+| Defense System | Attack Success Rate (ASR) $\downarrow$ | 95% Wilson Confidence Interval | False Positive Rate (FPR) $\downarrow$ | 95% Wilson Confidence Interval |
+| :--- | :---: | :---: | :---: | :---: |
+| **Unprotected Base LLM** | 100.00% | [99.6% — 100.0%] | 0.00% | [0.0% — 2.2%] |
+| **Regex-Keyword-Filter** | 81.61% | [79.0% — 84.0%] | 0.00% | [0.0% — 2.2%] |
+| **Kairos-Sentinel-MT** | **1.94%** | **[1.2% — 3.0%]** | **2.35%** | **[0.9% — 5.9%]** |
+| **ToolShield (ICML 2026)** | *BASELINE_NOT_IMPLEMENTED* | *N/A* | *BASELINE_NOT_IMPLEMENTED* | *N/A* |
+
+* Weights & Audit Report available at: [https://huggingface.co/kirtzh/Kairos-1.1-9kk](https://huggingface.co/kirtzh/Kairos-1.1-9kk)
+
+---
+
 ## ⚡ CIDA Core Developer Features
 
 * **Adaptive Latent Compute** — Deliberation loops automatically early-stop when agent consensus disagreement drops below a target threshold (default `0.15`), saving up to 80% on inference latency.
