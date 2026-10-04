@@ -103,10 +103,23 @@ __all__ = [
     # [ICML 2026] Multi-Turn Agentic Safety Sentinel
     "KairosSentinelMT",
     "TrajectoryAggregator",
+    # [Apex v2.0] SOTA Transformer Deliberation Core
+    "RMSNorm",
+    "SwiGLUFFN",
+    "DeliberationRoPE",
+    "SOTADeliberationCore",
+    "UniversalPlanProjector",
 ]
 
 from .multitask import MultiTaskCIDAPlugin
 from .multitask_pro import MultiTaskCIDAPluginPro, OLoRATaskAdapter, AdaptiveTemperatureScaling
 from .sentinel_mt import KairosSentinelMT, TrajectoryAggregator
+from .transformer_agent import (
+    RMSNorm,
+    SwiGLUFFN,
+    DeliberationRoPE,
+    SOTADeliberationCore,
+    UniversalPlanProjector,
+)
 
 
