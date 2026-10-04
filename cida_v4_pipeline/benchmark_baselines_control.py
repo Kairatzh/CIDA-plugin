@@ -489,12 +489,36 @@ def main():
     n_benign = len(tasks) - n_attacks
     print(f"[Dataset] Total Tasks: {len(tasks)} (Attacks: {n_attacks}, Benign: {n_benign})")
 
-    # Load Sentinel
-    if not os.path.exists(args.checkpoint) and not args.smoke_test:
-        raise FileNotFoundError(f"Checkpoint {args.checkpoint} not found!")
+    # Robust Checkpoint Resolution & Auto-Download
+    candidates = [
+        args.checkpoint,
+        "./kairos_checkpoints/kairos_sentinel_mt.pt",
+        os.path.join(os.path.dirname(__file__), "kairos_checkpoints", "kairos_sentinel_mt.pt"),
+        "/content/kairos_checkpoints/kairos_sentinel_mt.pt",
+        "/content/CIDA-plugin/kairos_checkpoints/kairos_sentinel_mt.pt",
+    ]
+    resolved_ckpt = None
+    for c in candidates:
+        if c and os.path.exists(c):
+            resolved_ckpt = c
+            break
 
-    if os.path.exists(args.checkpoint):
-        ckpt = torch.load(args.checkpoint, map_location=device)
+    if not resolved_ckpt and not args.smoke_test:
+        hf_url = "https://huggingface.co/kirtzh/Kairos-1.1-9kk/resolve/main/kairos_sentinel_mt.pt"
+        download_target = "./kairos_checkpoints/kairos_sentinel_mt.pt"
+        os.makedirs(os.path.dirname(download_target), exist_ok=True)
+        print(f"[*] Checkpoint not found at '{args.checkpoint}'.")
+        print(f"[*] Downloading genuine weights from Hugging Face Hub ({hf_url})...")
+        try:
+            import urllib.request
+            urllib.request.urlretrieve(hf_url, download_target)
+            resolved_ckpt = download_target
+            print(f"    [OK] Successfully downloaded checkpoint to {download_target}")
+        except Exception as e:
+            raise FileNotFoundError(f"Could not load checkpoint from '{args.checkpoint}' or download from HF Hub: {e}")
+
+    if resolved_ckpt and os.path.exists(resolved_ckpt):
+        ckpt = torch.load(resolved_ckpt, map_location=device)
         cfg = ckpt.get("config", {})
         sentinel = KairosSentinelMT(
             d_input=cfg.get("d_input", 768),
@@ -508,7 +532,7 @@ def main():
         ).to(device)
         sentinel.load_state_dict(ckpt["model_state_dict"])
         sentinel.eval()
-        print(f"[SentinelMT] Successfully loaded genuine weights from {args.checkpoint}.")
+        print(f"[SentinelMT] Successfully loaded genuine weights from {resolved_ckpt}.")
     else:
         sentinel = KairosSentinelMT(d_input=768).to(device)
 
