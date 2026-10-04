@@ -24,16 +24,43 @@ if SCRIPT_DIR not in sys.path:
 
 
 class JsonlPromptDataset(Dataset):
-    def __init__(self, jsonl_path: str, limit: Optional[int] = None, mock_mode: bool = False):
+    def __init__(self, jsonl_path: str, limit: Optional[int] = None, mock_mode: bool = False, balanced: bool = True):
         self.records = []
         if os.path.exists(jsonl_path):
+            all_records = []
             with open(jsonl_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line:
-                        self.records.append(json.loads(line))
-                        if limit and len(self.records) >= limit:
-                            break
+                        all_records.append(json.loads(line))
+            
+            if balanced and limit and limit < len(all_records):
+                by_track = {}
+                for r in all_records:
+                    trk = r.get("track", "general")
+                    by_track.setdefault(trk, []).append(r)
+                
+                print(f"[*] Available tracks in {jsonl_path}: { {k: len(v) for k, v in by_track.items()} }")
+                
+                selected = []
+                if "adversarial_safety" in by_track:
+                    selected.extend(by_track["adversarial_safety"][:200])
+                if "tool_calling" in by_track:
+                    selected.extend(by_track["tool_calling"][:1800])
+                if "code_and_syntax" in by_track:
+                    selected.extend(by_track["code_and_syntax"][:1000])
+                
+                rem = limit - len(selected)
+                math_samples = by_track.get("quantitative_reasoning", [])
+                selected.extend(math_samples[:rem])
+                
+                import random
+                random.seed(42)
+                random.shuffle(selected)
+                self.records = selected
+                print(f"[+] Selected {len(self.records)} balanced samples across all tracks!")
+            else:
+                self.records = all_records[:limit] if limit else all_records
         elif mock_mode:
             print(f"[*] Mock mode: generating {limit or 50} synthetic prompt records in-memory for verification.")
             for k in range(limit or 50):
@@ -57,7 +84,7 @@ def run_offline_caching(
     model_id: str,
     data_path: str,
     output_dir: str,
-    batch_size: int = 4,
+    batch_size: int = 8,
     limit: Optional[int] = None,
     mock_mode: bool = False,
 ):
@@ -148,8 +175,8 @@ def run_offline_caching(
             h_p = torch.randn(len(batch), d_llm)
             h_t = torch.randn(len(batch), d_llm)
         else:
-            enc_p = tokenizer(prompts, padding=True, truncation=True, max_length=1024, return_tensors="pt").to(device)
-            enc_t = tokenizer(targets, padding=True, truncation=True, max_length=512, return_tensors="pt").to(device)
+            enc_p = tokenizer(prompts, padding=True, truncation=True, max_length=512, return_tensors="pt").to(device)
+            enc_t = tokenizer(targets, padding=True, truncation=True, max_length=384, return_tensors="pt").to(device)
 
             with torch.no_grad():
                 out_p = model(**enc_p, output_hidden_states=True)
@@ -182,8 +209,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="empero-ai/Qwable-9B-Claude-Fable-5", help="Backbone Hugging Face model")
     parser.add_argument("--data", type=str, default="./curated_data/sft_training_mix_50k.jsonl", help="Input JSONL file")
     parser.add_argument("--output", type=str, default="./latent_cache/qwable_9b", help="Output directory for tensor shards")
-    parser.add_argument("--batch-size", type=int, default=4, help="Batch size for forward pass")
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of samples to process")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for forward pass")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of samples to process (e.g. 5000)")
     parser.add_argument("--smoke-test", action="store_true", help="Run local smoke test without downloading full 9B model")
     args = parser.parse_args()
 
