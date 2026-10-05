@@ -420,4 +420,6 @@ cida_results/
 *.pth
 *.pt
 data/
-checkpoints/
+checkpoints/ 
+benchmark_results/
+latent_cache/
