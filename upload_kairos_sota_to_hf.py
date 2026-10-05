@@ -55,9 +55,11 @@ metrics:
 pipeline_tag: text-generation
 ---
 
-# 🧠 Kairos-9B-CIDA-v2 (Apex SOTA)
+# 🧠 Kairos-v2-300kk (Apex SOTA CIDA Deliberation Brain)
 
-**Kairos-9B-CIDA-v2** is a next-generation deliberative reasoning model powered by the **CIDA (Continuous Latent Deliberation Agent)** architecture. 
+**Kairos-v2-300kk** is a 9.33-Billion parameter deliberative reasoning model powered by the **CIDA (Continuous Latent Deliberation Agent)** architecture. 
+
+It equips a frozen 9B backbone (`empero-ai/Qwable-9B-Claude-Fable-5`) with a 333.6M-parameter recurrent Transformer Deliberation Core (`SOTADeliberationCore`) and Universal Plan Projector (`UniversalPlanProjector`).
 
 Instead of generating verbose, slow, and expensive text Chain-of-Thought (CoT) tokens ("Thinking: ..."), Kairos conducts **sub-token multi-agent deliberation directly in the latent vector space** ($d_{hidden} = 1024$) before projecting an optimal $P=8$ virtual plan token sequence into the backbone language model ($d_{llm} = 4096$).
 
@@ -277,8 +279,8 @@ def package_and_upload_sota(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Publish Kairos-9B-CIDA-v2 weights and benchmark scorecard to Hugging Face.")
-    parser.add_argument("--repo-id", type=str, default="Kairatzh/Kairos-9B-CIDA-v2", help="Target Hugging Face repo ID (e.g. 'username/model_name')")
+    parser = argparse.ArgumentParser(description="Publish Kairos-v2-300kk weights and benchmark scorecard to Hugging Face.")
+    parser.add_argument("--repo-id", type=str, default="kirtzh/Kairos-v2-300kk", help="Target Hugging Face repo ID")
     parser.add_argument("--token", type=str, default=None, help="Hugging Face Write Token")
     parser.add_argument("--checkpoint-dir", type=str, default="./kairos_checkpoints/apex_sota", help="Path to trained weights folder")
     parser.add_argument("--benchmark-dir", type=str, default="./benchmark_results", help="Path to benchmark plots folder")
