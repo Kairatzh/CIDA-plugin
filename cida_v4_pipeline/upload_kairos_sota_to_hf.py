@@ -300,7 +300,7 @@ def package_and_upload_sota(
                 print(f"  [+] Staged benchmark artifact: {fname}")
 
     # 6. Generate Model Card README.md
-    readme_content = MODEL_CARD_TEMPLATE.format(repo_id=repo_id)
+    readme_content = MODEL_CARD_TEMPLATE.replace("{repo_id}", repo_id)
     with open(os.path.join(staging_dir, "README.md"), "w", encoding="utf-8") as f:
         f.write(readme_content)
     print("  [+] Generated: README.md (Official Model Card)")
