@@ -195,6 +195,7 @@ def run_offline_caching(
             model.eval()
             for p in model.parameters():
                 p.requires_grad = False
+            backbone = getattr(model, "model", model)
         except Exception as e:
             print(f"[!] Warning: Could not load {model_id} directly ({e}). Switching to mock verification mode.")
             mock_mode = True
@@ -222,6 +223,19 @@ def run_offline_caching(
         shard_idx += 1
         buf_prompt, buf_target, buf_tracks, buf_ids = [], [], [], []
 
+    def extract_latents(texts: List[str], max_length: int) -> torch.Tensor:
+        enc = tokenizer(texts, padding=True, truncation=True, max_length=max_length, return_tensors="pt").to(device)
+        with torch.no_grad():
+            out = backbone(**enc)
+            last_hidden = getattr(out, "last_hidden_state", None)
+            if last_hidden is None:
+                last_hidden = out[0]
+            seq_lens = enc.attention_mask.sum(dim=1) - 1
+            b_idx = torch.arange(len(texts), device=device)
+            latents = last_hidden[b_idx, seq_lens].float().cpu()
+        del enc, out, last_hidden
+        return latents
+
     print("[*] Processing batches...")
     t0 = time.time()
     
@@ -238,21 +252,23 @@ def run_offline_caching(
             h_p = torch.randn(len(batch), d_llm)
             h_t = torch.randn(len(batch), d_llm)
         else:
-            enc_p = tokenizer(prompts, padding=True, truncation=True, max_length=512, return_tensors="pt").to(device)
-            enc_t = tokenizer(targets, padding=True, truncation=True, max_length=384, return_tensors="pt").to(device)
-
-            with torch.no_grad():
-                out_p = model(**enc_p, output_hidden_states=True)
-                last_hidden_p = out_p.hidden_states[-1]
-                # Extract last non-padding token
-                seq_lens_p = enc_p.attention_mask.sum(dim=1) - 1
-                batch_idx = torch.arange(len(batch), device=device)
-                h_p = last_hidden_p[batch_idx, seq_lens_p].float().cpu()
-
-                out_t = model(**enc_t, output_hidden_states=True)
-                last_hidden_t = out_t.hidden_states[-1]
-                seq_lens_t = enc_t.attention_mask.sum(dim=1) - 1
-                h_t = last_hidden_t[batch_idx, seq_lens_t].float().cpu()
+            try:
+                h_p = extract_latents(prompts, max_length=384)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                h_t = extract_latents(targets, max_length=256)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except torch.OutOfMemoryError:
+                print(f"  [!] CUDA OOM detected on batch. Falling back to single-sample extraction...")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                h_p_list = [extract_latents([p], max_length=384) for p in prompts]
+                h_t_list = [extract_latents([t], max_length=256) for t in targets]
+                h_p = torch.cat(h_p_list, dim=0)
+                h_t = torch.cat(h_t_list, dim=0)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         buf_prompt.append(h_p)
         buf_target.append(h_t)
@@ -272,7 +288,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="empero-ai/Qwable-9B-Claude-Fable-5", help="Backbone Hugging Face model")
     parser.add_argument("--data", type=str, default="./curated_data/sft_training_mix_50k.jsonl", help="Input JSONL file")
     parser.add_argument("--output", type=str, default="./latent_cache/qwable_9b", help="Output directory for tensor shards")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for forward pass")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size for forward pass")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of samples to process (e.g. 5000)")
     parser.add_argument("--smoke-test", action="store_true", help="Run local smoke test without downloading full 9B model")
     args = parser.parse_args()
