@@ -23,16 +23,77 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 
+def resolve_dataset_path(data_path: str, auto_download_limit: Optional[int] = None) -> str:
+    """Finds existing dataset file across working directories, or auto-streams genuine data if missing."""
+    if os.path.exists(data_path) and os.path.getsize(data_path) > 0:
+        return os.path.abspath(data_path)
+    
+    basename = os.path.basename(data_path)
+    clean_rel = data_path.lstrip("./").lstrip(".\\")
+    
+    candidates = [
+        os.path.join(SCRIPT_DIR, clean_rel),
+        os.path.join(SCRIPT_DIR, "curated_data", basename),
+        os.path.join(os.getcwd(), clean_rel),
+        os.path.join(os.getcwd(), "curated_data", basename),
+        os.path.join(os.getcwd(), "CIDA-plugin", clean_rel),
+        os.path.join(os.getcwd(), "CIDA-plugin", "curated_data", basename),
+        os.path.join(os.path.dirname(os.getcwd()), clean_rel),
+        os.path.join(os.path.dirname(os.getcwd()), "curated_data", basename),
+        f"/content/{clean_rel}",
+        f"/content/CIDA-plugin/{clean_rel}",
+        f"/content/curated_data/{basename}",
+        f"/content/CIDA-plugin/curated_data/{basename}",
+    ]
+    for c in candidates:
+        if os.path.exists(c) and os.path.getsize(c) > 0:
+            print(f"[*] Successfully located dataset at: {c}")
+            return os.path.abspath(c)
+    
+    # Search common parent directories
+    for root in [SCRIPT_DIR, os.getcwd(), "/content"]:
+        if os.path.exists(root):
+            for r, _, files in os.walk(root):
+                if basename in files:
+                    cand = os.path.join(r, basename)
+                    if os.path.getsize(cand) > 0:
+                        print(f"[*] Successfully discovered dataset at: {cand}")
+                        return os.path.abspath(cand)
+    
+    # If still not found, auto-harvest genuine Hugging Face data
+    print(f"[!] Dataset file '{data_path}' was not found on disk.")
+    target_count = auto_download_limit if auto_download_limit else 5000
+    print(f"[*] Auto-recovery: Streaming {target_count} genuine samples directly from Hugging Face Hub (Research Honesty Contract)...")
+    dest_path = os.path.abspath(os.path.join(SCRIPT_DIR, "curated_data", basename))
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    try:
+        from build_golden_dataset import build_sft_mix
+        build_sft_mix(output_path=dest_path, total_target=target_count)
+        if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+            print(f"[+] Dataset successfully created: {dest_path}")
+            return dest_path
+    except Exception as e:
+        print(f"[!] Auto-download failed: {e}")
+        
+    return data_path
+
+
 class JsonlPromptDataset(Dataset):
     def __init__(self, jsonl_path: str, limit: Optional[int] = None, mock_mode: bool = False, balanced: bool = True):
         self.records = []
-        if os.path.exists(jsonl_path):
+        if not mock_mode:
+            jsonl_path = resolve_dataset_path(jsonl_path, auto_download_limit=limit)
+
+        if os.path.exists(jsonl_path) and os.path.getsize(jsonl_path) > 0:
             all_records = []
             with open(jsonl_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line:
-                        all_records.append(json.loads(line))
+                        try:
+                            all_records.append(json.loads(line))
+                        except Exception:
+                            continue
             
             if balanced and limit and limit < len(all_records):
                 by_track = {}
@@ -88,6 +149,8 @@ def run_offline_caching(
     limit: Optional[int] = None,
     mock_mode: bool = False,
 ):
+    if output_dir.startswith("./") or output_dir.startswith(".\\"):
+        output_dir = os.path.abspath(os.path.join(SCRIPT_DIR, output_dir.lstrip("./").lstrip(".\\")))
     os.makedirs(output_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() and not mock_mode else "cpu"
     

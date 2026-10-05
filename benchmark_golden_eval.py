@@ -90,6 +90,24 @@ def run_benchmark_evaluation(
     core = SOTADeliberationCore(d_input=d_input, d_hidden=d_hidden, num_agents=4, num_rounds=4).to(device)
     projector = UniversalPlanProjector(d_hidden=d_hidden, d_llm=d_llm, num_agents=4, num_plan_tokens=8).to(device)
     
+    def resolve_weight_path(wpath: Optional[str]) -> Optional[str]:
+        if not wpath or os.path.exists(wpath):
+            return wpath
+        clean = wpath.lstrip("./").lstrip(".\\")
+        for cand in [
+            os.path.join(SCRIPT_DIR, clean),
+            os.path.join(os.getcwd(), clean),
+            os.path.join(os.getcwd(), "CIDA-plugin", clean),
+            f"/content/{clean}",
+            f"/content/CIDA-plugin/{clean}",
+        ]:
+            if os.path.exists(cand):
+                return cand
+        return wpath
+
+    core_weights = resolve_weight_path(core_weights)
+    proj_weights = resolve_weight_path(proj_weights)
+
     if core_weights and os.path.exists(core_weights):
         core.load_state_dict(torch.load(core_weights, map_location=device))
         print(f"[+] Loaded SOTA Core weights from: {core_weights}")
