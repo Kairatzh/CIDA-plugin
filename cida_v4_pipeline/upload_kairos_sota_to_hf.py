@@ -299,6 +299,17 @@ def package_and_upload_sota(
                 shutil.copy(os.path.join(actual_bench_dir, fname), os.path.join(staging_dir, fname))
                 print(f"  [+] Staged benchmark artifact: {fname}")
 
+    # Stage Model Passport if present
+    passport_candidates = [
+        os.path.join(SCRIPT_DIR, "KAIROS_V2_300KK_MODEL_PASSPORT.md"),
+        "/content/CIDA-plugin/KAIROS_V2_300KK_MODEL_PASSPORT.md",
+        "./KAIROS_V2_300KK_MODEL_PASSPORT.md",
+    ]
+    actual_passport = resolve_candidate(passport_candidates)
+    if actual_passport:
+        shutil.copy(actual_passport, os.path.join(staging_dir, "KAIROS_V2_300KK_MODEL_PASSPORT.md"))
+        print("  [+] Staged: KAIROS_V2_300KK_MODEL_PASSPORT.md (Official Model Passport)")
+
     # 6. Generate Model Card README.md
     readme_content = MODEL_CARD_TEMPLATE.replace("{repo_id}", repo_id)
     with open(os.path.join(staging_dir, "README.md"), "w", encoding="utf-8") as f:
