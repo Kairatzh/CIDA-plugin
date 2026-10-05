@@ -177,14 +177,56 @@ def package_and_upload_sota(
     benchmark_dir: str = "./benchmark_results",
     private: bool = False,
 ):
-    token = token or os.environ.get("HF_TOKEN")
+    # 0. Check HfFolder or login
+    try:
+        from huggingface_hub import HfFolder
+        cached_token = HfFolder.get_token()
+    except Exception:
+        cached_token = None
+
+    token = token or os.environ.get("HF_TOKEN") or cached_token
     if not token:
-        print("[!] Error: No Hugging Face token provided. Pass --token 'hf_xxx' or set export HF_TOKEN='hf_xxx'.")
+        print("\n" + "!" * 70)
+        print("[!] ОШИБКА: Токен Hugging Face не указан.")
+        print("    Укажите токен через параметр: --token 'hf_xxxxxxxxxxxxxxxxx'")
+        print("    Или выполните в ячейке Colab: !huggingface-cli login")
+        print("!" * 70 + "\n")
         sys.exit(1)
 
-    api = HfApi(token=token)
-    user_info = api.whoami()
-    print(f"[*] Authenticated as Hugging Face user: {user_info['name']}")
+    token = token.strip().strip("'").strip('"')
+
+    # Check for non-ASCII characters (e.g. Cyrillic letters from placeholder copy-paste)
+    try:
+        token.encode("ascii")
+    except UnicodeEncodeError:
+        print("\n" + "!" * 70)
+        print("[!] ОШИБКА В ТОКЕНЕ: Обнаружены русские буквы или недопустимые символы!")
+        print("    Вы скопировали шаблонный текст (например: --token 'hf_ВАШ_ТОКЕН_HUGGINGFACE').")
+        print("    Замените его на ваш настоящий токен из Hugging Face:")
+        print("    👉 https://huggingface.co/settings/tokens (права: Write)")
+        print("    Настоящий токен выглядит примерно так: hf_aB3cDeFgHiJkLmNoPqRsTuVwXyZ1234567")
+        print("!" * 70 + "\n")
+        sys.exit(1)
+
+    if "ВАШ" in token or "YOUR" in token or not token.startswith("hf_"):
+        print("\n" + "!" * 70)
+        print(f"[!] ВНИМАНИЕ: Токен '{token[:8]}...' некорректен.")
+        print("    Токен Hugging Face должен начинаться с 'hf_' и содержать только латинские буквы и цифры.")
+        print("    Получите токен с правами WRITE: https://huggingface.co/settings/tokens")
+        print("!" * 70 + "\n")
+        sys.exit(1)
+
+    try:
+        api = HfApi(token=token)
+        user_info = api.whoami()
+        print(f"[+] Authenticated as Hugging Face user: {user_info['name']}")
+    except Exception as e:
+        print("\n" + "!" * 70)
+        print(f"[!] Ошибка авторизации на Hugging Face: {e}")
+        print("    Проверьте правильность токена и наличие прав 'Write' (Role: Write).")
+        print("    Создать токен: https://huggingface.co/settings/tokens")
+        print("!" * 70 + "\n")
+        sys.exit(1)
 
     # 1. Verify/Create Repo
     print(f"[*] Creating/Verifying Hugging Face repository '{repo_id}' (private={private})...")
