@@ -47,7 +47,7 @@ Documentation = "https://github.com/Kairatzh/CIDA-plugin#readme"
 Issues = "https://github.com/Kairatzh/CIDA-plugin/issues"
 
 [tool.setuptools]
-packages = ["cida_plugin", "cida_plugin.inference", "cida_latent_plugin", "cida_inference"]
+packages = ["cida_plugin", "cida_plugin.inference", "cida_latent_plugin", "cida_inference", "kairos_loop"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
