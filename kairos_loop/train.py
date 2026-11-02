@@ -135,10 +135,11 @@ def train(args) -> Dict:
     n_params = count_params(model)
     ema = EMA(model, args.ema_decay)
     if args.compile:
+        print("[kairos-loop] torch.compile: первые итерации займут несколько минут на компиляцию", flush=True)
         model.net = torch.compile(model.net)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.95))
     print(f"[kairos-loop] variant={cfg.variant} params={n_params:,} device={device} "
-          f"train={len(train_p)} test={len(test_p)}")
+          f"train={len(train_p)} test={len(test_p)}", flush=True)
 
     stream = batches(train_p, train_s, args.batch_size, rng, use_augment=not args.no_augment)
     history, opt_steps, t0 = [], 0, time.time()
@@ -178,7 +179,7 @@ def train(args) -> Dict:
         if it % args.log_every == 0:
             n = log["n"]
             print(f"it {it:6d} | loss {log['loss'] / n:.4f} | train_exact {log['exact'] / n:.3f} "
-                  f"| sup_steps {log['steps'] / n:.1f} | {it * args.batch_size / (time.time() - t0):.0f} puzzles/s")
+                  f"| sup_steps {log['steps'] / n:.1f} | {it * args.batch_size / (time.time() - t0):.0f} puzzles/s", flush=True)
             log = {"loss": 0.0, "exact": 0.0, "steps": 0.0, "n": 0}
 
         if it % args.eval_every == 0 or it == args.iters:
@@ -187,7 +188,7 @@ def train(args) -> Dict:
             history.append(metrics)
             print(f"[eval] it {it} | exact {metrics['exact_acc']:.4f} | adaptive {metrics['exact_acc_adaptive']:.4f} "
                   f"@ {metrics['mean_steps_adaptive']:.1f} steps | cell {metrics['cell_acc']:.4f} "
-                  f"| halt AUROC {metrics['halt_auroc']:.3f}")
+                  f"| halt AUROC {metrics['halt_auroc']:.3f}", flush=True)
             torch.save({"config": cfg.to_dict(), "ema_state": ema.model.state_dict()}, out_dir / "model.pt")
 
     result = {

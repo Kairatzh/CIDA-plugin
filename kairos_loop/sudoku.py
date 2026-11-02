@@ -12,7 +12,6 @@ sudoku.py — данные для эксперимента Этапа 0 (CIDA-Lo
 
 from __future__ import annotations
 
-import csv
 from typing import Iterator, Optional, Tuple
 
 import numpy as np
@@ -137,22 +136,39 @@ def load_sudoku_extreme(split: str, n: Optional[int] = None, seed: int = 0) -> T
     """Sudoku-Extreme с Hugging Face (sapientinc/sudoku-extreme, файлы train.csv / test.csv)."""
     from huggingface_hub import hf_hub_download
 
+    print(f"[data] downloading sudoku-extreme/{split}.csv ...", flush=True)
     path = hf_hub_download("sapientinc/sudoku-extreme", f"{split}.csv", repo_type="dataset")
+    return read_sudoku_csv(path, n, seed)
+
+
+def _grid_bytes_to_array(cells: bytes) -> np.ndarray:
+    arr = np.frombuffer(cells.strip(b'"'), dtype=np.uint8).astype(np.int64) - ord("0")
+    arr[(arr < 0) | (arr > 9)] = 0  # '.' и прочие символы пустых клеток → 0
+    return arr
+
+
+def read_sudoku_csv(path: str, n: Optional[int] = None, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Читает CSV (source, question, answer, rating). Сначала выбирает n строк, потом разбирает только их:
+    в train.csv миллионы головоломок, полный разбор занимал бы десятки минут и гигабайты памяти.
+    """
+    with open(path, "rb") as f:
+        header = f.readline().decode().strip().split(",")
+        lines = f.read().splitlines()
+    lines = [line for line in lines if line]
+    q_col = header.index("question") if "question" in header else 1
+    a_col = header.index("answer") if "answer" in header else 2
+    if n is not None and n < len(lines):
+        idx = np.sort(np.random.default_rng(seed).choice(len(lines), size=n, replace=False))
+    else:
+        idx = np.arange(len(lines))
     puzzles, solutions = [], []
-    with open(path, newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        # ожидаемые колонки: source, question, answer, rating; иначе берём 2-ю и 3-ю
-        q_col = header.index("question") if "question" in header else 1
-        a_col = header.index("answer") if "answer" in header else 2
-        for row in reader:
-            puzzles.append([0 if ch in ".0" else int(ch) for ch in row[q_col]])
-            solutions.append([int(ch) for ch in row[a_col]])
-    puzzles, solutions = np.array(puzzles, dtype=np.int64), np.array(solutions, dtype=np.int64)
-    if n is not None and n < len(puzzles):
-        idx = np.random.default_rng(seed).choice(len(puzzles), size=n, replace=False)
-        puzzles, solutions = puzzles[idx], solutions[idx]
-    return puzzles, solutions
+    for i in idx:
+        row = lines[i].split(b",")
+        puzzles.append(_grid_bytes_to_array(row[q_col]))
+        solutions.append(_grid_bytes_to_array(row[a_col]))
+    print(f"[data] {path}: {len(lines)} rows, using {len(idx)}", flush=True)
+    return np.stack(puzzles), np.stack(solutions)
 
 
 def is_valid_solution(solution: np.ndarray) -> bool:

@@ -8,7 +8,7 @@ import torch
 
 from kairos_loop.metrics import auroc, expected_calibration_error
 from kairos_loop.model import KairosLoop, LoopConfig, count_params
-from kairos_loop.sudoku import augment, count_solutions, generate_dataset, is_valid_solution
+from kairos_loop.sudoku import augment, count_solutions, generate_dataset, is_valid_solution, read_sudoku_csv
 from kairos_loop.train import parse_args, train
 
 TINY = dict(d_model=32, n_latent=2, n_cycles=2, n_sup=3, n_agents=3, d_comm=16)
@@ -36,6 +36,22 @@ class TestSudoku:
             assert np.array_equal(pa[pa > 0], sa[pa > 0])
             assert (pa > 0).sum() == (p0 > 0).sum()
             assert count_solutions(pa) == 1
+
+    def test_read_sudoku_csv_samples_and_parses(self, data, tmp_path):
+        puzzles, solutions = data
+        path = tmp_path / "sudoku.csv"
+        rows = ["source,question,answer,rating"]
+        for p, s in zip(puzzles, solutions):
+            q = "".join("." if v == 0 else str(v) for v in p)
+            rows.append(f"src,{q},{''.join(map(str, s))},0")
+        path.write_text("\n".join(rows) + "\n")
+        p_all, s_all = read_sudoku_csv(str(path))
+        assert np.array_equal(p_all, puzzles) and np.array_equal(s_all, solutions)
+        p_sub, s_sub = read_sudoku_csv(str(path), n=2, seed=0)
+        assert p_sub.shape == (2, 81)
+        for p, s in zip(p_sub, s_sub):
+            assert any(np.array_equal(p, q) for q in puzzles)
+            assert is_valid_solution(s)
 
 
 class TestModel:
