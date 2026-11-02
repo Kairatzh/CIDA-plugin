@@ -62,6 +62,7 @@ class EnvConfig:
     reward_find: float = 1.0
     reward_explore: float = 0.01
     share_coverage: bool = False  # стигмергия: дроны видят общую карту исследованного
+    refresh_every: int = 16     # как часто обновлять пул свежих миров для перезапуска
 
     def __post_init__(self):
         if not 1 <= self.min_drones <= self.n_drones:
@@ -140,20 +141,33 @@ class SearchEnv:
         self.own_cov.scatter_(2, idx.unsqueeze(-1), True)
         return (self.team_cov[:, :-1].sum(1) - before).float()
 
-    def _reset_where(self, mask: torch.Tensor) -> None:
-        """Перезапускает миры по маске без синхронизации с CPU: новое считается для всех и смешивается."""
+    def _refresh_pool(self) -> None:
+        """
+        Заранее генерирует по одному свежему миру на каждый слот. Генерация дорогая, а заканчивается
+        за шаг лишь ~1/max_steps миров, поэтому пул обновляется раз в refresh_every шагов, а не каждый шаг.
+        """
         c = self.cfg
-        m1, m2, m3 = mask[:, None], mask[:, None, None], mask[:, None, None]
         obstacles = self._make_obstacles()
-        self.obstacles = torch.where(m1, obstacles, self.obstacles)
         n_active = c.min_drones + (self._rand(c.n_envs) * (c.n_drones - c.min_drones + 1)).long()
-        active = torch.arange(c.n_drones, device=self.device) < n_active[:, None]
-        self.active = torch.where(m1, active, self.active)
-        self.pos = torch.where(m2, self._sample_free(c.n_drones, self.obstacles), self.pos)
+        self._fresh = {
+            "obstacles": obstacles,
+            "active": torch.arange(c.n_drones, device=self.device) < n_active[:, None],
+            "pos": self._sample_free(c.n_drones, obstacles),
+            "targets": self._sample_free(c.n_targets, obstacles),
+            "decoys": self._sample_free(c.n_decoys, obstacles) if c.n_decoys else self.decoys,
+        }
+        self._since_refresh = 0
+
+    def _reset_where(self, mask: torch.Tensor) -> None:
+        """Перезапускает миры по маске без синхронизации с CPU: миры берутся из пула и смешиваются по маске."""
+        m1, m2 = mask[:, None], mask[:, None, None]
+        f = self._fresh
+        self.obstacles = torch.where(m1, f["obstacles"], self.obstacles)
+        self.active = torch.where(m1, f["active"], self.active)
+        self.pos = torch.where(m2, f["pos"], self.pos)
         self.vel = torch.where(m2, torch.zeros_like(self.vel), self.vel)
-        self.targets = torch.where(m3, self._sample_free(c.n_targets, self.obstacles), self.targets)
-        if c.n_decoys:
-            self.decoys = torch.where(m3, self._sample_free(c.n_decoys, self.obstacles), self.decoys)
+        self.targets = torch.where(m2, f["targets"], self.targets)
+        self.decoys = torch.where(m2, f["decoys"], self.decoys)
         self.alive = self.alive | mask[:, None]
         self.team_cov &= ~m1
         self.own_cov &= ~m2
@@ -173,6 +187,7 @@ class SearchEnv:
     # ── API ──────────────────────────────────────────────────────────────────
     def reset(self) -> Dict[str, torch.Tensor]:
         self.alive.zero_()
+        self._refresh_pool()
         self._reset_where(torch.ones(self.cfg.n_envs, dtype=torch.bool, device=self.device))
         return self.observe()
 
@@ -204,6 +219,9 @@ class SearchEnv:
 
         self.t += 1
         done = (self.t >= c.max_steps) | ~self.alive.any(1)
+        self._since_refresh += 1
+        if self._since_refresh >= c.refresh_every:
+            self._refresh_pool()
         info = {
             "found_frac": self.ep_found / c.n_targets,
             "length": self.t.float(),

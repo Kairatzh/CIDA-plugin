@@ -62,6 +62,12 @@ def _stack(obs_list):
     return {k: torch.stack([o[k] for o in obs_list]) for k in obs_list[0]}
 
 
+def _sync(device: torch.device) -> float:
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return time.time()
+
+
 def _masked_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (x * mask).sum() / mask.sum().clamp_min(1.0)
 
@@ -146,6 +152,7 @@ def train(args) -> Dict:
     ep_count = torch.zeros((), device=device)
     t0 = time.time()
     eval_seconds = 0.0
+    timing = {"collect": 0.0, "update": 0.0}
     agent_steps = 0
 
     for it in range(1, iters + 1):
@@ -154,6 +161,7 @@ def train(args) -> Dict:
             g["lr"] = lr
 
         # 1) сбор опыта
+        t_start = _sync(device)
         buf_obs, buf_state, buf_act, buf_logp, buf_val, buf_rew, buf_done = [], [], [], [], [], [], []
         with torch.no_grad():
             for _ in range(T):
@@ -190,6 +198,8 @@ def train(args) -> Dict:
             returns = adv + values
             ret_norm.update(returns)
         agent_steps += steps_per_iter
+        t_mid = _sync(device)
+        timing["collect"] += t_mid - t_start
 
         # 3) PPO; пример = (мир, момент времени) со всеми его дронами, неактивные дроны маскируются
         flat_obs = {k: v.flatten(0, 1) for k, v in _stack(buf_obs).items()}
@@ -220,13 +230,15 @@ def train(args) -> Dict:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
                 opt.step()
+        timing["update"] += _sync(device) - t_mid
 
         if it % args.log_every == 0:
             cnt = ep_count.item()
             msg = (" | ".join(f"{k} {ep_sum[k].item() / cnt:.3f}" for k in EPISODE_STATS)
                    if cnt else "no episodes yet")
             print(f"it {it:5d}/{iters} | {msg} | entropy {entropy.item():.3f} | v_loss {v_loss.item():.3f} | "
-                  f"{agent_steps / (time.time() - t0 - eval_seconds):,.0f} agent-steps/s", flush=True)
+                  f"{agent_steps / (time.time() - t0 - eval_seconds):,.0f} agent-steps/s "
+                  f"(collect {timing['collect'] / max(sum(timing.values()), 1e-9):.0%})", flush=True)
             ep_sum = {k: torch.zeros((), device=device) for k in EPISODE_STATS}
             ep_count.zero_()
 
@@ -253,6 +265,7 @@ def train(args) -> Dict:
         "train_minutes": (time.time() - t0) / 60,
         "agent_steps": agent_steps,
         "agent_steps_per_s": agent_steps / max(train_seconds, 1e-9),
+        "timing_seconds": timing,
         "final": history[-1],
         "random": random_metrics,
         "history": history,
