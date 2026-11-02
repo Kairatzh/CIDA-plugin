@@ -16,6 +16,7 @@ import argparse
 import copy
 import json
 import math
+import sys
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -126,6 +127,10 @@ def train(args) -> Dict:
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if device.type == "cpu" and args.device is None:
+        print(f"[kairos-loop] WARNING: CUDA недоступна в {sys.executable} (torch {torch.__version__}) — "
+              "обучение пойдёт на CPU и будет очень медленным. Запускайте тем же Python, что и ядро, "
+              "или передайте --device cpu, если это намеренно.", flush=True)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
