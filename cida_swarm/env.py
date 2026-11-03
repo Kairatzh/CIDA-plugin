@@ -74,6 +74,9 @@ class EnvConfig:
 class SearchEnv:
     """Батч независимых миров с автоматическим перезапуском завершившихся эпизодов."""
 
+    STATS = ("found_frac", "length", "coverage")
+    SUCCESS = "all_found"
+
     def __init__(self, cfg: EnvConfig, device: torch.device | str = "cpu", seed: Optional[int] = None):
         self.cfg = cfg
         self.device = torch.device(device)
@@ -283,6 +286,9 @@ class SearchEnv:
         idx = torch.where(self.alive, c[..., 0] * coarse + c[..., 1], torch.full_like(c[..., 0], coarse * coarse))
         out = torch.zeros(self.cfg.n_envs, coarse * coarse + 1, dtype=torch.bool, device=self.device)
         return out.scatter_(1, idx, True)[:, :-1]
+
+    def belief_target(self) -> torch.Tensor:
+        return self.people_map()
 
     def state(self) -> torch.Tensor:
         """Полное состояние мира для централизованного критика (только при обучении)."""

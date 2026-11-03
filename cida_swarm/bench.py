@@ -15,17 +15,17 @@ import argparse
 
 import torch
 
-from .env import N_ACTIONS, SearchEnv
-from .train import _sync, build_env_config, parse_args, train
+from .train import WORLDS, _sync, build_env_config, parse_args, train
 
 
 def env_speed(train_args, steps: int = 50) -> float:
     """Шагов дронов в секунду для одной среды со случайными действиями — потолок скорости обучения."""
     device = torch.device(train_args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     cfg = build_env_config(train_args)
-    env = SearchEnv(cfg, device, seed=0)
+    env_cls, _, n_actions = WORLDS[train_args.world]
+    env = env_cls(cfg, device, seed=0)
     env.reset()
-    actions = torch.randint(0, N_ACTIONS, (steps, cfg.n_envs, cfg.n_drones), device=device)
+    actions = torch.randint(0, n_actions, (steps, cfg.n_envs, cfg.n_drones), device=device)
     for i in range(5):
         env.step(actions[i])
     t0 = _sync(device)

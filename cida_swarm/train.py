@@ -5,7 +5,10 @@ train.py — обучение роя через MAPPO (общая политик
     python -m cida_swarm.train --total-steps 2e9 --out runs/nocomm_s0
     python -m cida_swarm.train --total-steps 2e9 --share-coverage --out runs/stigmergy_s0
     python -m cida_swarm.train --total-steps 2e9 --comm cida --out runs/cida_s0
-    python -m cida_swarm.train --comm cida --share-coverage --init-from runs/stigmergy_s0/model.pt         --critic-warmup 10 --lr 1e-4 --total-steps 1.5e9 --out runs/cida_ft_s0
+    python -m cida_swarm.train --comm cida --share-coverage --init-from runs/stigmergy_s0/model.pt \
+        --critic-warmup 10 --lr 1e-4 --total-steps 1.5e9 --out runs/cida_ft_s0
+
+Спасательная миссия (мир rescue): --world rescue --n-drones 6 --min-drones 3 --max-steps 300.
 
 Чтобы A100 не простаивал: тысячи миров параллельно, bf16, шаг среды без синхронизаций с CPU,
 статистика копится на GPU и читается только при логировании.
@@ -27,10 +30,21 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from .env import N_ACTIONS, EnvConfig, SearchEnv
-from .policy import Actor, Critic
+from . import env as search_world
+from . import rescue as rescue_world
+from .env import EnvConfig, SearchEnv
+from .policy import Actor, Critic, RescueActor
+from .rescue import RescueConfig, RescueEnv
 
-EPISODE_STATS = ("found_frac", "length", "coverage")
+# мир → (класс среды, класс мозга, число действий)
+WORLDS = {
+    "search": (SearchEnv, Actor, search_world.N_ACTIONS),
+    "rescue": (RescueEnv, RescueActor, rescue_world.N_ACTIONS),
+}
+
+
+def world_of(env_cfg) -> str:
+    return "rescue" if isinstance(env_cfg, RescueConfig) else "search"
 
 
 def autocast(device: torch.device):
@@ -76,17 +90,24 @@ def _masked_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 # ── оценка ───────────────────────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(actor: Optional[Actor], env_cfg: EnvConfig, n_envs: int, device, seed: int = 12345) -> Dict[str, float]:
-    """Один эпизод в каждом из n_envs свежих миров. actor=None — случайная политика."""
+def evaluate(actor: Optional[torch.nn.Module], env_cfg, n_envs: int, device, seed: int = 12345,
+             world: Optional[str] = None) -> Dict:
+    """
+    Один эпизод в каждом из n_envs свежих миров. actor=None — случайная политика.
+    Для спасательной миссии дополнительно — разбивка по сложности мира (by_level).
+    """
     device = torch.device(device)
-    cfg = EnvConfig(**{**env_cfg.to_dict(), "n_envs": n_envs})
-    env = SearchEnv(cfg, device, seed=seed)
+    world = world or world_of(env_cfg)
+    env_cls, _, n_actions = WORLDS[world]
+    cfg = type(env_cfg)(**{**env_cfg.to_dict(), "n_envs": n_envs})
+    env = env_cls(cfg, device, seed=seed)
     obs = env.reset()
     finished = torch.zeros(n_envs, dtype=torch.bool, device=device)
-    stats = {k: torch.zeros(n_envs, device=device) for k in EPISODE_STATS}
+    keys = list(env.STATS) + (["difficulty"] if world == "rescue" else [])
+    stats = {k: torch.zeros(n_envs, device=device) for k in keys}
     for _ in range(cfg.max_steps):
         if actor is None:
-            actions = torch.randint(0, N_ACTIONS, (n_envs, cfg.n_drones), device=device)
+            actions = torch.randint(0, n_actions, (n_envs, cfg.n_drones), device=device)
         else:
             with autocast(device):
                 logits = actor(obs)
@@ -96,16 +117,30 @@ def evaluate(actor: Optional[Actor], env_cfg: EnvConfig, n_envs: int, device, se
         for k in stats:
             stats[k] = torch.where(first, info[k], stats[k])
         finished |= done
-    return {
-        "found_frac": float(stats["found_frac"].mean()),
-        "all_found": float((stats["found_frac"] >= 1.0).float().mean()),
-        "length": float(stats["length"].mean()),
-        "coverage": float(stats["coverage"].mean()),
-    }
+    out = {k: float(stats[k].mean()) for k in env.STATS}
+    if world == "search":
+        out["all_found"] = float((stats["found_frac"] >= 1.0).float().mean())
+    else:
+        out["by_level"] = {}
+        for level in range(1, 5):
+            sel = stats["difficulty"] == level
+            if bool(sel.any()):
+                out["by_level"][str(level)] = {k: float(stats[k][sel].mean()) for k in env.STATS}
+    return out
+
+
+def _fmt_metrics(m: Dict) -> str:
+    return " | ".join(f"{k} {v:.3f}" for k, v in m.items() if isinstance(v, float))
 
 
 # ── обучение ─────────────────────────────────────────────────────────────────
-def build_env_config(args) -> EnvConfig:
+def build_env_config(args):
+    if args.world == "rescue":
+        return RescueConfig(
+            n_envs=args.n_envs, n_drones=args.n_drones, min_drones=args.min_drones, n_victims=args.n_victims,
+            max_steps=args.max_steps, difficulty_min=args.difficulty_min, difficulty_max=args.difficulty_max,
+            share_map=args.share_coverage,
+        )
     return EnvConfig(
         n_envs=args.n_envs, n_drones=args.n_drones, min_drones=args.min_drones, n_targets=args.n_targets,
         n_decoys=args.n_decoys, n_obstacles=args.n_obstacles, grid=args.grid, max_steps=args.max_steps,
@@ -127,11 +162,13 @@ def train(args) -> Dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     env_cfg = build_env_config(args)
-    env = SearchEnv(env_cfg, device, seed=args.seed)
+    env_cls, actor_cls, _ = WORLDS[args.world]
+    env = env_cls(env_cfg, device, seed=args.seed)
+    success_key = env.SUCCESS
     actor_kwargs = {"hidden": args.hidden, "comm": args.comm, "comm_radius": args.comm_radius,
                     "comm_rounds": args.comm_rounds}
-    actor = Actor(env_cfg, **actor_kwargs).to(device)
-    critic = Critic(env_cfg).to(device)
+    actor = actor_cls(env_cfg, **actor_kwargs).to(device)
+    critic = Critic(env_cls.state_dim(env_cfg)).to(device)
     if args.init_from:
         # дообучение: берём готовый рой; новые модули (связь CIDA) стартуют с нулевым выходом,
         # поэтому в начале рой ведёт себя ровно как исходный и учится только новому
@@ -156,16 +193,16 @@ def train(args) -> Dict:
     steps_per_iter = T * B * N
     iters = math.ceil(args.total_steps / steps_per_iter) if args.total_steps else args.iters
     n_params = sum(p.numel() for p in actor.parameters())
-    print(f"[cida-swarm] actor params={n_params:,} device={device} worlds={B} drones={env_cfg.min_drones}-{N} "
-          f"targets={env_cfg.n_targets} decoys={env_cfg.n_decoys} obstacles={env_cfg.n_obstacles} "
-          f"share_coverage={env_cfg.share_coverage} comm={args.comm} iters={iters} (~{iters * steps_per_iter / 1e9:.2f}B agent-steps)",
-          flush=True)
+    print(f"[cida-swarm] world={args.world} actor params={n_params:,} device={device} worlds={B} "
+          f"drones={env_cfg.min_drones}-{N} share_map={args.share_coverage} comm={args.comm} "
+          f"iters={iters} (~{iters * steps_per_iter / 1e9:.2f}B agent-steps)", flush=True)
 
     obs = env.reset()
     state = env.state()
     history = []
-    ep_sum = {k: torch.zeros((), device=device) for k in EPISODE_STATS}
+    ep_sum = {k: torch.zeros((), device=device) for k in env.STATS}
     ep_count = torch.zeros((), device=device)
+    best, best_score = None, -1.0
     t0 = time.time()
     eval_seconds = 0.0
     timing = {"collect": 0.0, "update": 0.0}
@@ -188,7 +225,7 @@ def train(args) -> Dict:
                 actions = dist.sample()
                 buf_obs.append(obs)
                 buf_state.append(state)
-                buf_people.append(env.people_map())
+                buf_people.append(env.belief_target())
                 buf_act.append(actions)
                 buf_logp.append(dist.log_prob(actions))
                 buf_val.append(value.float() * ret_norm.std + ret_norm.mean)
@@ -196,7 +233,7 @@ def train(args) -> Dict:
                 state = env.state()
                 buf_rew.append(reward)
                 buf_done.append(done.float())
-                for k in EPISODE_STATS:
+                for k in env.STATS:
                     ep_sum[k] += (info[k] * done).sum()
                 ep_count += done.sum()
             with autocast(device):
@@ -265,12 +302,12 @@ def train(args) -> Dict:
 
         if it % args.log_every == 0:
             cnt = ep_count.item()
-            msg = (" | ".join(f"{k} {ep_sum[k].item() / cnt:.3f}" for k in EPISODE_STATS)
+            msg = (" | ".join(f"{k} {ep_sum[k].item() / cnt:.3f}" for k in env.STATS)
                    if cnt else "no episodes yet")
             print(f"it {it:5d}/{iters} | {msg} | entropy {entropy.item():.3f} | v_loss {v_loss.item():.3f} | "
                   f"{agent_steps / (time.time() - t0 - eval_seconds):,.0f} agent-steps/s "
                   f"(collect {timing['collect'] / max(sum(timing.values()), 1e-9):.0%})", flush=True)
-            ep_sum = {k: torch.zeros((), device=device) for k in EPISODE_STATS}
+            ep_sum = {k: torch.zeros((), device=device) for k in env.STATS}
             ep_count.zero_()
 
         if it % args.eval_every == 0 or it == iters:
@@ -278,16 +315,21 @@ def train(args) -> Dict:
             metrics = evaluate(actor, env_cfg, args.eval_envs, device)
             metrics.update(iter=it, agent_steps=agent_steps, minutes=(time.time() - t0) / 60)
             history.append(metrics)
-            print(f"[eval] it {it} | found {metrics['found_frac']:.3f} | all found {metrics['all_found']:.3f} "
-                  f"| length {metrics['length']:.1f} | coverage {metrics['coverage']:.3f}", flush=True)
-            torch.save({"env_config": env_cfg.to_dict(), "actor_kwargs": actor_kwargs, "actor": actor.state_dict(),
-                        "critic": critic.state_dict()}, out_dir / "model.pt")
+            levels = " ".join(f"L{k}:{v[success_key]:.2f}" for k, v in metrics.get("by_level", {}).items())
+            print(f"[eval] it {it} | {_fmt_metrics(metrics)}" + (f" | {levels}" if levels else ""), flush=True)
+            ckpt = {"world": args.world, "env_config": env_cfg.to_dict(), "actor_kwargs": actor_kwargs,
+                    "actor": actor.state_dict(), "critic": critic.state_dict(), "iter": it}
+            torch.save(ckpt, out_dir / "model.pt")
+            if metrics[success_key] > best_score:
+                # лучшая версия сохраняется отдельно: дообучение может со временем испортить рой
+                best, best_score = metrics, metrics[success_key]
+                torch.save(ckpt, out_dir / "model_best.pt")
             eval_seconds += time.time() - t_eval
 
     train_seconds = time.time() - t0 - eval_seconds
     random_metrics = evaluate(None, env_cfg, args.eval_envs, device)
-    print(f"[eval] random policy | found {random_metrics['found_frac']:.3f} "
-          f"| all found {random_metrics['all_found']:.3f} | length {random_metrics['length']:.1f}", flush=True)
+    print(f"[eval] random policy | {_fmt_metrics(random_metrics)}", flush=True)
+    print(f"[eval] best it {best['iter']} | {_fmt_metrics(best)}", flush=True)
     result = {
         "name": args.name or out_dir.name,
         "env_config": env_cfg.to_dict(),
@@ -298,6 +340,7 @@ def train(args) -> Dict:
         "agent_steps_per_s": agent_steps / max(train_seconds, 1e-9),
         "timing_seconds": timing,
         "final": history[-1],
+        "best": best,
         "random": random_metrics,
         "history": history,
     }
@@ -310,10 +353,14 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--name", default=None)
     ap.add_argument("--out", default="runs/swarm")
     # среда
+    ap.add_argument("--world", choices=list(WORLDS), default="search", help="search — поиск, rescue — спасательная миссия")
     ap.add_argument("--n-envs", type=int, default=8192)
     ap.add_argument("--n-drones", type=int, default=8)
     ap.add_argument("--min-drones", type=int, default=4)
     ap.add_argument("--n-targets", type=int, default=8)
+    ap.add_argument("--n-victims", type=int, default=3, help="rescue: пострадавших в здании")
+    ap.add_argument("--difficulty-min", type=int, default=1, help="rescue: сложность миров от")
+    ap.add_argument("--difficulty-max", type=int, default=4, help="rescue: сложность миров до")
     ap.add_argument("--n-decoys", type=int, default=4)
     ap.add_argument("--n-obstacles", type=int, default=6)
     ap.add_argument("--grid", type=int, default=24)
@@ -324,7 +371,8 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--share-coverage", action="store_true", help="стигмергия: общая карта исследованного")
     # модель и PPO
     ap.add_argument("--hidden", type=int, default=256)
-    ap.add_argument("--comm", choices=["none", "cida"], default="none", help="связь между дронами")
+    ap.add_argument("--comm", choices=["none", "attn", "cida"], default="none",
+                    help="связь: none — нет, attn — обычное внимание, cida — внимание со смещением разногласием")
     ap.add_argument("--comm-radius", type=float, default=0.3, help="радиус связи в долях поля")
     ap.add_argument("--comm-rounds", type=int, default=2)
     ap.add_argument("--belief-coef", type=float, default=0.1)

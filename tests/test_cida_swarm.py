@@ -137,7 +137,7 @@ class TestPolicy:
     def test_actor_critic_shapes(self):
         env = make_env()
         obs = env.reset()
-        actor, critic = Actor(env.cfg, hidden=32), Critic(env.cfg, hidden=32)
+        actor, critic = Actor(env.cfg, hidden=32), Critic(SearchEnv.state_dim(env.cfg), hidden=32)
         assert actor(obs).shape == (8, 4, N_ACTIONS)
         assert critic(env.state()).shape == (8,)
 

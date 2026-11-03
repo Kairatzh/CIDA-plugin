@@ -19,7 +19,14 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from .env import DET_FEATURES, N_ACTIONS, SELF_FEATURES, EnvConfig, SearchEnv
+from .env import DET_FEATURES, N_ACTIONS, SELF_FEATURES, EnvConfig
+from .rescue import COARSE_CHANNELS as RESCUE_COARSE_CHANNELS
+from .rescue import N_ACTIONS as RESCUE_N_ACTIONS
+from .rescue import SELF_FEATURES as RESCUE_SELF_FEATURES
+from .rescue import WINDOW_CHANNELS as RESCUE_WINDOW_CHANNELS
+from .rescue import RescueConfig
+
+COMM_TYPES = ("none", "attn", "cida")
 
 
 def _mlp(d_in: int, d_hidden: int, d_out: int) -> nn.Sequential:
@@ -75,14 +82,19 @@ class CidaComm(nn.Module):
     в начале обучения рой ведёт себя как без связи и учится пользоваться ею постепенно.
     """
 
-    def __init__(self, hidden: int, cells: int, d_comm: int = 64, rounds: int = 2, radius: float = 0.3):
+    def __init__(self, hidden: int, cells: int, d_comm: int = 64, rounds: int = 2, radius: float = 0.3,
+                 disagreement_bias: bool = True):
         super().__init__()
         self.rounds, self.radius, self.d_comm = rounds, radius, d_comm
         self.belief = nn.Linear(hidden, cells)
         self.q = nn.Linear(hidden, d_comm)
         self.k = nn.Linear(hidden + cells, d_comm)
         self.v = nn.Linear(hidden + cells, d_comm)
-        self.alpha = nn.Parameter(torch.tensor(2.0))
+        # без смещения разногласием это обычное внимание между агентами (как в TarMAC) — базовая линия
+        if disagreement_bias:
+            self.alpha = nn.Parameter(torch.tensor(2.0))
+        else:
+            self.register_buffer("alpha", torch.zeros(()))
         self.o = nn.Linear(d_comm, hidden)
         nn.init.zeros_(self.o.weight)
         nn.init.zeros_(self.o.bias)
@@ -99,7 +111,9 @@ class CidaComm(nn.Module):
         has_any = can_hear.any(-1, keepdim=True)
         beliefs, attn = [], None
         for _ in range(self.rounds):
-            logit = self.belief(h)
+            # убеждение читает признаки, но не сдвигает их своей вспомогательной потерей:
+            # иначе задача «где люди» перетягивает признаки, нужные для полёта
+            logit = self.belief(h.detach())
             beliefs.append(logit)
             p = torch.sigmoid(logit.float())
             disagreement = (p.unsqueeze(-2) - p.unsqueeze(-3)).abs().mean(-1)        # (..., N, N)
@@ -108,22 +122,28 @@ class CidaComm(nn.Module):
             scores = (q @ k.transpose(-1, -2)).float() / math.sqrt(self.d_comm) + self.alpha * disagreement
             attn = torch.softmax(scores.masked_fill(~can_hear, -1e9), -1) * has_any
             h = h + self.o((attn.to(v.dtype) @ v))
-        beliefs.append(self.belief(h))
+        beliefs.append(self.belief(h.detach()))
         return h, {"beliefs": beliefs, "attn": attn}
+
+
+def make_comm(comm: str, hidden: int, cells: int, rounds: int, radius: float) -> Optional[CidaComm]:
+    """none — без связи; attn — обычное внимание между дронами; cida — внимание со смещением разногласием."""
+    if comm == "none":
+        return None
+    return CidaComm(hidden, cells, rounds=rounds, radius=radius, disagreement_bias=(comm == "cida"))
 
 
 class Actor(nn.Module):
     def __init__(self, env_cfg: EnvConfig, hidden: int = 256, comm: str = "none",
                  comm_radius: float = 0.3, comm_rounds: int = 2):
         super().__init__()
-        if comm not in ("none", "cida"):
-            raise ValueError(f"comm должен быть none или cida, а не {comm}")
+        if comm not in COMM_TYPES:
+            raise ValueError(f"comm должен быть одним из {COMM_TYPES}, а не {comm}")
         self.det_enc = _mlp(DET_FEATURES, hidden, hidden)
         self.map_enc = MapEncoder(env_cfg.grid, hidden)
         self.self_enc = nn.Sequential(nn.Linear(SELF_FEATURES, hidden), nn.ReLU())
         self.trunk = nn.Sequential(nn.Linear(3 * hidden, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU())
-        self.comm = (CidaComm(hidden, self.map_enc.coarse ** 2, rounds=comm_rounds, radius=comm_radius)
-                     if comm == "cida" else None)
+        self.comm = make_comm(comm, hidden, self.map_enc.coarse ** 2, comm_rounds, comm_radius)
         self.head = nn.Linear(hidden, N_ACTIONS)
         nn.init.zeros_(self.head.bias)
         nn.init.normal_(self.head.weight, std=0.01)
@@ -147,13 +167,53 @@ class Actor(nn.Module):
         return (logits, aux) if return_aux else logits
 
 
+class RescueActor(nn.Module):
+    """
+    Мозг дрона для спасательной миссии: окно вокруг себя (стены, завалы, пострадавшие с весом, пожар, другие дроны,
+    исследованное, выход, кто уже держит человека) + грубая карта здания + о себе. Действие — направление × «взять».
+    """
+
+    def __init__(self, env_cfg: RescueConfig, hidden: int = 256, comm: str = "none",
+                 comm_radius: float = 0.35, comm_rounds: int = 2):
+        super().__init__()
+        if comm not in COMM_TYPES:
+            raise ValueError(f"comm должен быть одним из {COMM_TYPES}, а не {comm}")
+        win = (2 * env_cfg.view + 1) ** 2
+        self.block_cells = float((env_cfg.grid // env_cfg.coarse) ** 2)  # клеток в блоке грубой карты
+        # масштаб каналов окна: вес завала и человека до 3, дронов на клетке до ~3, шагов до выхода до ~100
+        self.register_buffer("scale", torch.tensor([1, 3, 3, 1, 3, 1, 1, 3, 100], dtype=torch.float)[:, None],
+                             persistent=False)
+        self.win_enc = nn.Sequential(nn.Linear(RESCUE_WINDOW_CHANNELS * win, hidden), nn.ReLU(),
+                                     nn.Linear(hidden, hidden), nn.ReLU())
+        self.coarse_enc = nn.Sequential(nn.Linear(RESCUE_COARSE_CHANNELS * env_cfg.coarse ** 2, hidden), nn.ReLU())
+        self.self_enc = nn.Sequential(nn.Linear(RESCUE_SELF_FEATURES, hidden), nn.ReLU())
+        self.trunk = nn.Sequential(nn.Linear(3 * hidden, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU())
+        self.comm = make_comm(comm, hidden, env_cfg.coarse ** 2, comm_rounds, comm_radius)
+        self.head = nn.Linear(hidden, RESCUE_N_ACTIONS)
+        nn.init.zeros_(self.head.bias)
+        nn.init.normal_(self.head.weight, std=0.01)
+
+    def encode(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        w = (obs["window"].float() / self.scale).flatten(-2)
+        c = (obs["coarse"].float() / self.block_cells).flatten(-2)
+        return self.trunk(torch.cat([self.win_enc(w), self.coarse_enc(c), self.self_enc(obs["self"])], -1))
+
+    def forward(self, obs: Dict[str, torch.Tensor], return_aux: bool = False):
+        h = self.encode(obs)
+        aux: Optional[Dict] = None
+        if self.comm is not None:
+            h, aux = self.comm(h, obs["pos"], obs["active"])
+        logits = self.head(h)
+        return (logits, aux) if return_aux else logits
+
+
 class Critic(nn.Module):
     """Видит весь мир (только при обучении) и оценивает общую награду команды (в нормированной шкале)."""
 
-    def __init__(self, env_cfg: EnvConfig, hidden: int = 512):
+    def __init__(self, state_dim: int, hidden: int = 512):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(SearchEnv.state_dim(env_cfg), hidden), nn.ReLU(),
+            nn.Linear(state_dim, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, 1),
         )
