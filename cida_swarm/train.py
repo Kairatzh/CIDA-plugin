@@ -297,7 +297,7 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--iters", type=int, default=500)
     ap.add_argument("--rollout", type=int, default=32)
     ap.add_argument("--epochs", type=int, default=3)
-    ap.add_argument("--minibatch-size", type=int, default=16384, help="миров-моментов в минибатче")
+    ap.add_argument("--minibatch-size", type=int, default=65536, help="миров-моментов в минибатче")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--lam", type=float, default=0.95)

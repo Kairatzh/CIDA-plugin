@@ -34,7 +34,6 @@ DIRECTIONS = torch.tensor([
 N_ACTIONS = len(DIRECTIONS)
 DET_FEATURES = 4   # dx, dy, уверенность, валидность
 SELF_FEATURES = 6  # x, y, vx, vy, доля прошедшего времени, доля активных дронов
-MAP_CHANNELS = 3   # исследовано, препятствия, где я
 
 
 @dataclass

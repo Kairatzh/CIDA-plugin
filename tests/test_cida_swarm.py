@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from cida_swarm.env import DET_FEATURES, N_ACTIONS, SELF_FEATURES, EnvConfig, SearchEnv
-from cida_swarm.policy import Actor, Critic
+from cida_swarm.policy import Actor, Critic, MapEncoder
 from cida_swarm.train import evaluate, parse_args, train
 
 SMALL = dict(n_envs=8, n_drones=4, min_drones=2, n_targets=3, n_decoys=2, grid=12, max_steps=20)
@@ -148,6 +148,29 @@ class TestPolicy:
         stacked = {k: torch.stack([o1[k], o2[k]]) for k in o1}
         actor = Actor(env.cfg, hidden=32)
         assert actor(stacked).shape == (2, 8, 4, N_ACTIONS)
+
+    def test_map_window_sees_walls_and_visited_cells(self):
+        enc = MapEncoder(grid=12, hidden=8, window=3, coarse=6)
+        cov = torch.zeros(1, 1, 144, dtype=torch.bool)
+        obstacles = torch.zeros(1, 144, dtype=torch.bool)
+        cov[0, 0, 1 * 12 + 1] = True       # был в клетке (1, 1)
+        obstacles[0, 0 * 12 + 1] = True    # стена в (0, 1)
+        cell = torch.tensor([[0]])         # дрон в углу (0, 0)
+        g = 12
+        lx = (cell // g).unsqueeze(-1) + enc.dx
+        ly = (cell % g).unsqueeze(-1) + enc.dy
+        inside = (lx >= 0) & (lx < g) & (ly >= 0) & (ly < g)
+        assert inside.sum() == 4                          # в углу видно только 2×2 клетки поля
+        idx = lx.clamp(0, g - 1) * g + ly.clamp(0, g - 1)
+        near_obst = obstacles.unsqueeze(-2).gather(-1, idx) | ~inside
+        near_cov = cov.gather(-1, idx) & inside
+        assert near_obst[0, 0].tolist() == [True, True, True, True, False, True, True, False, False]
+        assert near_cov[0, 0].tolist() == [False] * 8 + [True]
+        assert enc(cov, obstacles, cell).shape == (1, 1, 8)
+
+    def test_map_encoder_rejects_bad_grid(self):
+        with pytest.raises(ValueError):
+            MapEncoder(grid=10, hidden=8, coarse=6)
 
     def test_actor_ignores_detection_order(self):
         env = make_env(p_detect=1.0, false_pos_rate=0.0)

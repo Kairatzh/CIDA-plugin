@@ -3,7 +3,7 @@ policy.py — мозг дрона (актор) и централизованны
 
 Мозг видит три вещи:
     * находки глаз — набор переменной длины (внимание/пулинг, порядок не важен);
-    * карту — где уже был, где препятствия, где я сейчас (маленькая свёрточная сеть);
+    * карту — окно вокруг себя и грубую карту всего поля (где был, где препятствия);
     * себя — позиция, скорость, время, размер команды.
 Веса общие для всех дронов, поэтому рой работает при любом их числе.
 Модули связи CIDA добавляются на следующих шагах между `encode` и `head`.
@@ -15,9 +15,8 @@ from typing import Dict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from .env import DET_FEATURES, MAP_CHANNELS, N_ACTIONS, SELF_FEATURES, EnvConfig, SearchEnv
+from .env import DET_FEATURES, N_ACTIONS, SELF_FEATURES, EnvConfig, SearchEnv
 
 
 def _mlp(d_in: int, d_hidden: int, d_out: int) -> nn.Sequential:
@@ -25,26 +24,40 @@ def _mlp(d_in: int, d_hidden: int, d_out: int) -> nn.Sequential:
 
 
 class MapEncoder(nn.Module):
-    """Карта G×G с каналами [исследовано, препятствия, я] → вектор признаков."""
+    """
+    Карта дрона = окно вокруг него (стены рядом, где уже был) + грубая карта всего поля (куда лететь дальше).
+    Так устроено зрение у навигационных роботов, и это несколько маленьких матричных умножений вместо
+    свёрток по всей карте: свёртки с узкими каналами упирали обучение на A100 в пропускную способность памяти.
+    """
 
-    def __init__(self, grid: int, hidden: int):
+    def __init__(self, grid: int, hidden: int, window: int = 7, coarse: int = 6):
         super().__init__()
-        self.grid = grid
-        self.conv = nn.Sequential(
-            nn.Conv2d(MAP_CHANNELS, 16, 3, padding=1), nn.ReLU(),
-            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.ReLU(),
-            nn.Conv2d(32, 32, 3, stride=2, padding=1), nn.ReLU(),
-        )
-        side = (grid + 3) // 4
-        self.out = nn.Sequential(nn.Linear(32 * side * side, hidden), nn.ReLU())
+        if grid % coarse:
+            raise ValueError(f"grid={grid} должен делиться на coarse={coarse}")
+        self.grid, self.coarse = grid, coarse
+        r = window // 2
+        offsets = torch.arange(-r, r + 1)
+        self.register_buffer("dx", offsets.repeat_interleave(window), persistent=False)
+        self.register_buffer("dy", offsets.repeat(window), persistent=False)
+        d_in = 2 * window * window + 2 * coarse * coarse
+        self.net = nn.Sequential(nn.Linear(d_in, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU())
+
+    def _coarse(self, m: torch.Tensor) -> torch.Tensor:
+        g, c = self.grid, self.coarse
+        return m.unflatten(-1, (c, g // c, c, g // c)).float().mean((-3, -1)).flatten(-2)
 
     def forward(self, cov: torch.Tensor, obstacles: torch.Tensor, cell: torch.Tensor) -> torch.Tensor:
         """cov (..., N, G²) bool, obstacles (..., G²) bool, cell (..., N) → (..., N, hidden)."""
-        lead, g = cov.shape[:-1], self.grid
-        me = F.one_hot(cell, g * g)
+        g = self.grid
         obst = obstacles.unsqueeze(-2).expand_as(cov)
-        x = torch.stack([cov, obst, me.bool()], -2).reshape(-1, MAP_CHANNELS, g, g).float()
-        return self.out(self.conv(x).flatten(1)).view(*lead, -1)
+        lx = (cell // g).unsqueeze(-1) + self.dx
+        ly = (cell % g).unsqueeze(-1) + self.dy
+        inside = (lx >= 0) & (lx < g) & (ly >= 0) & (ly < g)
+        idx = lx.clamp(0, g - 1) * g + ly.clamp(0, g - 1)
+        near_cov = cov.gather(-1, idx) & inside
+        near_obst = obst.gather(-1, idx) | ~inside          # край поля — тоже стена
+        x = torch.cat([near_cov.float(), near_obst.float(), self._coarse(cov), self._coarse(obst)], -1)
+        return self.net(x)
 
 
 class Actor(nn.Module):
