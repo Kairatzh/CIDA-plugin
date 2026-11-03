@@ -4,6 +4,7 @@ train.py — обучение роя через MAPPO (общая политик
 Пример (Colab A100):
     python -m cida_swarm.train --total-steps 2e9 --out runs/nocomm_s0
     python -m cida_swarm.train --total-steps 2e9 --share-coverage --out runs/stigmergy_s0
+    python -m cida_swarm.train --total-steps 2e9 --comm cida --out runs/cida_s0
 
 Чтобы A100 не простаивал: тысячи миров параллельно, bf16, шаг среды без синхронизаций с CPU,
 статистика копится на GPU и читается только при логировании.
@@ -126,7 +127,9 @@ def train(args) -> Dict:
 
     env_cfg = build_env_config(args)
     env = SearchEnv(env_cfg, device, seed=args.seed)
-    actor = Actor(env_cfg, args.hidden).to(device)
+    actor_kwargs = {"hidden": args.hidden, "comm": args.comm, "comm_radius": args.comm_radius,
+                    "comm_rounds": args.comm_rounds}
+    actor = Actor(env_cfg, **actor_kwargs).to(device)
     critic = Critic(env_cfg).to(device)
     params = list(actor.parameters()) + list(critic.parameters())
     opt = torch.optim.Adam(params, lr=args.lr, eps=1e-5)
@@ -142,7 +145,7 @@ def train(args) -> Dict:
     n_params = sum(p.numel() for p in actor.parameters())
     print(f"[cida-swarm] actor params={n_params:,} device={device} worlds={B} drones={env_cfg.min_drones}-{N} "
           f"targets={env_cfg.n_targets} decoys={env_cfg.n_decoys} obstacles={env_cfg.n_obstacles} "
-          f"share_coverage={env_cfg.share_coverage} iters={iters} (~{iters * steps_per_iter / 1e9:.2f}B agent-steps)",
+          f"share_coverage={env_cfg.share_coverage} comm={args.comm} iters={iters} (~{iters * steps_per_iter / 1e9:.2f}B agent-steps)",
           flush=True)
 
     obs = env.reset()
@@ -163,6 +166,7 @@ def train(args) -> Dict:
         # 1) сбор опыта
         t_start = _sync(device)
         buf_obs, buf_state, buf_act, buf_logp, buf_val, buf_rew, buf_done = [], [], [], [], [], [], []
+        buf_people = []
         with torch.no_grad():
             for _ in range(T):
                 with autocast(device):
@@ -171,6 +175,7 @@ def train(args) -> Dict:
                 actions = dist.sample()
                 buf_obs.append(obs)
                 buf_state.append(state)
+                buf_people.append(env.people_map())
                 buf_act.append(actions)
                 buf_logp.append(dist.log_prob(actions))
                 buf_val.append(value.float() * ret_norm.std + ret_norm.mean)
@@ -204,6 +209,7 @@ def train(args) -> Dict:
         # 3) PPO; пример = (мир, момент времени) со всеми его дронами, неактивные дроны маскируются
         flat_obs = {k: v.flatten(0, 1) for k, v in _stack(buf_obs).items()}
         flat_state = torch.stack(buf_state).flatten(0, 1)
+        flat_people = torch.stack(buf_people).flatten(0, 1)
         flat_act = torch.stack(buf_act).flatten(0, 1)
         flat_logp = torch.stack(buf_logp).flatten(0, 1)
         flat_adv = adv.flatten()
@@ -219,13 +225,21 @@ def train(args) -> Dict:
                 a = flat_adv[idx]
                 a = ((a - a.mean()) / (a.std() + 1e-8))[:, None]
                 with autocast(device):
-                    logits, v = run_actor(o), run_critic(flat_state[idx])
+                    (logits, aux), v = run_actor(o, return_aux=True), run_critic(flat_state[idx])
                 dist = Categorical(logits=logits.float())
                 ratio = (dist.log_prob(flat_act[idx]) - flat_logp[idx]).exp()
                 pg = -_masked_mean(torch.min(ratio * a, ratio.clamp(1 - args.clip, 1 + args.clip) * a), mask)
                 entropy = _masked_mean(dist.entropy(), mask)
                 v_loss = F.mse_loss(v.float(), flat_ret[idx])
                 loss = pg + args.vf_coef * v_loss - args.ent_coef * entropy
+                if aux is not None:
+                    # убеждения учатся предсказывать, где люди: так у сообщений и у расхождения есть смысл
+                    truth = flat_people[idx].float()[:, None].expand(-1, mask.shape[1], -1)
+                    b_loss = sum(
+                        _masked_mean(F.binary_cross_entropy_with_logits(b.float(), truth, reduction="none").mean(-1), mask)
+                        for b in aux["beliefs"]
+                    ) / len(aux["beliefs"])
+                    loss = loss + args.belief_coef * b_loss
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
@@ -249,7 +263,7 @@ def train(args) -> Dict:
             history.append(metrics)
             print(f"[eval] it {it} | found {metrics['found_frac']:.3f} | all found {metrics['all_found']:.3f} "
                   f"| length {metrics['length']:.1f} | coverage {metrics['coverage']:.3f}", flush=True)
-            torch.save({"env_config": env_cfg.to_dict(), "hidden": args.hidden, "actor": actor.state_dict()},
+            torch.save({"env_config": env_cfg.to_dict(), "actor_kwargs": actor_kwargs, "actor": actor.state_dict()},
                        out_dir / "model.pt")
             eval_seconds += time.time() - t_eval
 
@@ -293,6 +307,10 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--share-coverage", action="store_true", help="стигмергия: общая карта исследованного")
     # модель и PPO
     ap.add_argument("--hidden", type=int, default=256)
+    ap.add_argument("--comm", choices=["none", "cida"], default="none", help="связь между дронами")
+    ap.add_argument("--comm-radius", type=float, default=0.3, help="радиус связи в долях поля")
+    ap.add_argument("--comm-rounds", type=int, default=2)
+    ap.add_argument("--belief-coef", type=float, default=0.1)
     ap.add_argument("--total-steps", type=float, default=None, help="бюджет шагов дронов; задаёт число итераций")
     ap.add_argument("--iters", type=int, default=500)
     ap.add_argument("--rollout", type=int, default=32)

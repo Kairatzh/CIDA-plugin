@@ -198,3 +198,75 @@ def test_train_smoke(tmp_path):
     assert result["agent_steps_per_s"] > 0
     saved = json.loads((tmp_path / "run" / "result.json").read_text())
     assert "random" in saved and (tmp_path / "run" / "model.pt").exists()
+
+
+class TestCidaComm:
+    def test_people_map_marks_alive_people_only(self):
+        env = make_env(n_targets=2)
+        env.reset()
+        env.targets[0] = torch.tensor([[0.05, 0.05], [0.95, 0.95]])
+        env.alive[0] = torch.tensor([True, False])
+        m = env.people_map(coarse=6)[0]
+        assert m.shape == (36,) and m[0] and m.sum() == 1
+
+    def test_cida_actor_shapes_and_beliefs(self):
+        env = make_env()
+        obs = env.reset()
+        actor = Actor(env.cfg, hidden=32, comm="cida", comm_rounds=2)
+        logits, aux = actor(obs, return_aux=True)
+        assert logits.shape == (8, 4, N_ACTIONS)
+        assert len(aux["beliefs"]) == 3 and aux["beliefs"][0].shape == (8, 4, 36)
+        assert aux["attn"].shape == (8, 4, 4)
+
+    def test_comm_starts_as_no_comm(self):
+        env = make_env()
+        obs = env.reset()
+        plain = Actor(env.cfg, hidden=32)
+        cida = Actor(env.cfg, hidden=32, comm="cida")
+        missing, unexpected = cida.load_state_dict(plain.state_dict(), strict=False)
+        assert not unexpected and all(k.startswith("comm.") for k in missing)
+        assert torch.allclose(plain(obs), cida(obs), atol=1e-6)  # выход связи обнулён на старте
+
+    def test_drones_hear_only_active_neighbours_in_range(self):
+        env = make_env(n_obstacles=0)
+        obs = env.reset()
+        env.active[:] = torch.tensor([True, True, True, False])
+        env.pos[:, 0] = 0.1
+        env.pos[:, 1] = 0.15   # рядом с 0
+        env.pos[:, 2] = 0.9    # далеко
+        env.pos[:, 3] = 0.1    # рядом, но неактивен
+        obs = env.observe()
+        actor = Actor(env.cfg, hidden=32, comm="cida", comm_radius=0.3)
+        _, aux = actor(obs, return_aux=True)
+        attn = aux["attn"]
+        assert torch.allclose(attn[:, 0, 1], torch.ones(8))
+        assert attn[:, 0, 2].eq(0).all() and attn[:, 0, 3].eq(0).all()
+        assert attn[:, 2].eq(0).all()          # дальнему некого слушать
+
+    def test_messages_get_gradients(self):
+        env = make_env()
+        obs = env.reset()
+        actor = Actor(env.cfg, hidden=32, comm="cida")
+        logits, aux = actor(obs, return_aux=True)
+        (logits.sum() + sum(b.sum() for b in aux["beliefs"])).backward()
+        assert actor.comm.o.weight.grad.abs().sum() > 0
+        assert actor.comm.belief.weight.grad.abs().sum() > 0
+
+    def test_invalid_comm(self):
+        with pytest.raises(ValueError):
+            Actor(EnvConfig(**SMALL), hidden=8, comm="radio")
+
+
+def test_train_cida_smoke_and_render(tmp_path):
+    args = parse_args([
+        "--n-envs", "8", "--n-drones", "4", "--min-drones", "2", "--n-targets", "3", "--grid", "12",
+        "--max-steps", "15", "--hidden", "16", "--iters", "2", "--rollout", "8", "--epochs", "1",
+        "--minibatch-size", "32", "--log-every", "1", "--eval-every", "2", "--eval-envs", "8",
+        "--comm", "cida", "--device", "cpu", "--out", str(tmp_path / "cida"),
+    ])
+    train(args)
+    from cida_swarm.render import render
+    out = tmp_path / "swarm.gif"
+    summary = render([str(tmp_path / "cida" / "model.pt")], ["cida"], str(out), seed=1, fps=5)
+    assert out.exists() and out.stat().st_size > 0
+    assert summary[0]["steps"] >= 1

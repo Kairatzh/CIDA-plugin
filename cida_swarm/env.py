@@ -277,6 +277,13 @@ class SearchEnv:
             "active": self.active.clone(),    # (B, N)
         }
 
+    def people_map(self, coarse: int = 6) -> torch.Tensor:
+        """Где сейчас ненайденные люди на грубой карте coarse×coarse — правда для обучения убеждений (B, coarse²)."""
+        c = (self.targets * coarse).long().clamp_(0, coarse - 1)
+        idx = torch.where(self.alive, c[..., 0] * coarse + c[..., 1], torch.full_like(c[..., 0], coarse * coarse))
+        out = torch.zeros(self.cfg.n_envs, coarse * coarse + 1, dtype=torch.bool, device=self.device)
+        return out.scatter_(1, idx, True)[:, :-1]
+
     def state(self) -> torch.Tensor:
         """Полное состояние мира для централизованного критика (только при обучении)."""
         c = self.cfg
