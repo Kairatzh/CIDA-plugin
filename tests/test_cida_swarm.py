@@ -270,3 +270,30 @@ def test_train_cida_smoke_and_render(tmp_path):
     summary = render([str(tmp_path / "cida" / "model.pt")], ["cida"], str(out), seed=1, fps=5)
     assert out.exists() and out.stat().st_size > 0
     assert summary[0]["steps"] >= 1
+
+
+def test_warm_start_from_plain_swarm(tmp_path):
+    common = ["--n-envs", "8", "--n-drones", "4", "--min-drones", "2", "--n-targets", "3", "--grid", "12",
+              "--max-steps", "15", "--hidden", "16", "--rollout", "8", "--epochs", "1", "--minibatch-size", "32",
+              "--log-every", "1", "--eval-envs", "8", "--device", "cpu", "--share-coverage"]
+    train(parse_args(common + ["--iters", "2", "--eval-every", "2", "--out", str(tmp_path / "base")]))
+    base = torch.load(tmp_path / "base" / "model.pt", weights_only=False)
+    assert "critic" in base
+
+    # одна итерация разогрева критика: политика не должна измениться
+    train(parse_args(common + ["--iters", "1", "--eval-every", "1", "--comm", "cida", "--critic-warmup", "1",
+                               "--init-from", str(tmp_path / "base" / "model.pt"), "--out", str(tmp_path / "ft")]))
+    ft = torch.load(tmp_path / "ft" / "model.pt", weights_only=False)
+    for k, v in base["actor"].items():
+        assert torch.equal(v, ft["actor"][k]), k
+    assert any(k.startswith("comm.") for k in ft["actor"])
+
+
+def test_warm_start_rejects_incompatible_checkpoint(tmp_path):
+    common = ["--n-envs", "8", "--n-drones", "4", "--min-drones", "2", "--n-targets", "3", "--grid", "12",
+              "--max-steps", "15", "--rollout", "8", "--epochs", "1", "--minibatch-size", "32",
+              "--eval-envs", "8", "--device", "cpu", "--iters", "1", "--eval-every", "1"]
+    train(parse_args(common + ["--hidden", "16", "--out", str(tmp_path / "a")]))
+    with pytest.raises((ValueError, RuntimeError)):
+        train(parse_args(common + ["--hidden", "24", "--init-from", str(tmp_path / "a" / "model.pt"),
+                                   "--out", str(tmp_path / "b")]))

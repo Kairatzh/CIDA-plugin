@@ -5,6 +5,7 @@ train.py — обучение роя через MAPPO (общая политик
     python -m cida_swarm.train --total-steps 2e9 --out runs/nocomm_s0
     python -m cida_swarm.train --total-steps 2e9 --share-coverage --out runs/stigmergy_s0
     python -m cida_swarm.train --total-steps 2e9 --comm cida --out runs/cida_s0
+    python -m cida_swarm.train --comm cida --share-coverage --init-from runs/stigmergy_s0/model.pt         --critic-warmup 10 --lr 1e-4 --total-steps 1.5e9 --out runs/cida_ft_s0
 
 Чтобы A100 не простаивал: тысячи миров параллельно, bf16, шаг среды без синхронизаций с CPU,
 статистика копится на GPU и читается только при логировании.
@@ -131,6 +132,18 @@ def train(args) -> Dict:
                     "comm_rounds": args.comm_rounds}
     actor = Actor(env_cfg, **actor_kwargs).to(device)
     critic = Critic(env_cfg).to(device)
+    if args.init_from:
+        # дообучение: берём готовый рой; новые модули (связь CIDA) стартуют с нулевым выходом,
+        # поэтому в начале рой ведёт себя ровно как исходный и учится только новому
+        ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
+        missing, unexpected = actor.load_state_dict(ckpt["actor"], strict=False)
+        if unexpected or any(not k.startswith("comm.") for k in missing):
+            raise ValueError(f"несовместимый чекпойнт {args.init_from}: missing={missing}, unexpected={unexpected}")
+        if "critic" in ckpt:
+            critic.load_state_dict(ckpt["critic"])
+        print(f"[cida-swarm] init from {args.init_from}: новые модули {sorted({k.split('.')[0] for k in missing}) or '—'}, "
+              f"критик {'загружен' if 'critic' in ckpt else 'с нуля (разогрев ' + str(args.critic_warmup) + ' итераций)'}",
+              flush=True)
     params = list(actor.parameters()) + list(critic.parameters())
     opt = torch.optim.Adam(params, lr=args.lr, eps=1e-5)
     run_actor, run_critic = actor, critic
@@ -232,7 +245,11 @@ def train(args) -> Dict:
                 entropy = _masked_mean(dist.entropy(), mask)
                 v_loss = F.mse_loss(v.float(), flat_ret[idx])
                 loss = pg + args.vf_coef * v_loss - args.ent_coef * entropy
-                if aux is not None:
+                if it <= args.critic_warmup:
+                    # критик ещё не знает этот рой — пока он учится, политику не трогаем,
+                    # иначе шумные оценки испортят уже обученное поведение
+                    loss = args.vf_coef * v_loss
+                if aux is not None and it > args.critic_warmup:
                     # убеждения учатся предсказывать, где люди: так у сообщений и у расхождения есть смысл
                     truth = flat_people[idx].float()[:, None].expand(-1, mask.shape[1], -1)
                     b_loss = sum(
@@ -263,8 +280,8 @@ def train(args) -> Dict:
             history.append(metrics)
             print(f"[eval] it {it} | found {metrics['found_frac']:.3f} | all found {metrics['all_found']:.3f} "
                   f"| length {metrics['length']:.1f} | coverage {metrics['coverage']:.3f}", flush=True)
-            torch.save({"env_config": env_cfg.to_dict(), "actor_kwargs": actor_kwargs, "actor": actor.state_dict()},
-                       out_dir / "model.pt")
+            torch.save({"env_config": env_cfg.to_dict(), "actor_kwargs": actor_kwargs, "actor": actor.state_dict(),
+                        "critic": critic.state_dict()}, out_dir / "model.pt")
             eval_seconds += time.time() - t_eval
 
     train_seconds = time.time() - t0 - eval_seconds
@@ -311,6 +328,8 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--comm-radius", type=float, default=0.3, help="радиус связи в долях поля")
     ap.add_argument("--comm-rounds", type=int, default=2)
     ap.add_argument("--belief-coef", type=float, default=0.1)
+    ap.add_argument("--init-from", default=None, help="model.pt готового роя для дообучения")
+    ap.add_argument("--critic-warmup", type=int, default=0, help="итераций, когда учится только критик")
     ap.add_argument("--total-steps", type=float, default=None, help="бюджет шагов дронов; задаёт число итераций")
     ap.add_argument("--iters", type=int, default=500)
     ap.add_argument("--rollout", type=int, default=32)
