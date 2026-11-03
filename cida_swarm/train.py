@@ -224,7 +224,7 @@ def train(args) -> Dict:
                 dist = Categorical(logits=logits.float())
                 actions = dist.sample()
                 buf_obs.append(obs)
-                buf_state.append(state)
+                buf_state.append(state.half())  # состояние мира большое — храним в половинной точности
                 buf_people.append(env.belief_target())
                 buf_act.append(actions)
                 buf_logp.append(dist.log_prob(actions))
@@ -259,6 +259,7 @@ def train(args) -> Dict:
         # 3) PPO; пример = (мир, момент времени) со всеми его дронами, неактивные дроны маскируются
         flat_obs = {k: v.flatten(0, 1) for k, v in _stack(buf_obs).items()}
         flat_state = torch.stack(buf_state).flatten(0, 1)
+        del buf_obs, buf_state  # исходные списки больше не нужны — освобождаем память до PPO
         flat_people = torch.stack(buf_people).flatten(0, 1)
         flat_act = torch.stack(buf_act).flatten(0, 1)
         flat_logp = torch.stack(buf_logp).flatten(0, 1)
@@ -275,7 +276,7 @@ def train(args) -> Dict:
                 a = flat_adv[idx]
                 a = ((a - a.mean()) / (a.std() + 1e-8))[:, None]
                 with autocast(device):
-                    (logits, aux), v = run_actor(o, return_aux=True), run_critic(flat_state[idx])
+                    (logits, aux), v = run_actor(o, return_aux=True), run_critic(flat_state[idx].float())
                 dist = Categorical(logits=logits.float())
                 ratio = (dist.log_prob(flat_act[idx]) - flat_logp[idx]).exp()
                 pg = -_masked_mean(torch.min(ratio * a, ratio.clamp(1 - args.clip, 1 + args.clip) * a), mask)
