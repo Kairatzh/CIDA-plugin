@@ -183,7 +183,8 @@ class RescueActor(nn.Module):
     """
 
     def __init__(self, env_cfg: RescueConfig, hidden: int = 256, comm: str = "none",
-                 comm_radius: float = 1.5, comm_rounds: int = 2, memory: bool = False, roles: bool = False):
+                 comm_radius: float = 1.5, comm_rounds: int = 2, memory: bool = False, roles: bool = False,
+                 personas: bool = False):
         super().__init__()
         if comm not in COMM_TYPES:
             raise ValueError(f"comm должен быть одним из {COMM_TYPES}, а не {comm}")
@@ -200,6 +201,9 @@ class RescueActor(nn.Module):
         self.comm = make_comm(comm, hidden, env_cfg.coarse ** 2, comm_rounds, comm_radius)
         self.memory, self.hidden = memory, hidden
         self.role_enc = None
+        # постоянная личность каждого дрона (по его номеру): своя на всю жизнь, учится вместе с роем —
+        # обучение само решает, кто разведчик, а кто носильщик; с нуля, чтобы дообучение начиналось с прежнего
+        self.persona = nn.Parameter(torch.zeros(env_cfg.n_drones, hidden)) if personas else None
         if roles:
             # случайная роль на эпизод разбивает симметрию: одинаковые мозги могут разойтись по разным делам;
             # нулевая инициализация — дообучение стартует с прежнего поведения
@@ -223,6 +227,8 @@ class RescueActor(nn.Module):
         x = self.trunk(torch.cat([self.win_enc(w), self.coarse_enc(c), self.self_enc(obs["self"])], -1))
         if self.role_enc is not None:
             x = x + self.role_enc(obs["role"].to(x.dtype))
+        if self.persona is not None:
+            x = x + self.persona.to(x.dtype)
         return x
 
     @property

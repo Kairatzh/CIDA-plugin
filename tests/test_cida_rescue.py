@@ -258,6 +258,13 @@ class TestNoHints:
         act(env, 0, [STAY, STAY, STAY])
         assert not env.last["crowded"][0].any()                       # у входа тесно всегда
 
+    def test_each_drone_has_its_own_learned_personality(self):
+        env = make_env()
+        actor = RescueActor(env.cfg, hidden=16, personas=True)
+        assert actor.persona.shape == (3, 16) and actor.persona.abs().sum() == 0
+        actor(env.observe()).sum().backward()
+        assert actor.persona.grad.abs().sum(-1).gt(0).all()          # у каждого дрона своя личность учится
+
     def test_role_starts_silent_for_warm_start(self):
         env = make_env()
         base = RescueActor(env.cfg, hidden=16)
@@ -296,7 +303,7 @@ def test_diagnosis_splits_every_victim_into_one_cause(mute):
 
 def test_memory_swarm_trains_without_hints(tmp_path):
     result = train(parse_args(RESCUE_ARGS + ["--memory", "--comm", "cida", "--no-route-hint", "--hidden-weight",
-                                             "--hazard-chase", "0.5", "--curriculum", "--roles", "--crowd-penalty", "0.001",
+                                             "--hazard-chase", "0.5", "--curriculum", "--roles", "--personas", "--crowd-penalty", "0.001",
                                              "--iters", "5",
                                              "--eval-every", "5", "--out", str(tmp_path / "mem")]))
     assert 0.0 <= result["best"]["rescued_frac"] <= 1.0

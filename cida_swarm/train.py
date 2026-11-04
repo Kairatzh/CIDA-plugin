@@ -180,6 +180,10 @@ def train(args) -> Dict:
         if args.world != "rescue":
             raise ValueError("--roles пока есть только в мире rescue")
         actor_kwargs["roles"] = True
+    if args.personas:
+        if args.world != "rescue":
+            raise ValueError("--personas пока есть только в мире rescue")
+        actor_kwargs["personas"] = True
     actor = actor_cls(env_cfg, **actor_kwargs).to(device)
     critic = Critic(env_cls.state_dim(env_cfg)).to(device)
     if args.init_from:
@@ -187,7 +191,7 @@ def train(args) -> Dict:
         # поэтому в начале рой ведёт себя ровно как исходный и учится только новому
         ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
         missing, unexpected = actor.load_state_dict(ckpt["actor"], strict=False)
-        if unexpected or any(not k.startswith(("comm.", "gru.", "mem_out.", "role_enc.")) for k in missing):
+        if unexpected or any(not k.startswith(("comm.", "gru.", "mem_out.", "role_enc.", "persona")) for k in missing):
             raise ValueError(f"несовместимый чекпойнт {args.init_from}: missing={missing}, unexpected={unexpected}")
         if "critic" in ckpt:
             critic.load_state_dict(ckpt["critic"])
@@ -428,6 +432,7 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--memory", action="store_true", help="rescue: у дрона есть память (GRU)")
     ap.add_argument("--roles", action="store_true", help="rescue: случайная роль дрона на эпизод")
+    ap.add_argument("--personas", action="store_true", help="rescue: постоянная обучаемая личность каждого дрона")
     ap.add_argument("--comm", choices=["none", "attn", "cida"], default="none",
                     help="связь: none — нет, attn — обычное внимание, cida — внимание со смещением разногласием")
     ap.add_argument("--comm-radius", type=float, default=None,
