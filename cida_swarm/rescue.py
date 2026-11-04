@@ -20,6 +20,9 @@ rescue.py — мир «спасательная миссия» (CIDA-Rescue): р
       нужны тактики — обходить, отвлекать, разделяться;
     * penalty_crowd > 0 — свободный дрон, который жмётся к другому свободному дрону вне входа, получает штраф:
       рой не должен ходить толпой, когда работа требует разойтись.
+Подсказки убираются постепенно, как строительные леса: env.hint_prob — доля новых миров «с подсказками»
+(общая карта, дорожка к выходу, видимый вес, пожар не охотится). Обучение плавно снижает её от 1 до 0,
+и рой, выученный с подсказками, не слепнет разом, а учится заменять их памятью и радио.
 У каждого дрона на эпизод есть случайная «роль» (obs["role"]) — она разбивает симметрию одинаковых мозгов,
 чтобы дроны могли договориться, кто куда.
 
@@ -77,6 +80,17 @@ class RescueConfig:
     hidden_weight: bool = False   # вес человека виден только держащему его дрону
     hazard_chase: float = 0.0     # доля ходов, когда опасный человек идёт к ближайшему дрону
     penalty_crowd: float = 0.0    # за шаг за каждого свободного дрона, прижавшегося к другому свободному
+    # банк трудных карт: здания, где рой провалился, возвращаются с мутациями (больше завалов, люди в других местах)
+    bank_size: int = 0            # 0 — банка нет
+    bank_frac: float = 0.3        # доля новых миров из банка
+    bank_threshold: float = 0.5   # провал = вынесено меньше этой доли людей
+    # команда охотников (мир arena.ArenaEnv)
+    n_hunters: int = 0
+    stun_need: int = 2            # столько спасателей вплотную оглушают охотника
+    stun_steps: int = 12
+    reward_catch: float = 1.0     # охотнику за пойманного дрона
+    reward_stun: float = 0.2      # спасателям за оглушение (и столько же штраф охотникам)
+    hunter_approach: float = 0.01  # охотнику за клетку ближе к ближайшему дрону
     refresh_every: int = 32
 
     def __post_init__(self):
@@ -157,6 +171,12 @@ class RescueEnv:
         self.ep_lost = torch.zeros(b, device=dev)
         self.last = {}  # события последнего шага для демо: кто держит, кто ждёт помощи, кто толкает
         self.level_probs: Optional[torch.Tensor] = None  # вероятности уровней сложности (автокуррикулум)
+        self.hint_prob = 0.0                                      # доля новых миров с подсказками (леса)
+        self.hinted = torch.zeros(b, dtype=torch.bool, device=dev)
+        self.bank: Optional[Dict[str, torch.Tensor]] = None      # банк трудных карт (заводится при первом провале)
+        self.layout: Optional[Dict[str, torch.Tensor]] = None    # исходная карта текущего эпизода каждого мира
+        self.bank_ptr = torch.zeros((), dtype=torch.long, device=dev)
+        self.bank_count = torch.zeros((), dtype=torch.long, device=dev)
 
     # ── служебное ────────────────────────────────────────────────────────────
     def _rand(self, *shape) -> torch.Tensor:
@@ -227,15 +247,57 @@ class RescueEnv:
         max_w = torch.where(diff >= 2, 3, 1)
         vweight = 1 + (self._rand(b, c.n_victims) * max_w[:, None]).long()
         hroom = 1 + self._randint(r * r - 1, b)
-        free = ~walls & (rubble == 0)
-        dist = self._relax(torch.full((b, self.cells), INF, device=dev), free, sweeps=4 * r * r + 8)
-        self._fresh = {
-            "difficulty": diff, "walls": walls, "rubble": rubble, "dist": dist, "active": active, "pos": pos,
+        fresh = {
+            "difficulty": diff, "walls": walls, "rubble": rubble, "active": active, "pos": pos,
             "role": self._rand(b, c.n_drones, ROLE_DIM) * 2 - 1,
             "vpos": self._room_cell(vroom), "vweight": vweight,
             "hpos": self._room_cell(hroom), "hazard_on": diff >= 4,
+            "hinted": self._rand(b) < self.hint_prob,
         }
+        self._extra_fresh(fresh)
+        if self.bank is not None:
+            self._from_bank(fresh)
+        free = ~fresh["walls"] & (fresh["rubble"] == 0)
+        fresh["dist"] = self._relax(torch.full((b, self.cells), INF, device=dev), free, sweeps=4 * r * r + 8)
+        self._fresh = fresh
         self._since_refresh = 0
+
+    def _extra_fresh(self, fresh: Dict[str, torch.Tensor]) -> None:
+        """Хук: подкласс добавляет в пул свои поля (например, охотников)."""
+
+    # ── банк трудных карт ────────────────────────────────────────────────────
+    BANK_KEYS = ("difficulty", "walls", "rubble", "active", "vpos", "vweight", "hpos", "hazard_on")
+
+    def _bank_push(self, failed: torch.Tensor) -> None:
+        """Кладёт исходные карты провальных эпизодов в кольцевой буфер — без синхронизаций с CPU."""
+        size = self.cfg.bank_size
+        if self.bank is None:
+            self.bank = {k: torch.zeros((size + 1,) + v.shape[1:], dtype=v.dtype, device=self.device)
+                         for k, v in self.layout.items()}
+        slot = torch.where(failed, (self.bank_ptr + failed.long().cumsum(0) - 1) % size, size)  # size — «мусорная» строка
+        for k, v in self.layout.items():
+            self.bank[k].index_copy_(0, slot, v)
+        n_new = failed.long().sum()
+        self.bank_ptr = (self.bank_ptr + n_new) % size
+        self.bank_count = (self.bank_count + n_new).clamp_max(size)
+
+    def _from_bank(self, fresh: Dict[str, torch.Tensor]) -> None:
+        """Часть новых миров берётся из банка провалов и мутирует: завал в свободной двери, человек в другой комнате."""
+        c, b, r = self.cfg, self.cfg.n_envs, self.cfg.rooms
+        use = (self._rand(b) < c.bank_frac) & (self.bank_count > 0)
+        pick = (self._rand(b) * self.bank_count.clamp_min(1)).long()
+        for k in self.layout:
+            v = self.bank[k][pick]
+            fresh[k] = torch.where(use.view(-1, *([1] * (v.dim() - 1))), v, fresh[k])
+        cell = self.door_idx[self._randint(len(self.door_idx), b)][:, None]
+        free_door = ~fresh["walls"].gather(1, cell) & (fresh["rubble"].gather(1, cell) == 0)
+        add = use[:, None] & free_door & (self._rand(b, 1) < 0.7)
+        fresh["rubble"] = fresh["rubble"].scatter(1, cell, torch.where(add, 2 + self._randint(2, b, 1),
+                                                                        fresh["rubble"].gather(1, cell)))
+        k = self._randint(c.n_victims, b)[:, None, None].expand(-1, 1, 2)
+        moved = self._room_cell(1 + self._randint(r * r - 1, b))[:, None]
+        move = (use & (self._rand(b) < 0.5))[:, None, None]
+        fresh["vpos"] = fresh["vpos"].scatter(1, k, torch.where(move, moved, fresh["vpos"].gather(1, k)))
 
     def _mark_seen(self) -> torch.Tensor:
         """Отмечает клетки в окне обзора живых дронов; возвращает число новых клеток команды."""
@@ -253,6 +315,14 @@ class RescueEnv:
     def _reset_where(self, mask: torch.Tensor) -> None:
         f = self._fresh
         m1, m2 = mask[:, None], mask[:, None, None]
+        if self.cfg.bank_size > 0:
+            if self.layout is not None:
+                self._bank_push(mask & (self.ep_rescued < self.cfg.n_victims * self.cfg.bank_threshold))
+                for k in self.layout:
+                    v = f[k]
+                    self.layout[k] = torch.where(mask.view(-1, *([1] * (v.dim() - 1))), v, self.layout[k])
+            else:
+                self.layout = {k: f[k].clone() for k in self.BANK_KEYS}
         for name in ("walls", "rubble", "dist", "active", "vweight"):
             setattr(self, name, torch.where(m1, f[name], getattr(self, name)))
         for name in ("pos", "vpos", "role"):
@@ -260,6 +330,7 @@ class RescueEnv:
         self.difficulty = torch.where(mask, f["difficulty"], self.difficulty)
         self.hpos = torch.where(m1, f["hpos"], self.hpos)
         self.hazard_on = torch.where(mask, f["hazard_on"], self.hazard_on)
+        self.hinted = torch.where(mask, f["hinted"], self.hinted)
         self.alive = torch.where(m1, self.active, self.alive)
         self.present = self.present | m1
         self.seen = self.seen & ~m1
@@ -305,6 +376,7 @@ class RescueEnv:
         waiting = holding & (best_votes < self.vweight.float())[:, None]                          # ждут помощи
 
         delivered = self.present & self.exit_mask[self._idx(self.vpos)]
+        self._delivered = delivered
         reward += (delivered.float() * (c.reward_deliver + 0.5 * (self.vweight - 1).float())).sum(1)
         self.present &= ~delivered
         self.ep_rescued += delivered.sum(1).float()
@@ -328,26 +400,8 @@ class RescueEnv:
         pos_before = self.pos
         self.pos = torch.where((can_move | carriers)[..., None], dtarget, self.pos)
 
-        # 4) пожар бродит и выводит из строя дронов рядом
-        hdir = 1 + self._randint(4, b)
-        if c.hazard_chase > 0:
-            # охота: шаг по той оси, где до ближайшего живого дрона дальше всего
-            gap = self.pos - self.hpos[:, None]
-            far = torch.where(self.alive, gap.abs().sum(-1), torch.full_like(gap[..., 0], 10 ** 6))
-            prey = gap.gather(1, far.argmin(1)[:, None, None].expand(-1, 1, 2)).squeeze(1)       # (B, 2)
-            along_x = prey[:, 0].abs() >= prey[:, 1].abs()
-            chase_dir = torch.where(along_x, torch.where(prey[:, 0] > 0, 1, 2), torch.where(prey[:, 1] > 0, 3, 4))
-            chase = (self._rand(b) < c.hazard_chase) & self.alive.any(1) & (prey.abs().sum(-1) > 0)
-            hdir = torch.where(chase, chase_dir, hdir)
-        htarget = self.hpos + self.moves[hdir]
-        h_idx = self._idx(htarget.clamp(0, g - 1))
-        h_ok = (self._rand(b) < c.hazard_move_prob) & self._inside(htarget) & ~self.walls.gather(1, h_idx[:, None]).squeeze(1) \
-            & (self.rubble.gather(1, h_idx[:, None]).squeeze(1) == 0)
-        self.hpos = torch.where(h_ok[:, None], htarget, self.hpos)
-        burned = self.alive & self.hazard_on[:, None] & ((self.pos - self.hpos[:, None]).abs().max(-1).values <= 1)
-        self.alive &= ~burned
-        self.ep_lost += burned.sum(1).float()
-        reward -= c.penalty_lost * burned.sum(1).float()
+        # 4) опасность (пожар / опасный человек / команда охотников) выводит из строя дронов рядом
+        burned = self._hazard(reward)
 
         # 5) обрушение: случайная открытая дверь заваливается (сложность 4)
         k = self._randint(len(self.door_idx), b)
@@ -393,56 +447,101 @@ class RescueEnv:
             "found_frac": (self.seen | ~self.present).float().mean(1),
             "difficulty": self.difficulty.float(),
         }
+        info.update(self._extra_info())
         self._since_refresh += 1
         if self._since_refresh >= c.refresh_every:
             self._refresh_pool()
         self._reset_where(done)
         return self.observe(), reward, done, info
 
-    def observe(self) -> Dict[str, torch.Tensor]:
-        c, b, n, g, dev = self.cfg, self.cfg.n_envs, self.cfg.n_drones, self.G, self.device
-        # мировые каналы (B, C, G²)
+    def _hazard(self, reward: torch.Tensor) -> torch.Tensor:
+        """Пожар / опасный человек бродит (или охотится) и выводит из строя дронов рядом. Возвращает сгоревших (B, N)."""
+        c, b, g = self.cfg, self.cfg.n_envs, self.G
+        hdir = 1 + self._randint(4, b)
+        if c.hazard_chase > 0:
+            # охота: шаг по той оси, где до ближайшего живого дрона дальше всего
+            gap = self.pos - self.hpos[:, None]
+            far = torch.where(self.alive, gap.abs().sum(-1), torch.full_like(gap[..., 0], 10 ** 6))
+            prey = gap.gather(1, far.argmin(1)[:, None, None].expand(-1, 1, 2)).squeeze(1)       # (B, 2)
+            along_x = prey[:, 0].abs() >= prey[:, 1].abs()
+            chase_dir = torch.where(along_x, torch.where(prey[:, 0] > 0, 1, 2), torch.where(prey[:, 1] > 0, 3, 4))
+            chase = (self._rand(b) < c.hazard_chase) & self.alive.any(1) & (prey.abs().sum(-1) > 0) & ~self.hinted
+            hdir = torch.where(chase, chase_dir, hdir)
+        htarget = self.hpos + self.moves[hdir]
+        h_idx = self._idx(htarget.clamp(0, g - 1))
+        h_ok = (self._rand(b) < c.hazard_move_prob) & self._inside(htarget) & ~self.walls.gather(1, h_idx[:, None]).squeeze(1) \
+            & (self.rubble.gather(1, h_idx[:, None]).squeeze(1) == 0)
+        self.hpos = torch.where(h_ok[:, None], htarget, self.hpos)
+        burned = self.alive & self.hazard_on[:, None] & ((self.pos - self.hpos[:, None]).abs().max(-1).values <= 1)
+        self.alive &= ~burned
+        self.ep_lost += burned.sum(1).float()
+        reward -= c.penalty_lost * burned.sum(1).float()
+        return burned
+
+    def _extra_info(self) -> Dict[str, torch.Tensor]:
+        """Хук: подкласс добавляет свою статистику эпизода (до перезапуска мира)."""
+        return {}
+
+    def _hazard_map(self) -> torch.Tensor:
+        """Где опасность — (B, клеток + 1), последний столбец — «мусорный»."""
+        hazard = torch.zeros(self.cfg.n_envs, self.cells + 1, dtype=torch.long, device=self.device)
+        return hazard.scatter_(1, torch.where(self.hazard_on, self._idx(self.hpos), self.cells)[:, None], 1)
+
+    def _world(self) -> torch.Tensor:
+        """Мировые каналы окна (B, C, G²) — общие для всех, кто смотрит на здание."""
+        b, dev = self.cfg.n_envs, self.device
         victims = torch.zeros(b, self.cells + 1, dtype=torch.long, device=dev)
         victims.scatter_reduce_(1, torch.where(self.present, self._idx(self.vpos), self.cells),
                                 self.vweight, reduce="amax")
         drones = torch.zeros(b, self.cells + 1, dtype=torch.long, device=dev)
         drones.scatter_add_(1, torch.where(self.alive, self._idx(self.pos), self.cells), torch.ones_like(self.pos[..., 0]))
-        hazard = torch.zeros(b, self.cells + 1, dtype=torch.long, device=dev)
-        hazard.scatter_(1, torch.where(self.hazard_on, self._idx(self.hpos), self.cells)[:, None], 1)
         holders = torch.zeros(b, self.cells + 1, dtype=torch.long, device=dev)
         held = self.last.get("holding")
         if held is not None:
             holders.scatter_add_(1, torch.where(held, self._idx(self.pos), self.cells), torch.ones_like(self.pos[..., 0]))
-        world = torch.stack([
-            self.walls.long(), self.rubble, victims[:, :-1], hazard[:, :-1], drones[:, :-1],
+        return torch.stack([
+            self.walls.long(), self.rubble, victims[:, :-1], self._hazard_map()[:, :-1], drones[:, :-1],
             torch.zeros_like(self.rubble),  # место для «исследовано» — оно своё у каждого дрона
             self.exit_mask.long().expand(b, -1), holders[:, :-1],
             self.dist.clamp_max(250).long(),  # путь к выходу; видно только на исследованных клетках (ниже)
-        ], 1)                                                                   # (B, C, G²)
+        ], 1)
 
-        win = torch.stack([self.pos[..., 0:1] + self.win_dx, self.pos[..., 1:2] + self.win_dy], -1)  # (B,N,W,2)
+    def _window(self, world: torch.Tensor, pos: torch.Tensor, alive: torch.Tensor, seen: torch.Tensor,
+                hinted: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Окно вокруг каждого смотрящего: pos (B, K, 2), seen (B, K, клеток) — что он уже знает. → (B, K, C, W) uint8."""
+        c, g, k = self.cfg, self.G, pos.shape[1]
+        win = torch.stack([pos[..., 0:1] + self.win_dx, pos[..., 1:2] + self.win_dy], -1)  # (B,K,W,2)
         inside = self._inside(win)
         widx = self._idx(win.clamp(0, g - 1))
-        w = world[:, None].expand(-1, n, -1, -1).gather(3, widx[:, :, None].expand(-1, -1, WINDOW_CHANNELS, -1))
-        seen = (self.team_seen[:, None].expand(-1, n, -1) if c.share_map else self.own_seen)
+        w = world[:, None].expand(-1, k, -1, -1).gather(3, widx[:, :, None].expand(-1, -1, WINDOW_CHANNELS, -1))
         seen_win = seen.gather(2, widx)
         w[:, :, 5] = seen_win.long()
         # «хлебные крошки»: рой помнит дорогу назад только там, где уже был
         w[:, :, 8] = torch.where(seen_win, w[:, :, 8], torch.full_like(w[:, :, 8], ROUTE_UNKNOWN))
+        hint = (hinted if hinted is not None else torch.zeros_like(self.hinted))[:, None, None]
         if not c.route_hint:
-            w[:, :, 8] = ROUTE_UNKNOWN
+            w[:, :, 8] = torch.where(hint, w[:, :, 8], torch.full_like(w[:, :, 8], ROUTE_UNKNOWN))
         if c.hidden_weight:
-            w[:, :, 2] = w[:, :, 2].clamp_max(1)          # человек виден, но не сколько он весит
+            w[:, :, 2] = torch.where(hint, w[:, :, 2], w[:, :, 2].clamp_max(1))   # человек виден, но не его вес
         w = torch.where(inside[:, :, None], w, torch.zeros_like(w))
         w[:, :, 0] = torch.where(inside, w[:, :, 0], torch.ones_like(w[:, :, 0]))   # за краем — стена
         w[:, :, 8] = torch.where(inside, w[:, :, 8], torch.full_like(w[:, :, 8], ROUTE_UNKNOWN))
-        window = (w * self.alive[..., None, None]).to(torch.uint8)
+        return (w * alive[..., None, None]).to(torch.uint8)
 
-        # грубая карта: сколько клеток блока исследовано и сколько из них стены
-        q = g // c.coarse
+    def _coarse(self, seen: torch.Tensor) -> torch.Tensor:
+        """Грубая карта: сколько клеток блока исследовано и сколько из них стены. seen (B, K, клеток) → (B, K, 2, coarse²)."""
+        c, q = self.cfg, self.G // self.cfg.coarse
+        b, k = seen.shape[:2]
         known_walls = seen & self.walls[:, None]
-        blocks = lambda m: m.view(b, n, c.coarse, q, c.coarse, q).sum((3, 5)).flatten(2)
-        coarse = torch.stack([blocks(seen), blocks(known_walls)], 2).to(torch.uint8)     # (B,N,2,coarse²)
+        blocks = lambda m: m.view(b, k, c.coarse, q, c.coarse, q).sum((3, 5)).flatten(2)
+        return torch.stack([blocks(seen), blocks(known_walls)], 2).to(torch.uint8)
+
+    def observe(self) -> Dict[str, torch.Tensor]:
+        c, b, n, g = self.cfg, self.cfg.n_envs, self.cfg.n_drones, self.G
+        team = self.team_seen[:, None].expand(-1, n, -1)
+        seen = team if c.share_map else torch.where(self.hinted[:, None, None], team, self.own_seen)
+        window = self._window(self._world(), self.pos, self.alive, seen, self.hinted)
+        coarse = self._coarse(seen)
 
         on_victim = ((self.pos[:, :, None] == self.vpos[:, None]).all(-1) & self.present[:, None])
         here_w = (on_victim * self.vweight[:, None]).max(-1).values.float()
