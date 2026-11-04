@@ -225,6 +225,16 @@ def test_random_eval_reports_levels():
     assert "by_level" in m and set(m["by_level"]) <= {"1", "2", "3", "4"}
 
 
+@pytest.mark.parametrize("mute", [False, True])
+def test_diagnosis_splits_every_victim_into_one_cause(mute):
+    from cida_swarm.diagnose import CAUSES, diagnose
+    cfg = RescueConfig(n_envs=8, n_drones=3, min_drones=2, n_victims=2, max_steps=30)
+    actor = RescueActor(cfg, hidden=16, comm="cida")
+    r = diagnose(actor, cfg, n_envs=16, device="cpu", mute=mute)
+    assert sum(r[c] for c in CAUSES) == pytest.approx(1.0)
+    assert actor.comm.radius == 1.5                                   # радиус вернули на место
+
+
 def test_rescue_train_and_finetune(tmp_path):
     train(parse_args(RESCUE_ARGS + ["--share-coverage", "--iters", "2", "--eval-every", "2",
                                     "--out", str(tmp_path / "base")]))
