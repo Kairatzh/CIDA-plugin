@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 import torch
 from torch.distributions import Categorical
 
-from .policy import RescueActor
+from .policy import RescueActor, init_memory, policy_step
 from .rescue import RescueConfig, RescueEnv
 
 # состояния дронов для подписи
@@ -58,8 +58,9 @@ def record(actor: RescueActor, cfg: RescueConfig, seed: int, difficulty: int,
     seen_before = torch.zeros(env.cells, dtype=torch.bool)
     state = torch.full((cfg1.n_drones,), SEARCH)
     events: List[str] = []
+    mem = init_memory(actor, 1, cfg1.n_drones, "cpu")
     for t in range(cfg1.max_steps + 1):
-        logits, aux = actor(obs, return_aux=True)
+        logits, aux, mem = policy_step(actor, obs, mem)
         alive = env.alive[0]
         frame = {
             "d": [[int(x), int(y), int(a and act), int(s)] for (x, y), a, act, s in

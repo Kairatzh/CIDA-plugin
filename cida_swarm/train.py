@@ -33,7 +33,7 @@ from torch.distributions import Categorical
 from . import env as search_world
 from . import rescue as rescue_world
 from .env import EnvConfig, SearchEnv
-from .policy import Actor, Critic, RescueActor
+from .policy import Actor, Critic, RescueActor, forget_done, init_memory, policy_step
 from .rescue import RescueConfig, RescueEnv
 
 # мир → (класс среды, класс мозга, число действий)
@@ -102,6 +102,7 @@ def evaluate(actor: Optional[torch.nn.Module], env_cfg, n_envs: int, device, see
     cfg = type(env_cfg)(**{**env_cfg.to_dict(), "n_envs": n_envs})
     env = env_cls(cfg, device, seed=seed)
     obs = env.reset()
+    mem = init_memory(actor, n_envs, cfg.n_drones, device) if actor is not None else None
     finished = torch.zeros(n_envs, dtype=torch.bool, device=device)
     keys = list(env.STATS) + (["difficulty"] if world == "rescue" else [])
     stats = {k: torch.zeros(n_envs, device=device) for k in keys}
@@ -110,9 +111,10 @@ def evaluate(actor: Optional[torch.nn.Module], env_cfg, n_envs: int, device, see
             actions = torch.randint(0, n_actions, (n_envs, cfg.n_drones), device=device)
         else:
             with autocast(device):
-                logits = actor(obs)
+                logits, _, mem = policy_step(actor, obs, mem)
             actions = Categorical(logits=logits.float()).sample()
         obs, _, done, info = env.step(actions)
+        mem = forget_done(mem, done)
         first = done & ~finished
         for k in stats:
             stats[k] = torch.where(first, info[k], stats[k])
@@ -139,7 +141,8 @@ def build_env_config(args):
         return RescueConfig(
             n_envs=args.n_envs, n_drones=args.n_drones, min_drones=args.min_drones, n_victims=args.n_victims,
             max_steps=args.max_steps, difficulty_min=args.difficulty_min, difficulty_max=args.difficulty_max,
-            share_map=args.share_coverage,
+            share_map=args.share_coverage, route_hint=not args.no_route_hint, hidden_weight=args.hidden_weight,
+            hazard_chase=args.hazard_chase,
         )
     return EnvConfig(
         n_envs=args.n_envs, n_drones=args.n_drones, min_drones=args.min_drones, n_targets=args.n_targets,
@@ -169,6 +172,10 @@ def train(args) -> Dict:
     comm_radius = args.comm_radius if args.comm_radius is not None else (1.5 if args.world == "rescue" else 0.3)
     actor_kwargs = {"hidden": args.hidden, "comm": args.comm, "comm_radius": comm_radius,
                     "comm_rounds": args.comm_rounds}
+    if args.memory:
+        if args.world != "rescue":
+            raise ValueError("--memory пока есть только в мире rescue")
+        actor_kwargs["memory"] = True
     actor = actor_cls(env_cfg, **actor_kwargs).to(device)
     critic = Critic(env_cls.state_dim(env_cfg)).to(device)
     if args.init_from:
@@ -176,7 +183,7 @@ def train(args) -> Dict:
         # поэтому в начале рой ведёт себя ровно как исходный и учится только новому
         ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
         missing, unexpected = actor.load_state_dict(ckpt["actor"], strict=False)
-        if unexpected or any(not k.startswith("comm.") for k in missing):
+        if unexpected or any(not k.startswith(("comm.", "gru.", "mem_out.")) for k in missing):
             raise ValueError(f"несовместимый чекпойнт {args.init_from}: missing={missing}, unexpected={unexpected}")
         if "critic" in ckpt:
             critic.load_state_dict(ckpt["critic"])
@@ -206,6 +213,11 @@ def train(args) -> Dict:
 
     obs = env.reset()
     state = env.state()
+    mem = init_memory(actor, B, N, device)
+    # автокуррикулум: уровни, где рой то справляется, то нет (успех около 50%), выпадают чаще
+    n_levels = env_cfg.difficulty_max - env_cfg.difficulty_min + 1 if args.world == "rescue" else 0
+    lvl_sum = torch.zeros(max(n_levels, 1), device=device)
+    lvl_cnt = torch.zeros(max(n_levels, 1), device=device)
     history = []
     ep_sum = {k: torch.zeros((), device=device) for k in env.STATS}
     ep_count = torch.zeros((), device=device)
@@ -224,10 +236,12 @@ def train(args) -> Dict:
         t_start = _sync(device)
         buf_obs, buf_state, buf_act, buf_logp, buf_val, buf_rew, buf_done = [], [], [], [], [], [], []
         buf_people = []
+        mem0 = mem.clone() if mem is not None else None   # с этой памяти PPO заново прокрутит отрезок
         with torch.no_grad():
             for _ in range(T):
                 with autocast(device):
-                    logits, value = run_actor(obs), run_critic(state)
+                    logits, _, mem = policy_step(run_actor, obs, mem)
+                    value = run_critic(state)
                 dist = Categorical(logits=logits.float())
                 actions = dist.sample()
                 buf_obs.append(obs)
@@ -237,7 +251,12 @@ def train(args) -> Dict:
                 buf_logp.append(dist.log_prob(actions))
                 buf_val.append(value.float() * ret_norm.std + ret_norm.mean)
                 obs, reward, done, info = env.step(actions)
+                mem = forget_done(mem, done)
                 state = env.state()
+                if n_levels:
+                    lvl = (info["difficulty"].long() - env_cfg.difficulty_min).clamp(0, n_levels - 1)
+                    lvl_sum.index_add_(0, lvl, info[success_key] * done)
+                    lvl_cnt.index_add_(0, lvl, done.float())
                 buf_rew.append(reward)
                 buf_done.append(done.float())
                 for k in env.STATS:
@@ -263,32 +282,41 @@ def train(args) -> Dict:
         t_mid = _sync(device)
         timing["collect"] += t_mid - t_start
 
-        # 3) PPO; пример = (мир, момент времени) со всеми его дронами, неактивные дроны маскируются
-        flat_obs = {k: v.flatten(0, 1) for k, v in _stack(buf_obs).items()}
-        flat_state = torch.stack(buf_state).flatten(0, 1)
+        # 3) PPO; минибатч = отрезки жизни случайных миров (T шагов × все дроны), неактивные дроны маскируются.
+        #    У мозга с памятью отрезок прокручивается заново по шагам с сохранённой памяти — так память учится.
+        seq_obs = _stack(buf_obs)                                   # (T, B, ...)
+        seq_state = torch.stack(buf_state)
         del buf_obs, buf_state  # исходные списки больше не нужны — освобождаем память до PPO
-        flat_people = torch.stack(buf_people).flatten(0, 1)
-        flat_act = torch.stack(buf_act).flatten(0, 1)
-        flat_logp = torch.stack(buf_logp).flatten(0, 1)
-        flat_adv = adv.flatten()
-        flat_ret = ((returns - ret_norm.mean) / ret_norm.std).flatten()
-        n = flat_adv.numel()
-        mb = min(args.minibatch_size, n)
+        seq_people = torch.stack(buf_people)
+        seq_act, seq_logp = torch.stack(buf_act), torch.stack(buf_logp)
+        seq_ret = (returns - ret_norm.mean) / ret_norm.std
+        mbw = max(1, min(B, args.minibatch_size // T))              # миров в минибатче
         for _ in range(args.epochs):
-            perm = torch.randperm(n, device=device)
-            for start in range(0, n - mb + 1, mb):
-                idx = perm[start:start + mb]
-                o = {k: v[idx] for k, v in flat_obs.items()}
-                mask = o["active"].float()
-                a = flat_adv[idx]
+            perm = torch.randperm(B, device=device)
+            for start in range(0, B - mbw + 1, mbw):
+                w_idx = perm[start:start + mbw]
+                o = {k: v[:, w_idx] for k, v in seq_obs.items()}
+                mask = o["active"].flatten(0, 1).float()
+                a = adv[:, w_idx].flatten()
                 a = ((a - a.mean()) / (a.std() + 1e-8))[:, None]
                 with autocast(device):
-                    (logits, aux), v = run_actor(o, return_aux=True), run_critic(flat_state[idx].float())
+                    if mem0 is None:
+                        logits, aux, _ = policy_step(run_actor, {k: v.flatten(0, 1) for k, v in o.items()}, None)
+                    else:
+                        m, outs = mem0[w_idx], []
+                        for t in range(T):
+                            lt, at, m = policy_step(run_actor, {k: v[t] for k, v in o.items()}, m)
+                            m = forget_done(m, dones[t, w_idx])
+                            outs.append((lt, at))
+                        logits = torch.cat([lt for lt, _ in outs])
+                        aux = None if outs[0][1] is None else {"beliefs": [
+                            torch.cat([at["beliefs"][r] for _, at in outs]) for r in range(len(outs[0][1]["beliefs"]))]}
+                    v = run_critic(seq_state[:, w_idx].flatten(0, 1).float())
                 dist = Categorical(logits=logits.float())
-                ratio = (dist.log_prob(flat_act[idx]) - flat_logp[idx]).exp()
+                ratio = (dist.log_prob(seq_act[:, w_idx].flatten(0, 1)) - seq_logp[:, w_idx].flatten(0, 1)).exp()
                 pg = -_masked_mean(torch.min(ratio * a, ratio.clamp(1 - args.clip, 1 + args.clip) * a), mask)
                 entropy = _masked_mean(dist.entropy(), mask)
-                v_loss = F.mse_loss(v.float(), flat_ret[idx])
+                v_loss = F.mse_loss(v.float(), seq_ret[:, w_idx].flatten())
                 loss = pg + args.vf_coef * v_loss - args.ent_coef * entropy
                 if it <= args.critic_warmup:
                     # критик ещё не знает этот рой — пока он учится, политику не трогаем,
@@ -296,7 +324,7 @@ def train(args) -> Dict:
                     loss = args.vf_coef * v_loss
                 if aux is not None and it > args.critic_warmup:
                     # убеждения учатся предсказывать, где люди: так у сообщений и у расхождения есть смысл
-                    truth = flat_people[idx].float()[:, None].expand(-1, mask.shape[1], -1)
+                    truth = seq_people[:, w_idx].flatten(0, 1).float()[:, None].expand(-1, mask.shape[1], -1)
                     b_loss = sum(
                         _masked_mean(F.binary_cross_entropy_with_logits(b.float(), truth, reduction="none").mean(-1), mask)
                         for b in aux["beliefs"]
@@ -307,6 +335,13 @@ def train(args) -> Dict:
                 torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
                 opt.step()
         timing["update"] += _sync(device) - t_mid
+
+        if args.curriculum and n_levels and it % 5 == 0:
+            succ = lvl_sum / lvl_cnt.clamp_min(1.0)
+            score = torch.where(lvl_cnt > 0, succ * (1 - succ), torch.full_like(succ, 0.25)) + 0.1  # каждый уровень не реже ~10%
+            env.level_probs = score / score.sum()
+            lvl_sum.zero_()
+            lvl_cnt.zero_()
 
         if it % args.log_every == 0:
             cnt = ep_count.item()
@@ -324,7 +359,9 @@ def train(args) -> Dict:
             metrics.update(iter=it, agent_steps=agent_steps, minutes=(time.time() - t0) / 60)
             history.append(metrics)
             levels = " ".join(f"L{k}:{v[success_key]:.2f}" for k, v in metrics.get("by_level", {}).items())
-            print(f"[eval] it {it} | {_fmt_metrics(metrics)}" + (f" | {levels}" if levels else ""), flush=True)
+            curr = (" | curriculum " + " ".join(f"{p:.2f}" for p in env.level_probs.tolist())
+                    if getattr(env, "level_probs", None) is not None else "")
+            print(f"[eval] it {it} | {_fmt_metrics(metrics)}" + (f" | {levels}" if levels else "") + curr, flush=True)
             ckpt = {"world": args.world, "env_config": env_cfg.to_dict(), "actor_kwargs": actor_kwargs,
                     "actor": actor.state_dict(), "critic": critic.state_dict(), "iter": it}
             torch.save(ckpt, out_dir / "model.pt")
@@ -377,8 +414,13 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--max-speed", type=float, default=0.015)
     ap.add_argument("--target-speed", type=float, default=0.002)
     ap.add_argument("--share-coverage", action="store_true", help="стигмергия: общая карта исследованного")
+    ap.add_argument("--no-route-hint", action="store_true", help="rescue: без готовой дорожки к выходу")
+    ap.add_argument("--hidden-weight", action="store_true", help="rescue: вес человека знает только держащий")
+    ap.add_argument("--hazard-chase", type=float, default=0.0, help="rescue: доля ходов охоты опасного человека")
+    ap.add_argument("--curriculum", action="store_true", help="rescue: чаще уровни с успехом около половины")
     # модель и PPO
     ap.add_argument("--hidden", type=int, default=256)
+    ap.add_argument("--memory", action="store_true", help="rescue: у дрона есть память (GRU)")
     ap.add_argument("--comm", choices=["none", "attn", "cida"], default="none",
                     help="связь: none — нет, attn — обычное внимание, cida — внимание со смещением разногласием")
     ap.add_argument("--comm-radius", type=float, default=None,

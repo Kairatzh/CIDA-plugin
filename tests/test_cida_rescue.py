@@ -213,6 +213,41 @@ class TestRescueBrain:
         assert actor.trunk[0].weight.grad is None or actor.trunk[0].weight.grad.abs().sum() == 0
 
 
+class TestNoHints:
+    def test_hunter_steps_toward_nearest_drone(self):
+        env = make_env(hazard_chase=1.0, hazard_move_prob=1.0)
+        env.hazard_on[0] = True
+        env.hpos[0] = torch.tensor([10, 2])
+        place(env, 0, drones=[(2, 2), (2, 2), (2, 2)], victim=(13, 13))
+        env.walls[0, env._idx(torch.tensor([9, 2]))] = False
+        act(env, 0, [STAY, STAY, STAY])
+        assert env.hpos[0].tolist() == [9, 2]
+
+    def test_no_route_hint_and_hidden_weight(self):
+        env = make_env(route_hint=False, hidden_weight=True)
+        place(env, 0, drones=[(6, 2), (5, 2), (5, 2)], victim=(6, 3), weight=3)
+        w = env.observe()["window"]
+        assert (w[:, :, 8] == 251).all()
+        assert w[0, 0, 2].max() == 1                                   # видно человека, но не вес
+
+    def test_memory_actor_remembers_and_forgets(self):
+        from cida_swarm.policy import forget_done, init_memory, policy_step
+        env = make_env()
+        actor = RescueActor(env.cfg, hidden=16, comm="cida", memory=True)
+        mem = init_memory(actor, 4, 3, "cpu")
+        assert mem.shape == (4, 3, 32)
+        logits, aux, mem = policy_step(actor, env.observe(), mem)
+        assert logits.shape == (4, 3, N_ACTIONS) and mem.abs().sum() > 0
+        mem = forget_done(mem, torch.tensor([True, False, False, False]))
+        assert mem[0].abs().sum() == 0 and mem[1].abs().sum() > 0
+
+    def test_curriculum_probs_pick_levels(self):
+        env = make_env(n_envs=64, difficulty_min=1, difficulty_max=4)
+        env.level_probs = torch.tensor([0.0, 0.0, 0.0, 1.0])
+        env.reset()
+        assert env.difficulty.eq(4).all()
+
+
 RESCUE_ARGS = ["--world", "rescue", "--n-envs", "8", "--n-drones", "3", "--min-drones", "2", "--n-victims", "2",
                "--max-steps", "30", "--hidden", "16", "--rollout", "8", "--epochs", "1", "--minibatch-size", "32",
                "--log-every", "1", "--eval-envs", "8", "--device", "cpu"]
@@ -233,6 +268,21 @@ def test_diagnosis_splits_every_victim_into_one_cause(mute):
     r = diagnose(actor, cfg, n_envs=16, device="cpu", mute=mute)
     assert sum(r[c] for c in CAUSES) == pytest.approx(1.0)
     assert actor.comm.radius == 1.5                                   # радиус вернули на место
+
+
+def test_memory_swarm_trains_without_hints(tmp_path):
+    result = train(parse_args(RESCUE_ARGS + ["--memory", "--comm", "cida", "--no-route-hint", "--hidden-weight",
+                                             "--hazard-chase", "0.5", "--curriculum", "--iters", "5",
+                                             "--eval-every", "5", "--out", str(tmp_path / "mem")]))
+    assert 0.0 <= result["best"]["rescued_frac"] <= 1.0
+    from cida_swarm.demo import build
+    from cida_swarm.diagnose import CAUSES, diagnose, load_actor
+    data = build([str(tmp_path / "mem" / "model_best.pt")], ["CIDA"], seeds=[1], difficulties=[4], n_drones=3,
+                 greedy=False)
+    assert data["scenes"][0]["panels"][0]["episode"]["frames"]
+    actor, cfg = load_actor(str(tmp_path / "mem" / "model_best.pt"))
+    r = diagnose(actor, cfg, n_envs=8, device="cpu", mute=True)
+    assert sum(r[c] for c in CAUSES) == pytest.approx(1.0)
 
 
 def test_rescue_train_and_finetune(tmp_path):

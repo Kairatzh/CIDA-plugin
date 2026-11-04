@@ -13,6 +13,12 @@ rescue.py — мир «спасательная миссия» (CIDA-Rescue): р
     * обрушения: посреди миссии дверь может завалить, и маршрут надо перестраивать;
     * каждый дрон видит только окно вокруг себя.
 
+Режим «без подсказок» (для роя с памятью и связью):
+    * route_hint=False — нет готовой «дорожки к выходу»: путь назад надо помнить самому или узнать у других;
+    * hidden_weight=False → True — вес человека знает только тот, кто его держит: остальным его надо сообщить;
+    * hazard_chase > 0 — опасный человек не бродит, а охотится на ближайшего дрона (сложность 4):
+      нужны тактики — обходить, отвлекать, разделяться.
+
 Сложность мира d (1–4) выбирается для каждого мира случайно из [difficulty_min, difficulty_max]:
     1 — лёгкие пострадавшие (вес 1); 2 — вес 1–3; 3 — плюс завалы; 4 — плюс пожар и обрушения.
 Смесь простых и сложных миров даёт плотную награду с первых итераций и сложные задачи для роста.
@@ -62,6 +68,9 @@ class RescueConfig:
     reward_explore: float = 0.002
     penalty_lost: float = 0.5
     share_map: bool = False       # общая карта исследованного (стигмергия)
+    route_hint: bool = True       # канал «шагов до выхода» на исследованных клетках
+    hidden_weight: bool = False   # вес человека виден только держащему его дрону
+    hazard_chase: float = 0.0     # доля ходов, когда опасный человек идёт к ближайшему дрону
     refresh_every: int = 32
 
     def __post_init__(self):
@@ -140,6 +149,7 @@ class RescueEnv:
         self.ep_rescued = torch.zeros(b, device=dev)
         self.ep_lost = torch.zeros(b, device=dev)
         self.last = {}  # события последнего шага для демо: кто держит, кто ждёт помощи, кто толкает
+        self.level_probs: Optional[torch.Tensor] = None  # вероятности уровней сложности (автокуррикулум)
 
     # ── служебное ────────────────────────────────────────────────────────────
     def _rand(self, *shape) -> torch.Tensor:
@@ -178,7 +188,10 @@ class RescueEnv:
     def _refresh_pool(self) -> None:
         """Пачка свежих зданий для перезапуска завершившихся миров (генерация дорогая — не каждый шаг)."""
         c, b, r, dev = self.cfg, self.cfg.n_envs, self.cfg.rooms, self.device
-        diff = c.difficulty_min + self._randint(c.difficulty_max - c.difficulty_min + 1, b)
+        if self.level_probs is None:
+            diff = c.difficulty_min + self._randint(c.difficulty_max - c.difficulty_min + 1, b)
+        else:
+            diff = c.difficulty_min + torch.multinomial(self.level_probs, b, replacement=True, generator=self.gen)
 
         # лабиринт «двоичное дерево»: каждая комната открыта на восток или север → дерево, всё связно
         i = torch.arange(r, device=dev).repeat_interleave(r)
@@ -308,6 +321,15 @@ class RescueEnv:
 
         # 4) пожар бродит и выводит из строя дронов рядом
         hdir = 1 + self._randint(4, b)
+        if c.hazard_chase > 0:
+            # охота: шаг по той оси, где до ближайшего живого дрона дальше всего
+            gap = self.pos - self.hpos[:, None]
+            far = torch.where(self.alive, gap.abs().sum(-1), torch.full_like(gap[..., 0], 10 ** 6))
+            prey = gap.gather(1, far.argmin(1)[:, None, None].expand(-1, 1, 2)).squeeze(1)       # (B, 2)
+            along_x = prey[:, 0].abs() >= prey[:, 1].abs()
+            chase_dir = torch.where(along_x, torch.where(prey[:, 0] > 0, 1, 2), torch.where(prey[:, 1] > 0, 3, 4))
+            chase = (self._rand(b) < c.hazard_chase) & self.alive.any(1) & (prey.abs().sum(-1) > 0)
+            hdir = torch.where(chase, chase_dir, hdir)
         htarget = self.hpos + self.moves[hdir]
         h_idx = self._idx(htarget.clamp(0, g - 1))
         h_ok = (self._rand(b) < c.hazard_move_prob) & self._inside(htarget) & ~self.walls.gather(1, h_idx[:, None]).squeeze(1) \
@@ -389,6 +411,10 @@ class RescueEnv:
         w[:, :, 5] = seen_win.long()
         # «хлебные крошки»: рой помнит дорогу назад только там, где уже был
         w[:, :, 8] = torch.where(seen_win, w[:, :, 8], torch.full_like(w[:, :, 8], ROUTE_UNKNOWN))
+        if not c.route_hint:
+            w[:, :, 8] = ROUTE_UNKNOWN
+        if c.hidden_weight:
+            w[:, :, 2] = w[:, :, 2].clamp_max(1)          # человек виден, но не сколько он весит
         w = torch.where(inside[:, :, None], w, torch.zeros_like(w))
         w[:, :, 0] = torch.where(inside, w[:, :, 0], torch.ones_like(w[:, :, 0]))   # за краем — стена
         w[:, :, 8] = torch.where(inside, w[:, :, 8], torch.full_like(w[:, :, 8], ROUTE_UNKNOWN))

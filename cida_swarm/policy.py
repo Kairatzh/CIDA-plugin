@@ -9,6 +9,9 @@ policy.py — мозг дрона (актор) и централизованны
 
 С comm="cida" между восприятием и решением стоит связь CIDA (см. CidaComm): дроны в радиусе связи
 обмениваются сообщениями, и громче звучит тот, чья карта «где люди» сильнее расходится с картой слушателя.
+
+С memory=True (спасательная миссия) у дрона есть память — GRU поверх восприятия; услышанное по радио
+на прошлом шаге тоже входит в память. Шаг роя с памятью — policy_step(actor, obs, mem).
 """
 
 from __future__ import annotations
@@ -179,7 +182,7 @@ class RescueActor(nn.Module):
     """
 
     def __init__(self, env_cfg: RescueConfig, hidden: int = 256, comm: str = "none",
-                 comm_radius: float = 1.5, comm_rounds: int = 2):
+                 comm_radius: float = 1.5, comm_rounds: int = 2, memory: bool = False):
         super().__init__()
         if comm not in COMM_TYPES:
             raise ValueError(f"comm должен быть одним из {COMM_TYPES}, а не {comm}")
@@ -194,6 +197,14 @@ class RescueActor(nn.Module):
         self.self_enc = nn.Sequential(nn.Linear(RESCUE_SELF_FEATURES, hidden), nn.ReLU())
         self.trunk = nn.Sequential(nn.Linear(3 * hidden, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU())
         self.comm = make_comm(comm, hidden, env_cfg.coarse ** 2, comm_rounds, comm_radius)
+        self.memory, self.hidden = memory, hidden
+        if memory:
+            # память видит восприятие и то, что дрон услышал на прошлом шаге
+            self.gru = nn.GRUCell(hidden * (2 if self.comm is not None else 1), hidden)
+            # память подмешивается к восприятию через нулевую проекцию: дообучение стартует ровно с роя без памяти
+            self.mem_out = nn.Linear(hidden, hidden)
+            nn.init.zeros_(self.mem_out.weight)
+            nn.init.zeros_(self.mem_out.bias)
         self.head = nn.Linear(hidden, RESCUE_N_ACTIONS)
         nn.init.zeros_(self.head.bias)
         nn.init.normal_(self.head.weight, std=0.01)
@@ -203,13 +214,56 @@ class RescueActor(nn.Module):
         c = (obs["coarse"].float() / self.block_cells).flatten(-2)
         return self.trunk(torch.cat([self.win_enc(w), self.coarse_enc(c), self.self_enc(obs["self"])], -1))
 
-    def forward(self, obs: Dict[str, torch.Tensor], return_aux: bool = False):
-        h = self.encode(obs)
-        aux: Optional[Dict] = None
+    @property
+    def memory_size(self) -> int:
+        """Длина памяти дрона: состояние GRU + услышанное на прошлом шаге (если есть связь)."""
+        return self.hidden * (2 if self.comm is not None else 1) if self.memory else 0
+
+    def step(self, obs: Dict[str, torch.Tensor], mem: Optional[torch.Tensor]):
+        """Один шаг роя с памятью: (логиты, aux, новая память). mem (..., N, memory_size) или None — пустая."""
+        x = self.encode(obs)
+        if not self.memory:
+            h, aux = x, None
+            if self.comm is not None:
+                h, aux = self.comm(h, obs["pos"], obs["active"])
+            return self.head(h), aux, None
+        if mem is None:
+            mem = x.new_zeros(*x.shape[:-1], self.memory_size)
+        state, heard = mem[..., :self.hidden], mem[..., self.hidden:]
+        inp = torch.cat([x, heard.to(x.dtype)], -1) if self.comm is not None else x
+        m = self.gru(inp.flatten(0, -2).float(), state.flatten(0, -2).float()).view(*x.shape[:-1], -1)
+        m = m * obs["active"][..., None]                      # выбывший дрон ничего не помнит
+        base = x + self.mem_out(m.to(x.dtype))
+        h, aux = base, None
         if self.comm is not None:
-            h, aux = self.comm(h, obs["pos"], obs["active"])
-        logits = self.head(h)
+            h, aux = self.comm(base, obs["pos"], obs["active"])
+            new_mem = torch.cat([m.float(), (h - base).float()], -1)
+        else:
+            new_mem = m.float()
+        return self.head(h), aux, new_mem
+
+    def forward(self, obs: Dict[str, torch.Tensor], return_aux: bool = False):
+        logits, aux, _ = self.step(obs, None)
         return (logits, aux) if return_aux else logits
+
+
+def init_memory(actor: nn.Module, n_envs: int, n_drones: int, device) -> Optional[torch.Tensor]:
+    """Пустая память роя (None, если у мозга памяти нет)."""
+    size = getattr(actor, "memory_size", 0)
+    return torch.zeros(n_envs, n_drones, size, device=device) if size else None
+
+
+def policy_step(actor: nn.Module, obs: Dict[str, torch.Tensor], mem: Optional[torch.Tensor]):
+    """Шаг любого мозга: (логиты, aux, память). У мозга без памяти память всегда None."""
+    if getattr(actor, "memory", False):
+        return actor.step(obs, mem)
+    logits, aux = actor(obs, return_aux=True)
+    return logits, aux, None
+
+
+def forget_done(mem: Optional[torch.Tensor], done: torch.Tensor) -> Optional[torch.Tensor]:
+    """Миры, где эпизод закончился, начинаются заново — их память стирается."""
+    return None if mem is None else mem * (~done.bool())[:, None, None]
 
 
 class Critic(nn.Module):

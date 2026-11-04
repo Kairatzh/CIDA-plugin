@@ -23,6 +23,7 @@ import torch
 from torch.distributions import Categorical
 
 from cida_swarm.demo import load_actor
+from cida_swarm.policy import forget_done, init_memory, policy_step
 from cida_swarm.rescue import RescueConfig, RescueEnv
 from cida_swarm.train import autocast
 
@@ -65,14 +66,16 @@ def diagnose(actor, cfg: RescueConfig, n_envs: int, device, seed: int = 12345, m
     env = _TracedEnv(cfg, device, seed=seed)
     obs = env.reset()
     env.tracing = True
+    mem = init_memory(actor, n_envs, cfg.n_drones, device)
     radius = None
     if mute and actor.comm is not None:
         radius, actor.comm.radius = actor.comm.radius, 0.0      # никто никого не слышит
     try:
         for _ in range(cfg.max_steps):
             with autocast(device):
-                logits = actor(obs)
-            obs, _, _, _ = env.step(Categorical(logits=logits.float()).sample())
+                logits, _, mem = policy_step(actor, obs, mem)
+            obs, _, done, _ = env.step(Categorical(logits=logits.float()).sample())
+            mem = forget_done(mem, done)
             if bool(env.done_once.all()):
                 break
     finally:
