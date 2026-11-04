@@ -184,6 +184,27 @@ class TestRescueBrain:
         assert not attn.alpha.requires_grad and attn.alpha == 0
         assert cida.alpha.requires_grad
 
+    def test_radio_covers_building_and_knows_direction(self):
+        env = make_env()
+        comm = RescueActor(env.cfg, hidden=16, comm="cida").comm
+        h = torch.randn(1, 3, 16)
+        pos = torch.tensor([[[0.0, 0.0], [1.0, 1.0], [1.0, 0.0]]])   # противоположные углы здания
+        _, aux = comm(h, pos, torch.ones(1, 3, dtype=torch.bool))
+        assert (aux["attn"][0].sum(-1) > 0.99).all()                  # каждый слышит остальных
+        captured = {}
+        comm.o.register_forward_hook(lambda m, inp, out: captured.update(x=inp[0]))
+        comm(h, pos, torch.ones(1, 3, dtype=torch.bool))
+        toward = captured["x"][0, 0, -2:]
+        assert (toward > 0).all()                                     # дрону в (0,0) говорящие — вверх-вправо
+
+    def test_finetune_starts_as_the_old_swarm(self):
+        env = make_env()
+        base = RescueActor(env.cfg, hidden=16, comm="none")
+        ft = RescueActor(env.cfg, hidden=16, comm="cida")
+        ft.load_state_dict(base.state_dict(), strict=False)
+        obs = env.observe()
+        assert torch.allclose(base(obs), ft(obs))
+
     def test_belief_loss_does_not_move_features(self):
         env = make_env()
         actor = RescueActor(env.cfg, hidden=16, comm="cida")

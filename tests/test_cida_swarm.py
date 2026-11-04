@@ -249,7 +249,7 @@ class TestCidaComm:
         actor = Actor(env.cfg, hidden=32, comm="cida")
         logits, aux = actor(obs, return_aux=True)
         (logits.sum() + sum(b.sum() for b in aux["beliefs"])).backward()
-        assert actor.comm.o.weight.grad.abs().sum() > 0
+        assert actor.comm.o[-1].weight.grad.abs().sum() > 0
         assert actor.comm.belief.weight.grad.abs().sum() > 0
 
     def test_invalid_comm(self):

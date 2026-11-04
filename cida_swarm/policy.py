@@ -78,8 +78,10 @@ class CidaComm(nn.Module):
     Раунд связи: дрон слушает соседей в радиусе связи; вес соседа = обычное внимание
     + alpha · расхождение их убеждений (средняя разница вероятностей). Так новость от дрона,
     который знает то, чего не знает слушатель, не тонет в хоре согласных — это защита от эхо-камеры.
-    Выход связи добавляется к признакам дрона через проекцию с нулевой инициализацией:
-    в начале обучения рой ведёт себя как без связи и учится пользоваться ею постепенно.
+    К услышанному добавляется направление на говорящих (взвешенное вниманием смещение до них):
+    без него «держу тяжёлого, нужна помощь» не говорит, куда лететь.
+    Услышанное вместе со своими признаками проходит через небольшую сеть, последний слой которой
+    инициализирован нулями: в начале обучения рой ведёт себя как без связи и учится пользоваться ею постепенно.
     """
 
     def __init__(self, hidden: int, cells: int, d_comm: int = 64, rounds: int = 2, radius: float = 0.3,
@@ -95,9 +97,9 @@ class CidaComm(nn.Module):
             self.alpha = nn.Parameter(torch.tensor(2.0))
         else:
             self.register_buffer("alpha", torch.zeros(()))
-        self.o = nn.Linear(d_comm, hidden)
-        nn.init.zeros_(self.o.weight)
-        nn.init.zeros_(self.o.bias)
+        self.o = nn.Sequential(nn.Linear(hidden + d_comm + 2, hidden), nn.ReLU(), nn.Linear(hidden, hidden))
+        nn.init.zeros_(self.o[-1].weight)
+        nn.init.zeros_(self.o[-1].bias)
 
     def forward(self, h: torch.Tensor, pos: torch.Tensor, active: torch.Tensor):
         """
@@ -105,7 +107,8 @@ class CidaComm(nn.Module):
         Возвращает новые признаки и словарь: логиты убеждений после каждого раунда, внимание последнего раунда.
         """
         n = h.shape[-2]
-        near = torch.cdist(pos.float(), pos.float()) < self.radius
+        pos = pos.float()
+        near = torch.cdist(pos, pos) < self.radius
         eye = torch.eye(n, dtype=torch.bool, device=h.device)
         can_hear = near & active[..., None, :] & active[..., :, None] & ~eye        # (..., N, N)
         has_any = can_hear.any(-1, keepdim=True)
@@ -121,7 +124,9 @@ class CidaComm(nn.Module):
             q, k, v = self.q(h), self.k(msg_in), self.v(msg_in)
             scores = (q @ k.transpose(-1, -2)).float() / math.sqrt(self.d_comm) + self.alpha * disagreement
             attn = torch.softmax(scores.masked_fill(~can_hear, -1e9), -1) * has_any
-            h = h + self.o((attn.to(v.dtype) @ v))
+            heard = attn.to(v.dtype) @ v
+            toward = (attn @ pos - pos * has_any).to(h.dtype)                        # куда лететь к говорящим
+            h = h + self.o(torch.cat([h, heard, toward], -1))
         beliefs.append(self.belief(h.detach()))
         return h, {"beliefs": beliefs, "attn": attn}
 
@@ -174,7 +179,7 @@ class RescueActor(nn.Module):
     """
 
     def __init__(self, env_cfg: RescueConfig, hidden: int = 256, comm: str = "none",
-                 comm_radius: float = 0.35, comm_rounds: int = 2):
+                 comm_radius: float = 1.5, comm_rounds: int = 2):
         super().__init__()
         if comm not in COMM_TYPES:
             raise ValueError(f"comm должен быть одним из {COMM_TYPES}, а не {comm}")

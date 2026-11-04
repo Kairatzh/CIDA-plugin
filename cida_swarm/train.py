@@ -165,7 +165,9 @@ def train(args) -> Dict:
     env_cls, actor_cls, _ = WORLDS[args.world]
     env = env_cls(env_cfg, device, seed=args.seed)
     success_key = env.SUCCESS
-    actor_kwargs = {"hidden": args.hidden, "comm": args.comm, "comm_radius": args.comm_radius,
+    # радиус связи: в поиске — соседи; в здании — радиосеть на всё здание (иначе дрон слышит лишь тех, кого и так видит)
+    comm_radius = args.comm_radius if args.comm_radius is not None else (1.5 if args.world == "rescue" else 0.3)
+    actor_kwargs = {"hidden": args.hidden, "comm": args.comm, "comm_radius": comm_radius,
                     "comm_rounds": args.comm_rounds}
     actor = actor_cls(env_cfg, **actor_kwargs).to(device)
     critic = Critic(env_cls.state_dim(env_cfg)).to(device)
@@ -181,8 +183,13 @@ def train(args) -> Dict:
         print(f"[cida-swarm] init from {args.init_from}: новые модули {sorted({k.split('.')[0] for k in missing}) or '—'}, "
               f"критик {'загружен' if 'critic' in ckpt else 'с нуля (разогрев ' + str(args.critic_warmup) + ' итераций)'}",
               flush=True)
-    params = list(actor.parameters()) + list(critic.parameters())
-    opt = torch.optim.Adam(params, lr=args.lr, eps=1e-5)
+    # новые модули дообучения учатся с нуля, поэтому им шаг крупнее, чем уже обученному рою
+    new_names = set(missing) if args.init_from else set()
+    new = [p for k, p in actor.named_parameters() if k in new_names]
+    old = [p for k, p in actor.named_parameters() if k not in new_names] + list(critic.parameters())
+    groups = [{"params": old, "lr_mult": 1.0}] + ([{"params": new, "lr_mult": args.new_lr_mult}] if new else [])
+    opt = torch.optim.Adam(groups, lr=args.lr, eps=1e-5)
+    params = old + new
     run_actor, run_critic = actor, critic
     if args.compile:
         print("[cida-swarm] torch.compile: первые итерации займут пару минут на компиляцию", flush=True)
@@ -211,7 +218,7 @@ def train(args) -> Dict:
     for it in range(1, iters + 1):
         lr = args.lr * (1.0 - (it - 1) / iters)
         for g in opt.param_groups:
-            g["lr"] = lr
+            g["lr"] = lr * g["lr_mult"]
 
         # 1) сбор опыта
         t_start = _sync(device)
@@ -374,10 +381,13 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--comm", choices=["none", "attn", "cida"], default="none",
                     help="связь: none — нет, attn — обычное внимание, cida — внимание со смещением разногласием")
-    ap.add_argument("--comm-radius", type=float, default=0.3, help="радиус связи в долях поля")
+    ap.add_argument("--comm-radius", type=float, default=None,
+                    help="радиус связи в долях поля (по умолчанию: поиск 0.3, здание 1.5 — всё здание)")
     ap.add_argument("--comm-rounds", type=int, default=2)
     ap.add_argument("--belief-coef", type=float, default=0.1)
     ap.add_argument("--init-from", default=None, help="model.pt готового роя для дообучения")
+    ap.add_argument("--new-lr-mult", type=float, default=10.0,
+                    help="во сколько раз больше шаг обучения у новых модулей при дообучении")
     ap.add_argument("--critic-warmup", type=int, default=0, help="итераций, когда учится только критик")
     ap.add_argument("--total-steps", type=float, default=None, help="бюджет шагов дронов; задаёт число итераций")
     ap.add_argument("--iters", type=int, default=500)
