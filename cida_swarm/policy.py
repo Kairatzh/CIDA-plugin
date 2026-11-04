@@ -25,6 +25,7 @@ import torch.nn as nn
 from .env import DET_FEATURES, N_ACTIONS, SELF_FEATURES, EnvConfig
 from .rescue import COARSE_CHANNELS as RESCUE_COARSE_CHANNELS
 from .rescue import N_ACTIONS as RESCUE_N_ACTIONS
+from .rescue import ROLE_DIM as RESCUE_ROLE_DIM
 from .rescue import SELF_FEATURES as RESCUE_SELF_FEATURES
 from .rescue import WINDOW_CHANNELS as RESCUE_WINDOW_CHANNELS
 from .rescue import RescueConfig
@@ -182,7 +183,7 @@ class RescueActor(nn.Module):
     """
 
     def __init__(self, env_cfg: RescueConfig, hidden: int = 256, comm: str = "none",
-                 comm_radius: float = 1.5, comm_rounds: int = 2, memory: bool = False):
+                 comm_radius: float = 1.5, comm_rounds: int = 2, memory: bool = False, roles: bool = False):
         super().__init__()
         if comm not in COMM_TYPES:
             raise ValueError(f"comm должен быть одним из {COMM_TYPES}, а не {comm}")
@@ -198,6 +199,13 @@ class RescueActor(nn.Module):
         self.trunk = nn.Sequential(nn.Linear(3 * hidden, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU())
         self.comm = make_comm(comm, hidden, env_cfg.coarse ** 2, comm_rounds, comm_radius)
         self.memory, self.hidden = memory, hidden
+        self.role_enc = None
+        if roles:
+            # случайная роль на эпизод разбивает симметрию: одинаковые мозги могут разойтись по разным делам;
+            # нулевая инициализация — дообучение стартует с прежнего поведения
+            self.role_enc = nn.Linear(RESCUE_ROLE_DIM, hidden)
+            nn.init.zeros_(self.role_enc.weight)
+            nn.init.zeros_(self.role_enc.bias)
         if memory:
             # память видит восприятие и то, что дрон услышал на прошлом шаге
             self.gru = nn.GRUCell(hidden * (2 if self.comm is not None else 1), hidden)
@@ -212,7 +220,10 @@ class RescueActor(nn.Module):
     def encode(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
         w = (obs["window"].float() / self.scale).flatten(-2)
         c = (obs["coarse"].float() / self.block_cells).flatten(-2)
-        return self.trunk(torch.cat([self.win_enc(w), self.coarse_enc(c), self.self_enc(obs["self"])], -1))
+        x = self.trunk(torch.cat([self.win_enc(w), self.coarse_enc(c), self.self_enc(obs["self"])], -1))
+        if self.role_enc is not None:
+            x = x + self.role_enc(obs["role"].to(x.dtype))
+        return x
 
     @property
     def memory_size(self) -> int:

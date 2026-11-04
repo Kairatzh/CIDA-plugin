@@ -142,7 +142,7 @@ def build_env_config(args):
             n_envs=args.n_envs, n_drones=args.n_drones, min_drones=args.min_drones, n_victims=args.n_victims,
             max_steps=args.max_steps, difficulty_min=args.difficulty_min, difficulty_max=args.difficulty_max,
             share_map=args.share_coverage, route_hint=not args.no_route_hint, hidden_weight=args.hidden_weight,
-            hazard_chase=args.hazard_chase,
+            hazard_chase=args.hazard_chase, penalty_crowd=args.crowd_penalty,
         )
     return EnvConfig(
         n_envs=args.n_envs, n_drones=args.n_drones, min_drones=args.min_drones, n_targets=args.n_targets,
@@ -176,6 +176,10 @@ def train(args) -> Dict:
         if args.world != "rescue":
             raise ValueError("--memory пока есть только в мире rescue")
         actor_kwargs["memory"] = True
+    if args.roles:
+        if args.world != "rescue":
+            raise ValueError("--roles пока есть только в мире rescue")
+        actor_kwargs["roles"] = True
     actor = actor_cls(env_cfg, **actor_kwargs).to(device)
     critic = Critic(env_cls.state_dim(env_cfg)).to(device)
     if args.init_from:
@@ -183,7 +187,7 @@ def train(args) -> Dict:
         # поэтому в начале рой ведёт себя ровно как исходный и учится только новому
         ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
         missing, unexpected = actor.load_state_dict(ckpt["actor"], strict=False)
-        if unexpected or any(not k.startswith(("comm.", "gru.", "mem_out.")) for k in missing):
+        if unexpected or any(not k.startswith(("comm.", "gru.", "mem_out.", "role_enc.")) for k in missing):
             raise ValueError(f"несовместимый чекпойнт {args.init_from}: missing={missing}, unexpected={unexpected}")
         if "critic" in ckpt:
             critic.load_state_dict(ckpt["critic"])
@@ -417,10 +421,13 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--no-route-hint", action="store_true", help="rescue: без готовой дорожки к выходу")
     ap.add_argument("--hidden-weight", action="store_true", help="rescue: вес человека знает только держащий")
     ap.add_argument("--hazard-chase", type=float, default=0.0, help="rescue: доля ходов охоты опасного человека")
+    ap.add_argument("--crowd-penalty", type=float, default=0.0,
+                    help="rescue: штраф за шаг свободному дрону, прижавшемуся к другому свободному")
     ap.add_argument("--curriculum", action="store_true", help="rescue: чаще уровни с успехом около половины")
     # модель и PPO
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--memory", action="store_true", help="rescue: у дрона есть память (GRU)")
+    ap.add_argument("--roles", action="store_true", help="rescue: случайная роль дрона на эпизод")
     ap.add_argument("--comm", choices=["none", "attn", "cida"], default="none",
                     help="связь: none — нет, attn — обычное внимание, cida — внимание со смещением разногласием")
     ap.add_argument("--comm-radius", type=float, default=None,

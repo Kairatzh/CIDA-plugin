@@ -241,6 +241,30 @@ class TestNoHints:
         mem = forget_done(mem, torch.tensor([True, False, False, False]))
         assert mem[0].abs().sum() == 0 and mem[1].abs().sum() > 0
 
+    def test_each_drone_gets_its_own_role(self):
+        env = make_env()
+        role = env.observe()["role"]
+        assert role.shape == (4, 3, 4) and not torch.allclose(role[0, 0], role[0, 1])
+
+    def test_crowding_is_penalised_only_for_idle_herds(self):
+        env = make_env(penalty_crowd=1.0)
+        place(env, 0, drones=[(6, 2), (7, 2), (13, 13)], victim=(13, 9))
+        _, reward, _, _ = act(env, 0, [STAY, STAY, STAY])
+        assert env.last["crowded"][0].tolist() == [True, True, False] and reward[0] < -1.5   # два штрафа по 1.0 минус мелкие награды за находку
+        place(env, 0, drones=[(6, 2), (6, 2), (13, 13)], victim=(6, 2), weight=3)
+        act(env, 0, [STAY, STAY, STAY])
+        assert not env.last["crowded"][0, :2].any()                  # вдвоём держат человека — это работа
+        place(env, 0, drones=[(1, 1), (2, 2), (13, 13)], victim=(13, 9))
+        act(env, 0, [STAY, STAY, STAY])
+        assert not env.last["crowded"][0].any()                       # у входа тесно всегда
+
+    def test_role_starts_silent_for_warm_start(self):
+        env = make_env()
+        base = RescueActor(env.cfg, hidden=16)
+        ft = RescueActor(env.cfg, hidden=16, roles=True)
+        ft.load_state_dict(base.state_dict(), strict=False)
+        assert torch.allclose(base(env.observe()), ft(env.observe()))
+
     def test_curriculum_probs_pick_levels(self):
         env = make_env(n_envs=64, difficulty_min=1, difficulty_max=4)
         env.level_probs = torch.tensor([0.0, 0.0, 0.0, 1.0])
@@ -272,7 +296,8 @@ def test_diagnosis_splits_every_victim_into_one_cause(mute):
 
 def test_memory_swarm_trains_without_hints(tmp_path):
     result = train(parse_args(RESCUE_ARGS + ["--memory", "--comm", "cida", "--no-route-hint", "--hidden-weight",
-                                             "--hazard-chase", "0.5", "--curriculum", "--iters", "5",
+                                             "--hazard-chase", "0.5", "--curriculum", "--roles", "--crowd-penalty", "0.001",
+                                             "--iters", "5",
                                              "--eval-every", "5", "--out", str(tmp_path / "mem")]))
     assert 0.0 <= result["best"]["rescued_frac"] <= 1.0
     from cida_swarm.demo import build

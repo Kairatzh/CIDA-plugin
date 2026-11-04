@@ -17,7 +17,11 @@ rescue.py — мир «спасательная миссия» (CIDA-Rescue): р
     * route_hint=False — нет готовой «дорожки к выходу»: путь назад надо помнить самому или узнать у других;
     * hidden_weight=False → True — вес человека знает только тот, кто его держит: остальным его надо сообщить;
     * hazard_chase > 0 — опасный человек не бродит, а охотится на ближайшего дрона (сложность 4):
-      нужны тактики — обходить, отвлекать, разделяться.
+      нужны тактики — обходить, отвлекать, разделяться;
+    * penalty_crowd > 0 — свободный дрон, который жмётся к другому свободному дрону вне входа, получает штраф:
+      рой не должен ходить толпой, когда работа требует разойтись.
+У каждого дрона на эпизод есть случайная «роль» (obs["role"]) — она разбивает симметрию одинаковых мозгов,
+чтобы дроны могли договориться, кто куда.
 
 Сложность мира d (1–4) выбирается для каждого мира случайно из [difficulty_min, difficulty_max]:
     1 — лёгкие пострадавшие (вес 1); 2 — вес 1–3; 3 — плюс завалы; 4 — плюс пожар и обрушения.
@@ -41,6 +45,7 @@ WINDOW_CHANNELS = 9               # стена, завал, пострадавш
 ROUTE_UNKNOWN = 251               # «шагов до выхода» для неисследованных клеток
 COARSE_CHANNELS = 2               # исследовано, известные стены
 SELF_FEATURES = 9
+ROLE_DIM = 4                      # случайная «роль» дрона на эпизод
 INF = 1e4
 
 
@@ -71,6 +76,7 @@ class RescueConfig:
     route_hint: bool = True       # канал «шагов до выхода» на исследованных клетках
     hidden_weight: bool = False   # вес человека виден только держащему его дрону
     hazard_chase: float = 0.0     # доля ходов, когда опасный человек идёт к ближайшему дрону
+    penalty_crowd: float = 0.0    # за шаг за каждого свободного дрона, прижавшегося к другому свободному
     refresh_every: int = 32
 
     def __post_init__(self):
@@ -134,6 +140,7 @@ class RescueEnv:
         self.dist = torch.full((b, self.cells), INF, device=dev)
         self.difficulty = torch.ones(b, dtype=torch.long, device=dev)
         self.pos = torch.zeros(b, n, 2, dtype=torch.long, device=dev)
+        self.role = torch.zeros(b, n, ROLE_DIM, device=dev)
         self.active = torch.zeros(b, n, dtype=torch.bool, device=dev)   # дрон участвует в миссии
         self.alive = torch.zeros(b, n, dtype=torch.bool, device=dev)    # и ещё не сгорел
         self.vpos = torch.zeros(b, m, 2, dtype=torch.long, device=dev)
@@ -224,6 +231,7 @@ class RescueEnv:
         dist = self._relax(torch.full((b, self.cells), INF, device=dev), free, sweeps=4 * r * r + 8)
         self._fresh = {
             "difficulty": diff, "walls": walls, "rubble": rubble, "dist": dist, "active": active, "pos": pos,
+            "role": self._rand(b, c.n_drones, ROLE_DIM) * 2 - 1,
             "vpos": self._room_cell(vroom), "vweight": vweight,
             "hpos": self._room_cell(hroom), "hazard_on": diff >= 4,
         }
@@ -247,7 +255,7 @@ class RescueEnv:
         m1, m2 = mask[:, None], mask[:, None, None]
         for name in ("walls", "rubble", "dist", "active", "vweight"):
             setattr(self, name, torch.where(m1, f[name], getattr(self, name)))
-        for name in ("pos", "vpos"):
+        for name in ("pos", "vpos", "role"):
             setattr(self, name, torch.where(m2, f[name], getattr(self, name)))
         self.difficulty = torch.where(mask, f["difficulty"], self.difficulty)
         self.hpos = torch.where(m1, f["hpos"], self.hpos)
@@ -317,6 +325,7 @@ class RescueEnv:
 
         # 3) обычное движение (в стены и завалы не входим)
         can_move = free_movers & ~self.walls.gather(1, d_idx) & (rubble_before.gather(1, d_idx) == 0)
+        pos_before = self.pos
         self.pos = torch.where((can_move | carriers)[..., None], dtarget, self.pos)
 
         # 4) пожар бродит и выводит из строя дронов рядом
@@ -361,8 +370,17 @@ class RescueEnv:
         self.touched |= on_now
         reward += c.reward_explore * self._mark_seen()
 
+        # толпа: свободные (не держат, не толкают) дроны вне входа, стоящие вплотную друг к другу
+        free = self.alive & ~holding.any(-1) & ~pushing & ~self.exit_mask[self._idx(self.pos)]
+        eye = torch.eye(c.n_drones, dtype=torch.bool, device=self.device)
+        near = (self.pos[:, :, None] - self.pos[:, None]).abs().max(-1).values <= 1
+        crowded = free & (near & free[:, None, :] & ~eye).any(-1)
+        idle = free & (self.pos == pos_before).all(-1)
+        reward -= c.penalty_crowd * crowded.sum(1).float()
+
         self.last = {"holding": holding.any(-1), "waiting": waiting.any(-1), "pushing": pushing,
-                     "carriers": carriers, "burned": burned, "cleared": cleared.sum(1), "collapse": collapse}
+                     "carriers": carriers, "burned": burned, "cleared": cleared.sum(1), "collapse": collapse,
+                     "crowded": crowded, "idle": idle, "free": free}
 
         self.t += 1
         done = (self.t >= c.max_steps) | ~self.present.any(1) | ~self.alive.any(1)
@@ -437,7 +455,7 @@ class RescueEnv:
             here_w[..., None] / 3, holding[..., None],
             (self.difficulty.float() / 4)[:, None, None].expand(b, n, 1),
         ], -1) * self.alive[..., None]
-        return {"window": window, "coarse": coarse, "self": own, "active": self.alive.clone(),
+        return {"window": window, "coarse": coarse, "self": own, "role": self.role.clone(), "active": self.alive.clone(),
                 "pos": self.pos.float() / (g - 1)}
 
     def belief_target(self) -> torch.Tensor:

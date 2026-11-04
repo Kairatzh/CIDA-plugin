@@ -8,6 +8,9 @@
   мало живых        — к концу живых дронов меньше его веса (сгорели);
   несли, не донесли — держали достаточно, но не дотащили до выхода.
 
+Ещё две доли от всех шагов живых дронов: «толпа» — свободный дрон жмётся к другому свободному вне входа
+(ходят стадом вместо того, чтобы разойтись); «стоит» — свободный дрон не сдвинулся с места.
+
 Для моделей со связью дополнительно строка «связь выключена» — те же миры, но дроны не слышат друг друга.
 Если она не хуже — рой связью не пользуется.
 
@@ -42,9 +45,16 @@ class _TracedEnv(RescueEnv):
         self.max_holders = torch.zeros(b, m, dtype=torch.long, device=self.device)
         self.done_once = torch.zeros(b, dtype=torch.bool, device=self.device)
         self.final = {k: None for k in ("present", "seen", "max_holders", "weight", "alive", "difficulty")}
+        self.drone_steps = torch.zeros(b, device=self.device)
+        self.crowd_steps = torch.zeros(b, device=self.device)
+        self.idle_steps = torch.zeros(b, device=self.device)
 
     def _reset_where(self, mask: torch.Tensor) -> None:
         if self.tracing:
+            live = (~self.done_once).float()
+            self.drone_steps += self.alive.sum(1).float() * live
+            self.crowd_steps += self.last["crowded"].sum(1).float() * live
+            self.idle_steps += self.last["idle"].sum(1).float() * live
             on = (self.pos[:, :, None] == self.vpos[:, None]).all(-1) & self.alive[..., None] & self.present[:, None]
             self.max_holders = torch.maximum(self.max_holders, on.sum(1))
             first = mask & ~self.done_once
@@ -95,6 +105,9 @@ def diagnose(actor, cfg: RescueConfig, n_envs: int, device, seed: int = 12345, m
     out = {k: float(v.sum()) / total for k, v in cause.items()}
     out["by_weight"] = {str(k): float(cause["delivered"][w == k].float().mean())
                         for k in (1, 2, 3) if bool((w == k).any())}
+    steps = env.drone_steps.sum().clamp_min(1.0)
+    out["crowded"] = float(env.crowd_steps.sum() / steps)
+    out["idle"] = float(env.idle_steps.sum() / steps)
     lvl = f["difficulty"][:, None].expand_as(w)
     out["by_level"] = {str(k): float(cause["delivered"][lvl == k].float().mean())
                        for k in range(1, 5) if bool((lvl == k).any())}
@@ -102,10 +115,11 @@ def diagnose(actor, cfg: RescueConfig, n_envs: int, device, seed: int = 12345, m
 
 
 def table(rows: List[tuple]) -> str:
-    head = ["Рой"] + [LABELS[c] for c in CAUSES] + ["вес 1", "вес 2", "вес 3"]
+    head = ["Рой"] + [LABELS[c] for c in CAUSES] + ["вес 1", "вес 2", "вес 3", "толпа", "стоит"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for label, r in rows:
         cells = [f"{r[c]:.1%}" for c in CAUSES] + [f"{r['by_weight'].get(str(k), float('nan')):.1%}" for k in (1, 2, 3)]
+        cells += [f"{r['crowded']:.1%}", f"{r['idle']:.1%}"]
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
