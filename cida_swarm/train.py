@@ -200,8 +200,19 @@ def train(args) -> Dict:
               flush=True)
     # новые модули дообучения учатся с нуля, поэтому им шаг крупнее, чем уже обученному рою
     new_names = set(missing) if args.init_from else set()
+    if args.freeze_base:
+        # «глаза и ноги» готового роя заморожены: учится только слой CIDA (память, личности, роли, радио)
+        # и выход действий, через который этот слой управляет телом
+        if not args.init_from:
+            raise ValueError("--freeze-base нужен вместе с --init-from")
+        for k, p in actor.named_parameters():
+            if k not in new_names and not k.startswith("head."):
+                p.requires_grad_(False)
+        n_train = sum(p.numel() for p in actor.parameters() if p.requires_grad)
+        print(f"[cida-swarm] база заморожена: учатся {n_train:,} из {sum(p.numel() for p in actor.parameters()):,} "
+              f"параметров мозга", flush=True)
     new = [p for k, p in actor.named_parameters() if k in new_names]
-    old = [p for k, p in actor.named_parameters() if k not in new_names] + list(critic.parameters())
+    old = [p for k, p in actor.named_parameters() if k not in new_names and p.requires_grad] + list(critic.parameters())
     groups = [{"params": old, "lr_mult": 1.0}] + ([{"params": new, "lr_mult": args.new_lr_mult}] if new else [])
     opt = torch.optim.Adam(groups, lr=args.lr, eps=1e-5)
     params = old + new
@@ -442,6 +453,8 @@ def parse_args(argv: Optional[list] = None):
     ap.add_argument("--init-from", default=None, help="model.pt готового роя для дообучения")
     ap.add_argument("--new-lr-mult", type=float, default=10.0,
                     help="во сколько раз больше шаг обучения у новых модулей при дообучении")
+    ap.add_argument("--freeze-base", action="store_true",
+                    help="при дообучении заморозить готовый рой и учить только новые модули и выход действий")
     ap.add_argument("--critic-warmup", type=int, default=0, help="итераций, когда учится только критик")
     ap.add_argument("--total-steps", type=float, default=None, help="бюджет шагов дронов; задаёт число итераций")
     ap.add_argument("--iters", type=int, default=500)

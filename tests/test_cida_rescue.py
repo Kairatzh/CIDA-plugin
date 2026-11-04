@@ -334,3 +334,15 @@ def test_rescue_train_and_finetune(tmp_path):
     out = tmp_path / "demo.html"
     write_html(data, str(out))
     assert "CIDA-Rescue" in out.read_text(encoding="utf-8")
+
+
+def test_frozen_base_trains_only_the_cida_layer(tmp_path):
+    train(parse_args(RESCUE_ARGS + ["--iters", "1", "--eval-every", "1", "--out", str(tmp_path / "base")]))
+    base = torch.load(tmp_path / "base" / "model.pt", weights_only=False)["actor"]
+    train(parse_args(RESCUE_ARGS + ["--memory", "--personas", "--roles", "--comm", "cida", "--freeze-base",
+                                    "--init-from", str(tmp_path / "base" / "model.pt"), "--iters", "2",
+                                    "--eval-every", "2", "--out", str(tmp_path / "ft")]))
+    ft = torch.load(tmp_path / "ft" / "model.pt", weights_only=False)["actor"]
+    assert torch.equal(ft["win_enc.0.weight"], base["win_enc.0.weight"])   # глаза не тронуты
+    assert torch.equal(ft["trunk.0.weight"], base["trunk.0.weight"])
+    assert not torch.equal(ft["comm.o.2.weight"], torch.zeros_like(ft["comm.o.2.weight"]))  # CIDA выучилась
