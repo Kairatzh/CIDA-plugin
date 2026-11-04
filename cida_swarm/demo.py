@@ -20,7 +20,8 @@ from typing import Dict, List, Optional
 import torch
 from torch.distributions import Categorical
 
-from .policy import RescueActor, init_memory, policy_step
+from .arena import ArenaEnv
+from .policy import RescueActor, forget_done, init_memory, policy_step
 from .rescue import RescueConfig, RescueEnv
 
 # состояния дронов для подписи
@@ -28,22 +29,32 @@ SEARCH, WAIT, CARRY, PUSH, LOST = range(5)
 
 
 def load_actor(path: str):
+    """Мозг спасателей и конфиг мира. У модели арены к мозгу прикреплены охотники (actor.hunter)."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    if ckpt.get("world") != "rescue":
+    if ckpt.get("world") not in ("rescue", "arena"):
         raise ValueError(f"{path}: это не модель спасательной миссии")
     cfg = RescueConfig(**ckpt["env_config"])
     actor = RescueActor(cfg, **ckpt["actor_kwargs"])
     actor.load_state_dict(ckpt["actor"])
+    actor.hunter = None
+    if "hunter" in ckpt:
+        h_cfg = RescueConfig(**{**cfg.to_dict(), "n_drones": cfg.n_hunters, "min_drones": 1})
+        hunter = RescueActor(h_cfg, **ckpt["actor_kwargs"])
+        hunter.load_state_dict(ckpt["hunter"])
+        object.__setattr__(actor, "hunter", hunter.eval())   # не подмодуль: не попадает в state_dict спасателей
     return actor.eval(), cfg
 
 
 @torch.no_grad()
 def record(actor: RescueActor, cfg: RescueConfig, seed: int, difficulty: int,
            n_drones: Optional[int] = None, greedy: bool = False) -> Dict:
-    cfg1 = RescueConfig(**{**cfg.to_dict(), "n_envs": 1, "difficulty_min": difficulty, "difficulty_max": difficulty})
-    env = RescueEnv(cfg1, "cpu", seed=seed)
+    cfg1 = RescueConfig(**{**cfg.to_dict(), "n_envs": 1, "difficulty_min": difficulty, "difficulty_max": difficulty,
+                           "bank_size": 0})
+    hunter = getattr(actor, "hunter", None)
+    env = (ArenaEnv if hunter is not None else RescueEnv)(cfg1, "cpu", seed=seed)
     torch.manual_seed(seed)
     obs = env.reset()
+    hmem = init_memory(hunter, 1, cfg1.n_hunters, "cpu") if hunter is not None else None
     if n_drones is not None:
         env.active[:] = torch.arange(cfg1.n_drones) < n_drones
         env.alive = env.active.clone()
@@ -69,6 +80,9 @@ def record(actor: RescueActor, cfg: RescueConfig, seed: int, difficulty: int,
                   zip(env.vpos[0].tolist(), env.vweight[0].tolist(), env.present[0].tolist())],
             "r": [[int(c), int(env.rubble[0, c])] for c in env.rubble[0].nonzero().flatten().tolist()],
             "h": env.hpos[0].tolist() if bool(env.hazard_on[0]) else None,
+            "q": ([[int(x), int(y), int(s > 0)] for (x, y), a, s in
+                   zip(env.qpos[0].tolist(), env.q_active[0].tolist(), env.q_stun[0].tolist()) if a]
+                  if hunter is not None else None),
             "s": (env.team_seen[0] & ~seen_before).nonzero().flatten().tolist(),
             "score": int(env.ep_rescued[0]),
             "ev": events,
@@ -87,7 +101,13 @@ def record(actor: RescueActor, cfg: RescueConfig, seed: int, difficulty: int,
 
         actions = logits.argmax(-1) if greedy else Categorical(logits=logits).sample()
         before_rescued, before_alive = int(env.ep_rescued[0]), env.alive[0].clone()
-        obs, _, done, info = env.step(actions)
+        if hunter is not None:
+            hlogits, _, hmem = policy_step(hunter, env.observe_hunters(), hmem)
+            h_act = hlogits.argmax(-1) if greedy else Categorical(logits=hlogits).sample()
+            before_stuns = int(env.ep_stuns[0])
+            obs, _, done, info = env.step(actions, h_act)
+        else:
+            obs, _, done, info = env.step(actions)
         if bool(done[0]):
             # мир перезапустился — фиксируем итог по info и заканчиваем
             frame_end = dict(episode["frames"][-1])
@@ -108,7 +128,9 @@ def record(actor: RescueActor, cfg: RescueConfig, seed: int, difficulty: int,
         if bool(last["collapse"][0]):
             events.append("Обрушение! Дверь завалило")
         for k in (before_alive & ~env.alive[0]).nonzero().flatten().tolist():
-            events.append(f"Дрон {k + 1} потерян в огне")
+            events.append(f"Охотник поймал дрона {k + 1}" if hunter is not None else f"Дрон {k + 1} потерян в огне")
+        if hunter is not None and int(env.ep_stuns[0]) > before_stuns:
+            events.append("Дроны вдвоём оглушили охотника!")
         waiting = last["waiting"][0].nonzero().flatten().tolist()
         if waiting and t % 10 == 0:
             events.append(f"Дрон {waiting[0] + 1} ждёт помощи у тяжёлого пострадавшего")
@@ -164,7 +186,7 @@ TEMPLATE = r"""<!doctype html>
 <style>
 :root{--bg:#0b0f17;--panel:#121826;--line:#1f2937;--text:#e5e7eb;--muted:#8b95a7;--accent:#a78bfa;
 --wall:#46536b;--floor:#182031;--fog:#0b0f17;--exit:#10b98133;--exitb:#10b981;--victim:#f43f5e;--rubble:#a16207;
---fire:#f97316;--drone:#38bdf8;--wait:#facc15;--carry:#34d399;--push:#fb923c}
+--fire:#f97316;--drone:#38bdf8;--wait:#facc15;--carry:#34d399;--push:#fb923c;--hunter:#d946ef}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{padding:22px 28px 8px;display:flex;flex-wrap:wrap;gap:16px;align-items:baseline;justify-content:space-between}
@@ -220,6 +242,7 @@ canvas{width:100%;aspect-ratio:1/1;border-radius:12px;background:var(--fog);disp
   <span><i style="background:var(--victim)"></i>пострадавший (цифра — сколько дронов нужно)</span>
   <span><i style="background:var(--rubble);border-radius:3px"></i>завал (цифра — вес)</span>
   <span><i style="background:var(--fire)"></i>пожар</span>
+  <span><i style="background:var(--hunter);border-radius:2px;transform:rotate(45deg)"></i>охотник (серый — оглушён)</span>
   <span><i style="background:var(--exitb);border-radius:3px"></i>безопасная зона</span>
   <span><i style="background:var(--accent)"></i>линия связи</span>
 </div>
@@ -296,6 +319,11 @@ function draw() {
       const grd = c.createRadialGradient(X(hx) + s / 2, Y(hy) + s / 2, 1, X(hx) + s / 2, Y(hy) + s / 2, s * (1.6 + .15 * Math.sin(t)));
       grd.addColorStop(0, 'rgba(249,115,22,.95)'); grd.addColorStop(1, 'rgba(249,115,22,0)');
       c.fillStyle = grd; c.fillRect(X(hx) - 2 * s, Y(hy) - 2 * s, 5 * s, 5 * s); }
+    if (f.q) f.q.forEach(([qx, qy, st]) => { const cx = X(qx) + s / 2, cy = Y(qy) + s / 2, r = s * .42;
+      c.fillStyle = st ? '#64748b' : css('--hunter'); c.beginPath();
+      c.moveTo(cx, cy - r); c.lineTo(cx + r, cy); c.lineTo(cx, cy + r); c.lineTo(cx - r, cy); c.closePath(); c.fill();
+      if (st) { c.fillStyle = '#fff'; c.font = `bold ${s * .38}px system-ui`; c.textAlign = 'center'; c.textBaseline = 'middle';
+        c.fillText('z', cx, cy + 1); } });
     f.v.forEach(([x, y, w, p]) => { if (!p) return;
       c.fillStyle = css('--victim'); c.beginPath(); c.arc(X(x) + s / 2, Y(y) + s / 2, s * .34, 0, 7); c.fill();
       c.fillStyle = '#fff'; c.font = `bold ${s * .42}px system-ui`; c.textAlign = 'center'; c.textBaseline = 'middle';

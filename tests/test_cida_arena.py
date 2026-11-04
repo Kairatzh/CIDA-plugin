@@ -94,3 +94,14 @@ def test_arena_self_play_trains_and_saves_both_teams(tmp_path):
     assert 0.0 <= result["final"]["rescued_frac"] <= 1.0 and "vs_first_hunters" in result["final"]
     ckpt = torch.load(tmp_path / "arena" / "model.pt", weights_only=False)
     assert ckpt["world"] == "arena" and "hunter" in ckpt
+
+
+def test_arena_demo_shows_hunters(tmp_path):
+    test_arena_self_play_trains_and_saves_both_teams(tmp_path)
+    from cida_swarm.demo import build, write_html
+    data = build([str(tmp_path / "arena" / "model_best.pt")], ["CIDA против охотников"], seeds=[1], difficulties=[3],
+                 n_drones=3, greedy=False)
+    frames = data["scenes"][0]["panels"][0]["episode"]["frames"]
+    assert frames[0]["q"] and len(frames[0]["q"][0]) == 3
+    write_html(data, str(tmp_path / "arena.html"))
+    assert "--hunter" in (tmp_path / "arena.html").read_text(encoding="utf-8")
